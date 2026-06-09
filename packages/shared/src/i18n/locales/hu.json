@@ -521,6 +521,7 @@
   "mode.exploreFullDesc": "Csak olvasható felfedezés. Írást blokkol, soha nem kér megerősítést.",
   "mode.exploreShort": "Felfedez",
   "mode.safe": "Felfedezés",
+  "model.fableDesc": "Új generációs modell összetett feladatokhoz",
   "model.haikuDesc": "Leggyorsabb a rövid válaszokhoz",
   "model.opusDesc": "Legerősebb összetett feladatokhoz",
   "model.sonnetDesc": "Ideális mindennapi feladatokhoz",

@@ -521,6 +521,7 @@
   "mode.exploreFullDesc": "読み取り専用の探索。書き込みをブロックし、確認しません。",
   "mode.exploreShort": "探索",
   "mode.safe": "探索",
+  "model.fableDesc": "複雑な作業向けの次世代モデル",
   "model.haikuDesc": "素早い回答に最速",
   "model.opusDesc": "複雑な作業に最も対応",
   "model.sonnetDesc": "日常的なタスクに最適",

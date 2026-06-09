@@ -521,6 +521,7 @@
   "mode.exploreFullDesc": "Eksploracja tylko do odczytu. Blokuje zapis, nigdy nie pyta.",
   "mode.exploreShort": "Eksploruj",
   "mode.safe": "Eksploruj",
+  "model.fableDesc": "Model nowej generacji do złożonych zadań",
   "model.haikuDesc": "Najszybszy do szybkich odpowiedzi",
   "model.opusDesc": "Najbardziej zaawansowany do złożonych zadań",
   "model.sonnetDesc": "Najlepszy do codziennych zadań",

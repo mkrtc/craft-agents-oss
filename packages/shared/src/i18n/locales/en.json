@@ -521,6 +521,7 @@
   "mode.exploreFullDesc": "Read-only exploration. Blocks writes, never prompts.",
   "mode.exploreShort": "Explore",
   "mode.safe": "Explore",
+  "model.fableDesc": "Next-generation model for complex work",
   "model.haikuDesc": "Fastest for quick answers",
   "model.opusDesc": "Most capable for complex work",
   "model.sonnetDesc": "Best for everyday tasks",
