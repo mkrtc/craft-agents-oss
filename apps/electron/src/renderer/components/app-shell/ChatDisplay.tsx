@@ -74,6 +74,7 @@ import { navigate, routes } from "@/lib/navigate"
 import { CHAT_LAYOUT } from "@/config/layout"
 import { collectFileChangesFromActivities, getFirstFileChangeIdForActivity } from "@/lib/file-changes"
 import { resolveBranchNewPanelOption } from "./branching"
+import { shouldAutoExpandTurnActivities, shouldUseCompactResponseWindow } from "./ChatDisplay.display-rules"
 import { handleErrorMessageAction } from "./error-message-actions"
 import * as storage from "@/lib/local-storage"
 
@@ -550,6 +551,7 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
   const [compactChatWindow, setCompactChatWindow] = useState(() =>
     storage.get(storage.KEYS.compactChatWindow, true)
   )
+  const [autoCollapsedActivityTurns, setAutoCollapsedActivityTurns] = useState<Set<string>>(() => new Set())
   useEffect(() => {
     const turnActivitiesKey = storage.getKeyString(storage.KEYS.turnActivitiesExpandedByDefault)
     const compactChatWindowKey = storage.getKeyString(storage.KEYS.compactChatWindow)
@@ -579,6 +581,10 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
     }
   }, [])
 
+  useEffect(() => {
+    setAutoCollapsedActivityTurns(new Set())
+  }, [session?.id])
+
   // Register as focus zone - when zone gains focus, focus the textarea
   // Guard with isFocusedPanelRef so only the focused panel responds in multi-panel layouts
   const { zoneRef, isFocused } = useFocusZone({
@@ -604,7 +610,7 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
     setExpandedActivityGroups,
     collapsedActivityGroups,
     setCollapsedActivityGroups,
-  } = useTurnCardExpansion(session?.id, turnActivitiesExpandedByDefault)
+  } = useTurnCardExpansion(session?.id, false)
 
 
   // ============================================================================
@@ -1734,6 +1740,32 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
 
                     // Assistant turns - render with TurnCard (buffered streaming)
                     const assistantUiKey = getAssistantTurnUiKey(turn, index)
+                    const isAutoCollapsedByUser = autoCollapsedActivityTurns.has(assistantUiKey)
+                    const shouldAutoExpandActivities = shouldAutoExpandTurnActivities(
+                      turnActivitiesExpandedByDefault,
+                      turn.isComplete,
+                      isAutoCollapsedByUser
+                    )
+                    const isAutoManagedActivityTurn = turnActivitiesExpandedByDefault && !turn.isComplete
+                    const isActivitiesExpanded = isAutoManagedActivityTurn
+                      ? shouldAutoExpandActivities
+                      : isTurnExpanded(assistantUiKey)
+                    const shouldCompactResponseWindow = shouldUseCompactResponseWindow(compactChatWindow, isLastResponse)
+                    const handleTurnExpandedChange = (expanded: boolean) => {
+                      if (isAutoManagedActivityTurn) {
+                        setAutoCollapsedActivityTurns(prev => {
+                          const next = new Set(prev)
+                          if (expanded) {
+                            next.delete(assistantUiKey)
+                          } else {
+                            next.add(assistantUiKey)
+                          }
+                          return next
+                        })
+                        return
+                      }
+                      toggleTurn(assistantUiKey, expanded)
+                    }
                     return (
                       <div
                         key={turnKey}
@@ -1755,14 +1787,14 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
                         intent={turn.intent}
                         isStreaming={turn.isStreaming}
                         isComplete={turn.isComplete}
-                        isExpanded={isTurnExpanded(assistantUiKey)}
-                        onExpandedChange={(expanded) => toggleTurn(assistantUiKey, expanded)}
+                        isExpanded={isActivitiesExpanded}
+                        onExpandedChange={handleTurnExpandedChange}
                         expandedActivityGroups={expandedActivityGroups}
                         onExpandedActivityGroupsChange={setExpandedActivityGroups}
-                        activityGroupsExpandedByDefault={turnActivitiesExpandedByDefault}
+                        activityGroupsExpandedByDefault={shouldAutoExpandActivities}
                         collapsedActivityGroups={collapsedActivityGroups}
                         onCollapsedActivityGroupsChange={setCollapsedActivityGroups}
-                        compactResponseWindow={compactChatWindow}
+                        compactResponseWindow={shouldCompactResponseWindow}
                         todos={turn.todos}
                         onOpenFile={onOpenFile}
                         onOpenUrl={onOpenUrl}
