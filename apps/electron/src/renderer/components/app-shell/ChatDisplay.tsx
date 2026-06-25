@@ -547,21 +547,34 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
   const [turnActivitiesExpandedByDefault, setTurnActivitiesExpandedByDefault] = useState(() =>
     storage.get(storage.KEYS.turnActivitiesExpandedByDefault, false)
   )
+  const [compactChatWindow, setCompactChatWindow] = useState(() =>
+    storage.get(storage.KEYS.compactChatWindow, true)
+  )
   useEffect(() => {
-    const settingKey = storage.getKeyString(storage.KEYS.turnActivitiesExpandedByDefault)
-    const syncValue = () => {
+    const turnActivitiesKey = storage.getKeyString(storage.KEYS.turnActivitiesExpandedByDefault)
+    const compactChatWindowKey = storage.getKeyString(storage.KEYS.compactChatWindow)
+    const syncTurnActivitiesValue = () => {
       setTurnActivitiesExpandedByDefault(storage.get(storage.KEYS.turnActivitiesExpandedByDefault, false))
     }
-    const handleChange = () => syncValue()
+    const syncCompactChatWindowValue = () => {
+      setCompactChatWindow(storage.get(storage.KEYS.compactChatWindow, true))
+    }
+    const handleTurnActivitiesChange = () => syncTurnActivitiesValue()
+    const handleCompactChatWindowChange = () => syncCompactChatWindowValue()
     const handleStorage = (event: StorageEvent) => {
-      if (event.key === settingKey || event.key === null) {
-        syncValue()
+      if (event.key === turnActivitiesKey || event.key === null) {
+        syncTurnActivitiesValue()
+      }
+      if (event.key === compactChatWindowKey || event.key === null) {
+        syncCompactChatWindowValue()
       }
     }
-    window.addEventListener(storage.EVENTS.turnActivitiesExpandedByDefaultChanged, handleChange)
+    window.addEventListener(storage.EVENTS.turnActivitiesExpandedByDefaultChanged, handleTurnActivitiesChange)
+    window.addEventListener(storage.EVENTS.compactChatWindowChanged, handleCompactChatWindowChange)
     window.addEventListener('storage', handleStorage)
     return () => {
-      window.removeEventListener(storage.EVENTS.turnActivitiesExpandedByDefaultChanged, handleChange)
+      window.removeEventListener(storage.EVENTS.turnActivitiesExpandedByDefaultChanged, handleTurnActivitiesChange)
+      window.removeEventListener(storage.EVENTS.compactChatWindowChanged, handleCompactChatWindowChange)
       window.removeEventListener('storage', handleStorage)
     }
   }, [])
@@ -1749,6 +1762,7 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
                         activityGroupsExpandedByDefault={turnActivitiesExpandedByDefault}
                         collapsedActivityGroups={collapsedActivityGroups}
                         onCollapsedActivityGroupsChange={setCollapsedActivityGroups}
+                        compactResponseWindow={compactChatWindow}
                         todos={turn.todos}
                         onOpenFile={onOpenFile}
                         onOpenUrl={onOpenUrl}
