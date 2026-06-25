@@ -4,12 +4,13 @@
  */
 
 import { spawn } from "bun";
-import { existsSync, readFileSync, statSync, mkdirSync } from "fs";
+import { copyFileSync, existsSync, readFileSync, statSync, mkdirSync, rmSync } from "fs";
 import { join } from "path";
 
 const ROOT_DIR = join(import.meta.dir, "..");
 const DIST_DIR = join(ROOT_DIR, "apps/electron/dist");
 const OUTPUT_FILE = join(DIST_DIR, "main.cjs");
+const ELECTRON_RESOURCES_DIR = join(ROOT_DIR, "apps/electron/resources");
 const INTERCEPTOR_SOURCE = join(ROOT_DIR, "packages/shared/src/unified-network-interceptor.ts");
 const INTERCEPTOR_OUTPUT = join(DIST_DIR, "interceptor.cjs");
 const SESSION_TOOLS_CORE_DIR = join(ROOT_DIR, "packages/session-tools-core");
@@ -257,6 +258,34 @@ async function buildPiAgentServer(): Promise<void> {
   console.log("✅ Pi agent server built successfully");
 }
 
+function removeServerResource(label: string, resourceName: string): void {
+  const destDir = join(ELECTRON_RESOURCES_DIR, resourceName);
+
+  rmSync(destDir, { recursive: true, force: true });
+  console.log(`⏭️  ${label} resource skipped`);
+}
+
+function stageServerResource(label: string, outputPath: string, resourceName: string): void {
+  const destDir = join(ELECTRON_RESOURCES_DIR, resourceName);
+  const destPath = join(destDir, "index.js");
+
+  if (!existsSync(outputPath)) {
+    console.error(`❌ ${label} output not found at`, outputPath);
+    process.exit(1);
+  }
+
+  rmSync(destDir, { recursive: true, force: true });
+  mkdirSync(destDir, { recursive: true });
+  copyFileSync(outputPath, destPath);
+
+  if (!existsSync(destPath)) {
+    console.error(`❌ ${label} resource was not staged at`, destPath);
+    process.exit(1);
+  }
+
+  console.log(`✅ ${label} staged at ${destPath}`);
+}
+
 // Build the WhatsApp worker (Baileys-backed subprocess spawned by WhatsAppAdapter)
 async function buildWhatsAppWorker(): Promise<void> {
   if (!existsSync(WA_WORKER_SOURCE)) {
@@ -324,9 +353,16 @@ async function main(): Promise<void> {
   // Build session server (provides session-scoped tools like SubmitPlan)
   // Depends on session-tools-core being built first
   await buildSessionServer();
+  stageServerResource("Session MCP Server", SESSION_SERVER_OUTPUT, "session-mcp-server");
 
   // Build Pi agent server (subprocess for Pi SDK sessions)
+  const hasPiAgentServer = existsSync(join(PI_AGENT_SERVER_DIR, "src"));
   await buildPiAgentServer();
+  if (hasPiAgentServer) {
+    stageServerResource("Pi Agent Server", PI_AGENT_SERVER_OUTPUT, "pi-agent-server");
+  } else {
+    removeServerResource("Pi Agent Server", "pi-agent-server");
+  }
 
   // Build unified network interceptor (CJS bundle for Node.js --require)
   await buildInterceptor();
