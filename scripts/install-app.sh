@@ -318,11 +318,31 @@ else
     APP_DIR="$HOME/.craft-agent/app"
     WRAPPER_PATH="$INSTALL_DIR/craft-agents"
     APPIMAGE_INSTALL_PATH="$APP_DIR/Craft-Agents-x64.AppImage"
+    DESKTOP_DIR="$HOME/.local/share/applications"
+    ICON_DIR="$HOME/.local/share/icons/hicolor/512x512/apps"
+    DESKTOP_FILE="$DESKTOP_DIR/craft-agents.desktop"
+    ICON_FILE="$ICON_DIR/craft-agents.png"
+
+    running_pids=""
+    while IFS= read -r line; do
+        pid="${line%% *}"
+        cmd="${line#* }"
+
+        if [ "$pid" = "$$" ] || [ "$pid" = "$PPID" ]; then
+            continue
+        fi
+
+        case "$cmd" in
+            *install-app.sh*) continue ;;
+        esac
+
+        running_pids="$running_pids $pid"
+    done < <(pgrep -af 'Craft-Agents-x64\.AppImage|/@craft-agentelectron' || true)
 
     # Kill the app if it's running
-    if pgrep -f "Craft-Agent.*AppImage" >/dev/null 2>&1; then
+    if [ -n "$running_pids" ]; then
         info "Stopping Craft Agents..."
-        pkill -f "Craft-Agent.*AppImage" 2>/dev/null || true
+        kill $running_pids 2>/dev/null || true
         sleep 2
     fi
 
@@ -371,8 +391,15 @@ done
 # Set APPIMAGE for auto-update
 export APPIMAGE="$APPIMAGE_PATH"
 
+launch_args=(--no-sandbox --disable-gpu-sandbox)
+
+if [ "${ELECTRON_OZONE_PLATFORM_HINT:-}" = "wayland" ] || { [ -z "${ELECTRON_OZONE_PLATFORM_HINT:-}" ] && { [ -n "${WAYLAND_DISPLAY:-}" ] || [ "${XDG_SESSION_TYPE:-}" = "wayland" ]; }; }; then
+    export ELECTRON_OZONE_PLATFORM_HINT=wayland
+    launch_args+=(--ozone-platform=wayland --enable-features=UseOzonePlatform)
+fi
+
 # Launch with --no-sandbox (AppImage extracts to /tmp, losing SUID on chrome-sandbox)
-exec "$APPIMAGE_PATH" --no-sandbox "$@"
+exec "$APPIMAGE_PATH" "${launch_args[@]}" "$@"
 WRAPPER_EOF
 
     chmod +x "$WRAPPER_PATH"
@@ -381,6 +408,49 @@ WRAPPER_EOF
     OLD_APPIMAGE="$INSTALL_DIR/Craft-Agents-x64.AppImage"
     [ -f "$OLD_APPIMAGE" ] && rm -f "$OLD_APPIMAGE"
 
+    # Desktop integration
+    info "Creating desktop entry..."
+    mkdir -p "$DESKTOP_DIR"
+    mkdir -p "$ICON_DIR"
+
+    ICON_EXTRACT_DIR="$(mktemp -d)"
+    if (cd "$ICON_EXTRACT_DIR" && "$APPIMAGE_INSTALL_PATH" --appimage-extract usr/share/icons/hicolor/512x512/apps >/dev/null 2>&1); then
+        EXTRACTED_ICON="$(find "$ICON_EXTRACT_DIR/squashfs-root/usr/share/icons/hicolor/512x512/apps" -maxdepth 1 -type f -name "*.png" | head -1)"
+        if [ -n "$EXTRACTED_ICON" ]; then
+            cp "$EXTRACTED_ICON" "$ICON_FILE"
+        fi
+    fi
+    rm -rf "$ICON_EXTRACT_DIR"
+
+    cat > "$DESKTOP_FILE" << DESKTOP_EOF
+[Desktop Entry]
+Name=Craft Agents
+Comment=Electron desktop app for Craft Agents
+Exec=$WRAPPER_PATH %U
+TryExec=$WRAPPER_PATH
+Terminal=false
+Type=Application
+Icon=craft-agents
+StartupWMClass=Craft Agents
+StartupNotify=true
+Categories=Utility;
+MimeType=x-scheme-handler/craftagents;
+DESKTOP_EOF
+
+    chmod 644 "$DESKTOP_FILE"
+
+    if command -v update-desktop-database >/dev/null 2>&1; then
+        update-desktop-database "$DESKTOP_DIR" >/dev/null 2>&1 || true
+    fi
+
+    if command -v xdg-desktop-menu >/dev/null 2>&1; then
+        xdg-desktop-menu forceupdate >/dev/null 2>&1 || true
+    fi
+
+    if command -v xdg-mime >/dev/null 2>&1; then
+        xdg-mime default craft-agents.desktop x-scheme-handler/craftagents >/dev/null 2>&1 || true
+    fi
+
     echo ""
     echo "─────────────────────────────────────────────────────────────────────────"
     echo ""
@@ -388,6 +458,7 @@ WRAPPER_EOF
     echo ""
     printf "%b\n" "  AppImage: ${BOLD}$APPIMAGE_INSTALL_PATH${NC}"
     printf "%b\n" "  Launcher: ${BOLD}$WRAPPER_PATH${NC}"
+    printf "%b\n" "  Desktop entry: ${BOLD}$DESKTOP_FILE${NC}"
     echo ""
     printf "%b\n" "  Run with: ${BOLD}craft-agents${NC}"
     echo ""
