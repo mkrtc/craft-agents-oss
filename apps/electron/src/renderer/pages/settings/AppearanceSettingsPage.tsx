@@ -136,6 +136,16 @@ export default function AppearanceSettingsPage() {
     storage.set(storage.KEYS.showConnectionIcons, checked)
   }, [])
 
+  const [turnActivitiesExpandedByDefault, setTurnActivitiesExpandedByDefault] = useState(() =>
+    storage.get(storage.KEYS.turnActivitiesExpandedByDefault, false)
+  )
+  const handleTurnActivitiesDefaultChange = useCallback((value: 'collapsed' | 'expanded') => {
+    const enabled = value === 'expanded'
+    setTurnActivitiesExpandedByDefault(enabled)
+    storage.set(storage.KEYS.turnActivitiesExpandedByDefault, enabled)
+    window.dispatchEvent(new CustomEvent(storage.EVENTS.turnActivitiesExpandedByDefaultChanged, { detail: enabled }))
+  }, [])
+
   // Rich tool descriptions toggle (persisted in config.json, read by SDK subprocess)
   const [richToolDescriptions, setRichToolDescriptions] = useState(true)
   useEffect(() => {
@@ -368,6 +378,19 @@ export default function AppearanceSettingsPage() {
                     checked={richToolDescriptions}
                     onCheckedChange={handleRichToolDescriptionsChange}
                   />
+                  <SettingsRow
+                    label={t("settings.appearance.turnActivities")}
+                    description={t("settings.appearance.turnActivitiesDesc")}
+                  >
+                    <SettingsSegmentedControl
+                      value={turnActivitiesExpandedByDefault ? 'expanded' : 'collapsed'}
+                      onValueChange={handleTurnActivitiesDefaultChange}
+                      options={[
+                        { value: 'collapsed', label: t("settings.appearance.turnActivitiesCollapsed") },
+                        { value: 'expanded', label: t("settings.appearance.turnActivitiesExpanded") },
+                      ]}
+                    />
+                  </SettingsRow>
                 </SettingsCard>
               </SettingsSection>
 
