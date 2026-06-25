@@ -10,6 +10,7 @@ import {
   type ThemeFile,
   type ShikiThemeConfig,
 } from '@config/theme'
+import { isLinux, isWebUI } from '@/lib/platform'
 
 export type ThemeMode = 'light' | 'dark' | 'system'
 export type FontFamily = 'inter' | 'system'
@@ -301,8 +302,15 @@ export function ThemeProvider({
       delete root.dataset.theme
     }
 
-    // Always set theme override for semi-transparent background (vibrancy effect)
-    root.dataset.themeOverride = 'true'
+    // Linux has no native backdrop material, so translucent renderer surfaces
+    // blend with the system window color instead of a vibrancy layer.
+    if (isLinux || isWebUI) {
+      delete root.dataset.themeOverride
+      root.dataset.themeOpaque = 'true'
+    } else {
+      root.dataset.themeOverride = 'true'
+      delete root.dataset.themeOpaque
+    }
   }, [effectiveColorTheme, font])
 
   // Apply dark/light class and theme-specific DOM attributes

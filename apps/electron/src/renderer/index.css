@@ -307,6 +307,16 @@ html[data-theme-override]::before {
   pointer-events: none;
 }
 
+html[data-theme-opaque]:not([data-scenic]),
+html[data-theme-opaque]:not([data-scenic]) body {
+  background: var(--background);
+}
+
+html[data-theme-opaque][data-theme-mismatch]:not([data-scenic]),
+html[data-theme-opaque][data-theme-mismatch]:not([data-scenic]) body {
+  background: var(--foreground-10);
+}
+
 /* Theme Mismatch - Solid background when theme doesn't support current mode
    e.g. dark-only theme in light mode. Uses foreground-10 for subtle contrast. */
 html[data-theme-mismatch]::before {
