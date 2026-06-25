@@ -45,6 +45,7 @@ import {
   SettingsCard,
   SettingsRow,
   SettingsMenuSelectRow,
+  SettingsSegmentedControl,
   SettingsToggle,
 } from '@/components/settings'
 import { useOnboarding } from '@/hooks/useOnboarding'
@@ -53,7 +54,14 @@ import { OnboardingWizard, type ApiSetupMethod } from '@/components/onboarding'
 import { RenameDialog } from '@/components/ui/rename-dialog'
 import { useAppShellContext } from '@/context/AppShellContext'
 import { getModelShortName, type ModelDefinition } from '@config/models'
-import { getModelsForProviderType, resolveMidStreamBehavior, type CustomEndpointApi, type MidStreamBehavior } from '@config/llm-connections'
+import {
+  getModelsForProviderType,
+  isCodexFastModeCapableConnection,
+  resolveCodexFastMode,
+  resolveMidStreamBehavior,
+  type CustomEndpointApi,
+  type MidStreamBehavior,
+} from '@config/llm-connections'
 import { toast } from 'sonner'
 
 /**
@@ -194,13 +202,28 @@ interface ConnectionRowProps {
   onReauthenticate: () => void
   onEdit: () => void
   onSetMidStreamBehavior: (behavior: MidStreamBehavior) => void
+  onSetCodexFastMode: (enabled: boolean) => void
   validationState: ValidationState
   validationError?: string
   /** True when another OAuth connection resolves to the same Anthropic account (issue #838) */
   isDuplicateAccount?: boolean
 }
 
-function ConnectionRow({ connection, isLastConnection, onRenameClick, onDelete, onSetDefault, onValidate, onReauthenticate, onEdit, onSetMidStreamBehavior, validationState, validationError, isDuplicateAccount }: ConnectionRowProps) {
+function ConnectionRow({
+  connection,
+  isLastConnection,
+  onRenameClick,
+  onDelete,
+  onSetDefault,
+  onValidate,
+  onReauthenticate,
+  onEdit,
+  onSetMidStreamBehavior,
+  onSetCodexFastMode,
+  validationState,
+  validationError,
+  isDuplicateAccount,
+}: ConnectionRowProps) {
   const { t } = useTranslation()
   const [menuOpen, setMenuOpen] = useState(false)
   const [piBaseUrl, setPiBaseUrl] = useState<string | undefined>(undefined)
@@ -287,110 +310,131 @@ function ConnectionRow({ connection, isLastConnection, onRenameClick, onDelete, 
   const oauthIdentityLine = connection.authType === 'oauth' && connection.oauthAccountEmail
     ? [connection.oauthAccountEmail, connection.oauthOrganizationName].filter(Boolean).join(' · ')
     : null
+  const supportsCodexFastMode = isCodexFastModeCapableConnection(connection)
+  const codexFastModeValue = resolveCodexFastMode(connection) ? 'fast' : 'standard'
 
   return (
-    <SettingsRow
-      label={(
-        <div className="flex flex-col gap-0.5 min-w-0">
-          <div className="flex items-center gap-1">
-            <ConnectionIcon connection={connection} size={14} />
-            <span>{connection.name}</span>
-            {connection.isDefault && (
-              <span className="inline-flex items-center h-5 px-2 text-[11px] font-medium rounded-[4px] bg-background shadow-minimal text-foreground/60">
-                {t("common.default")}
-              </span>
-            )}
-            {isDuplicateAccount && (
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <span className="inline-flex items-center" aria-label={t("settings.ai.duplicateAccount")}>
-                    <AlertTriangle className="h-3.5 w-3.5 text-amber-500" />
-                  </span>
-                </TooltipTrigger>
-                <TooltipContent>{t("settings.ai.duplicateAccount")}</TooltipContent>
-              </Tooltip>
+    <>
+      <SettingsRow
+        label={(
+          <div className="flex flex-col gap-0.5 min-w-0">
+            <div className="flex items-center gap-1">
+              <ConnectionIcon connection={connection} size={14} />
+              <span>{connection.name}</span>
+              {connection.isDefault && (
+                <span className="inline-flex items-center h-5 px-2 text-[11px] font-medium rounded-[4px] bg-background shadow-minimal text-foreground/60">
+                  {t("common.default")}
+                </span>
+              )}
+              {isDuplicateAccount && (
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <span className="inline-flex items-center" aria-label={t("settings.ai.duplicateAccount")}>
+                      <AlertTriangle className="h-3.5 w-3.5 text-amber-500" />
+                    </span>
+                  </TooltipTrigger>
+                  <TooltipContent>{t("settings.ai.duplicateAccount")}</TooltipContent>
+                </Tooltip>
+              )}
+            </div>
+            {oauthIdentityLine && (
+              <span className="text-xs text-muted-foreground truncate">{oauthIdentityLine}</span>
             )}
           </div>
-          {oauthIdentityLine && (
-            <span className="text-xs text-muted-foreground truncate">{oauthIdentityLine}</span>
-          )}
-        </div>
+        )}
+        description={getDescription()}
+      >
+        <DropdownMenu modal={false} onOpenChange={setMenuOpen}>
+          <DropdownMenuTrigger asChild>
+            <button
+              className="p-1.5 rounded-md hover:bg-foreground/[0.05] data-[state=open]:bg-foreground/[0.05] transition-colors"
+              data-state={menuOpen ? 'open' : 'closed'}
+            >
+              <MoreHorizontal className="h-4 w-4 text-muted-foreground" />
+            </button>
+          </DropdownMenuTrigger>
+          <StyledDropdownMenuContent align="end">
+            <StyledDropdownMenuItem onClick={() => runAfterMenuClose(onRenameClick)}>
+              <Pencil className="h-3.5 w-3.5" />
+              <span>{t("common.rename")}</span>
+            </StyledDropdownMenuItem>
+            {!connection.isDefault && (
+              <StyledDropdownMenuItem onClick={onSetDefault}>
+                <Star className="h-3.5 w-3.5" />
+                <span>{t("settings.ai.setAsDefault")}</span>
+              </StyledDropdownMenuItem>
+            )}
+            {connection.authType === 'oauth' ? (
+              <StyledDropdownMenuItem onClick={() => runAfterMenuClose(onReauthenticate)}>
+                <RefreshCcw className="h-3.5 w-3.5" />
+                <span>{t("settings.ai.reAuthenticate")}</span>
+              </StyledDropdownMenuItem>
+            ) : (
+              <StyledDropdownMenuItem onClick={() => runAfterMenuClose(onEdit)}>
+                <Settings2 className="h-3.5 w-3.5" />
+                <span>{t("common.edit")}</span>
+              </StyledDropdownMenuItem>
+            )}
+            <StyledDropdownMenuItem
+              onClick={onValidate}
+              disabled={validationState === 'validating'}
+            >
+              <CheckCircle2 className="h-3.5 w-3.5" />
+              <span>{t("settings.ai.validateConnection")}</span>
+            </StyledDropdownMenuItem>
+            {(() => {
+              const currentBehavior = resolveMidStreamBehavior(connection)
+              return (
+                <DropdownMenuSub>
+                  <StyledDropdownMenuSubTrigger>
+                    <MessageSquareMore className="h-3.5 w-3.5" />
+                    <span>{t("settings.ai.midStream.title")}</span>
+                  </StyledDropdownMenuSubTrigger>
+                  <StyledDropdownMenuSubContent>
+                    <StyledDropdownMenuItem onClick={() => onSetMidStreamBehavior('steer')}>
+                      <Zap className="h-3.5 w-3.5" />
+                      <span className="flex-1">{t("settings.ai.midStream.steer")}</span>
+                      {currentBehavior === 'steer' && <Check className="h-3.5 w-3.5" />}
+                    </StyledDropdownMenuItem>
+                    <StyledDropdownMenuItem onClick={() => onSetMidStreamBehavior('queue')}>
+                      <Clock className="h-3.5 w-3.5" />
+                      <span className="flex-1">{t("settings.ai.midStream.queue")}</span>
+                      {currentBehavior === 'queue' && <Check className="h-3.5 w-3.5" />}
+                    </StyledDropdownMenuItem>
+                  </StyledDropdownMenuSubContent>
+                </DropdownMenuSub>
+              )
+            })()}
+            <StyledDropdownMenuSeparator />
+            <StyledDropdownMenuItem
+              onClick={onDelete}
+              variant="destructive"
+              disabled={isLastConnection}
+            >
+              <Trash2 className="h-3.5 w-3.5" />
+              <span>{t("common.delete")}</span>
+            </StyledDropdownMenuItem>
+          </StyledDropdownMenuContent>
+        </DropdownMenu>
+      </SettingsRow>
+      {supportsCodexFastMode && (
+        <SettingsRow
+          label={t("settings.ai.codexFastMode.title")}
+          description={t("settings.ai.codexFastMode.description")}
+          className="border-t border-border/50 bg-foreground/[0.015]"
+        >
+          <SettingsSegmentedControl
+            size="sm"
+            value={codexFastModeValue}
+            onValueChange={(value) => onSetCodexFastMode(value === 'fast')}
+            options={[
+              { value: 'standard', label: t("settings.ai.codexFastMode.standard") },
+              { value: 'fast', label: t("settings.ai.codexFastMode.fast") },
+            ]}
+          />
+        </SettingsRow>
       )}
-      description={getDescription()}
-    >
-      <DropdownMenu modal={false} onOpenChange={setMenuOpen}>
-        <DropdownMenuTrigger asChild>
-          <button
-            className="p-1.5 rounded-md hover:bg-foreground/[0.05] data-[state=open]:bg-foreground/[0.05] transition-colors"
-            data-state={menuOpen ? 'open' : 'closed'}
-          >
-            <MoreHorizontal className="h-4 w-4 text-muted-foreground" />
-          </button>
-        </DropdownMenuTrigger>
-        <StyledDropdownMenuContent align="end">
-          <StyledDropdownMenuItem onClick={() => runAfterMenuClose(onRenameClick)}>
-            <Pencil className="h-3.5 w-3.5" />
-            <span>{t("common.rename")}</span>
-          </StyledDropdownMenuItem>
-          {!connection.isDefault && (
-            <StyledDropdownMenuItem onClick={onSetDefault}>
-              <Star className="h-3.5 w-3.5" />
-              <span>{t("settings.ai.setAsDefault")}</span>
-            </StyledDropdownMenuItem>
-          )}
-          {connection.authType === 'oauth' ? (
-            <StyledDropdownMenuItem onClick={() => runAfterMenuClose(onReauthenticate)}>
-              <RefreshCcw className="h-3.5 w-3.5" />
-              <span>{t("settings.ai.reAuthenticate")}</span>
-            </StyledDropdownMenuItem>
-          ) : (
-            <StyledDropdownMenuItem onClick={() => runAfterMenuClose(onEdit)}>
-              <Settings2 className="h-3.5 w-3.5" />
-              <span>{t("common.edit")}</span>
-            </StyledDropdownMenuItem>
-          )}
-          <StyledDropdownMenuItem
-            onClick={onValidate}
-            disabled={validationState === 'validating'}
-          >
-            <CheckCircle2 className="h-3.5 w-3.5" />
-            <span>{t("settings.ai.validateConnection")}</span>
-          </StyledDropdownMenuItem>
-          {(() => {
-            const currentBehavior = resolveMidStreamBehavior(connection)
-            return (
-              <DropdownMenuSub>
-                <StyledDropdownMenuSubTrigger>
-                  <MessageSquareMore className="h-3.5 w-3.5" />
-                  <span>{t("settings.ai.midStream.title")}</span>
-                </StyledDropdownMenuSubTrigger>
-                <StyledDropdownMenuSubContent>
-                  <StyledDropdownMenuItem onClick={() => onSetMidStreamBehavior('steer')}>
-                    <Zap className="h-3.5 w-3.5" />
-                    <span className="flex-1">{t("settings.ai.midStream.steer")}</span>
-                    {currentBehavior === 'steer' && <Check className="h-3.5 w-3.5" />}
-                  </StyledDropdownMenuItem>
-                  <StyledDropdownMenuItem onClick={() => onSetMidStreamBehavior('queue')}>
-                    <Clock className="h-3.5 w-3.5" />
-                    <span className="flex-1">{t("settings.ai.midStream.queue")}</span>
-                    {currentBehavior === 'queue' && <Check className="h-3.5 w-3.5" />}
-                  </StyledDropdownMenuItem>
-                </StyledDropdownMenuSubContent>
-              </DropdownMenuSub>
-            )
-          })()}
-          <StyledDropdownMenuSeparator />
-          <StyledDropdownMenuItem
-            onClick={onDelete}
-            variant="destructive"
-            disabled={isLastConnection}
-          >
-            <Trash2 className="h-3.5 w-3.5" />
-            <span>{t("common.delete")}</span>
-          </StyledDropdownMenuItem>
-        </StyledDropdownMenuContent>
-      </DropdownMenu>
-    </SettingsRow>
+    </>
   )
 }
 
@@ -459,7 +503,7 @@ function WorkspaceOverrideCard({ workspace, llmConnections, onSettingsChange }: 
         description: message,
       })
     }
-  }, [workspace.id, onSettingsChange, settings])
+  }, [workspace.id, onSettingsChange, settings, t])
 
   const handleConnectionChange = useCallback((slug: string) => {
     // 'global' means use app default (clear workspace override)
@@ -940,6 +984,29 @@ export default function AiSettingsPage() {
     }
   }, [refreshLlmConnections, t])
 
+  const handleSetCodexFastMode = useCallback(async (
+    connection: LlmConnectionWithStatus,
+    enabled: boolean,
+  ) => {
+    if (!window.electronAPI) return
+    if (!isCodexFastModeCapableConnection(connection)) return
+    if (resolveCodexFastMode(connection) === enabled) return
+    try {
+      const updated = { ...connection, codexFastMode: enabled }
+      const { isAuthenticated: _a, authError: _b, isDefault: _c, ...connectionData } = updated
+      const result = await window.electronAPI.saveLlmConnection(connectionData as import('../../../shared/types').LlmConnection)
+      if (result.success) {
+        refreshLlmConnections?.()
+      } else {
+        console.error('Failed to update Codex Fast Mode:', result.error)
+        toast.error(t('settings.ai.codexFastMode.updateFailed'))
+      }
+    } catch (error) {
+      console.error('Failed to update Codex Fast Mode:', error)
+      toast.error(t('settings.ai.codexFastMode.updateFailed'))
+    }
+  }, [refreshLlmConnections, t])
+
   // Get the default connection for display
   const defaultConnection = useMemo(() => {
     return llmConnections.find(c => c.isDefault)
@@ -1133,6 +1200,7 @@ export default function AiSettingsPage() {
                         onReauthenticate={() => handleReauthenticateConnection(conn)}
                         onEdit={() => handleEditConnection(conn)}
                         onSetMidStreamBehavior={(behavior) => handleSetMidStreamBehavior(conn, behavior)}
+                        onSetCodexFastMode={(enabled) => handleSetCodexFastMode(conn, enabled)}
                         validationState={validationStates[conn.slug]?.state || 'idle'}
                         validationError={validationStates[conn.slug]?.error}
                         isDuplicateAccount={!!conn.oauthAccountUuid && duplicateAccountUuids.has(conn.oauthAccountUuid)}
