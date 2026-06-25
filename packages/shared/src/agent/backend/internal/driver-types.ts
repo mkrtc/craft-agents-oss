@@ -29,6 +29,7 @@ export interface BackendRuntimePayload extends Record<string, unknown> {
   customEndpoint?: { api: string; supportsImages?: boolean };
   /** Models registered for a custom endpoint. Strings default to 128K context; objects allow overrides. */
   customModels?: Array<string | { id: string; contextWindow?: number; supportsImages?: boolean }>;
+  codexFastMode?: boolean;
 }
 
 export interface BackendResolutionContext {

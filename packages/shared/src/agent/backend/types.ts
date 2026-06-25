@@ -42,6 +42,7 @@ export interface BackendRuntimeUpdate {
     piAuthProvider?: string;
     customEndpoint?: { api: string; supportsImages?: boolean };
     customModels?: Array<string | { id: string; contextWindow?: number; supportsImages?: boolean }>;
+    codexFastMode?: boolean;
     [key: string]: unknown;
   };
 }
