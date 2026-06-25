@@ -146,6 +146,16 @@ export default function AppearanceSettingsPage() {
     window.dispatchEvent(new CustomEvent(storage.EVENTS.turnActivitiesExpandedByDefaultChanged, { detail: enabled }))
   }, [])
 
+  const [compactChatWindow, setCompactChatWindow] = useState(() =>
+    storage.get(storage.KEYS.compactChatWindow, true)
+  )
+  const handleCompactChatWindowChange = useCallback((value: 'compact' | 'full') => {
+    const enabled = value === 'compact'
+    setCompactChatWindow(enabled)
+    storage.set(storage.KEYS.compactChatWindow, enabled)
+    window.dispatchEvent(new CustomEvent(storage.EVENTS.compactChatWindowChanged, { detail: enabled }))
+  }, [])
+
   // Rich tool descriptions toggle (persisted in config.json, read by SDK subprocess)
   const [richToolDescriptions, setRichToolDescriptions] = useState(true)
   useEffect(() => {
@@ -388,6 +398,19 @@ export default function AppearanceSettingsPage() {
                       options={[
                         { value: 'collapsed', label: t("settings.appearance.turnActivitiesCollapsed") },
                         { value: 'expanded', label: t("settings.appearance.turnActivitiesExpanded") },
+                      ]}
+                    />
+                  </SettingsRow>
+                  <SettingsRow
+                    label={t("settings.appearance.compactChatWindow")}
+                    description={t("settings.appearance.compactChatWindowDesc")}
+                  >
+                    <SettingsSegmentedControl
+                      value={compactChatWindow ? 'compact' : 'full'}
+                      onValueChange={handleCompactChatWindowChange}
+                      options={[
+                        { value: 'compact', label: t("settings.appearance.compactChatWindowCompact") },
+                        { value: 'full', label: t("settings.appearance.compactChatWindowFull") },
                       ]}
                     />
                   </SettingsRow>

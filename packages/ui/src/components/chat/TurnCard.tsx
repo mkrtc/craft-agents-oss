@@ -354,6 +354,8 @@ export interface TurnCardProps {
    *  auto-compact / WebUI mobile. Hides Copy / Markdown / Branch actions; keeps the
    *  Accept Plan dropdown when a plan is the last response. */
   compactMode?: boolean
+  /** Keep response content constrained inside a scrollable card */
+  compactResponseWindow?: boolean
   /** Callback to branch the session from a specific message */
   onBranch?: (messageId: string, options?: { newPanel?: boolean }) => void
   /** Callback to add an annotation to a response message */
@@ -1450,6 +1452,8 @@ export interface ResponseCardProps {
   /** Compact-footer layout. Hides Copy / Markdown / Branch in the response footer;
    *  keeps the Accept Plan dropdown when a plan is the last response. */
   compactMode?: boolean
+  /** Keep response content constrained inside a scrollable card */
+  compactResponseWindow?: boolean
   /** Callback to branch the session from this response */
   onBranch?: (options?: { newPanel?: boolean }) => void
   /** Callback to add annotation from selected text */
@@ -1519,7 +1523,7 @@ function clearAnnotationMarks(root: HTMLElement): void {
   annotatedInlineCodeNodes.forEach((codeNode) => {
     codeNode.removeAttribute('data-ca-annotation-inline-code')
     codeNode.style.backgroundColor = ''
-    codeNode.style.boxShadow = ''
+    codeNode.classList.remove('shadow-none')
   })
 
   const marks = root.querySelectorAll('span[data-ca-annotation-id]')
@@ -1594,7 +1598,7 @@ function applyTextHighlightRange(
     if (inlineCodeParent) {
       inlineCodeParent.setAttribute('data-ca-annotation-inline-code', 'true')
       inlineCodeParent.style.backgroundColor = annotationColorToCss(annotation.style?.color)
-      inlineCodeParent.style.boxShadow = 'none'
+      inlineCodeParent.classList.add('shadow-none')
     }
 
     const mark = document.createElement('span')
@@ -1699,6 +1703,7 @@ export function ResponseCard({
   isLastResponse = true,
   showAcceptPlan = true,
   compactMode = false,
+  compactResponseWindow = true,
   onBranch,
   onAddAnnotation,
   onRemoveAnnotation,
@@ -2473,13 +2478,29 @@ export function ResponseCard({
 
   const isCompleted = !isStreaming
   const isBuffering = isStreaming && !bufferDecision.shouldShow
+  const shouldCompactResponseWindow = compactMode || compactResponseWindow
+  const responseContentStyle: React.CSSProperties | undefined = shouldCompactResponseWindow
+    ? {
+        maxHeight: MAX_HEIGHT,
+        ...(isDarkMode ? {
+          maskImage: 'linear-gradient(to bottom, transparent 0%, black 16px, black calc(100% - 16px), transparent 100%)',
+          WebkitMaskImage: 'linear-gradient(to bottom, transparent 0%, black 16px, black calc(100% - 16px), transparent 100%)',
+        } : {}),
+      }
+    : undefined
+
+  useEffect(() => {
+    if (!shouldCompactResponseWindow && isFullscreen) {
+      setIsFullscreen(false)
+    }
+  }, [shouldCompactResponseWindow, isFullscreen])
 
   // While buffering, return null - TurnCard will show a subtle indicator instead
   if (isBuffering) {
     return null
   }
 
-  // Completed response or plan - show with max height and footer
+  // Completed response or plan - show with footer
   if (isCompleted || variant === 'plan') {
     const isPlan = variant === 'plan'
 
@@ -2487,20 +2508,20 @@ export function ResponseCard({
       <>
         <div className="bg-background shadow-minimal rounded-[8px] overflow-hidden relative group">
           {/* Fullscreen button - desktop only; compact mode keeps message chrome minimal */}
-          {!compactMode && (
-          <button
-            onClick={() => setIsFullscreen(true)}
-            className={cn(
-              "absolute top-2 right-2 p-1 rounded-[6px] transition-all z-10 select-none",
-              "opacity-0 group-hover:opacity-100",
-              "bg-background shadow-minimal",
-              "text-muted-foreground/50 hover:text-foreground",
-              "focus:outline-none focus-visible:ring-1 focus-visible:ring-ring focus-visible:opacity-100"
-            )}
-            title={t('common.viewFullscreen')}
-          >
-            <Maximize2 className="w-3.5 h-3.5" />
-          </button>
+          {!compactMode && shouldCompactResponseWindow && (
+            <button
+              onClick={() => setIsFullscreen(true)}
+              className={cn(
+                "absolute top-2 right-2 p-1 rounded-[6px] transition-all z-10 select-none",
+                "opacity-0 group-hover:opacity-100",
+                "bg-background shadow-minimal",
+                "text-muted-foreground/50 hover:text-foreground",
+                "focus:outline-none focus-visible:ring-1 focus-visible:ring-ring focus-visible:opacity-100"
+              )}
+              title={t('common.viewFullscreen')}
+            >
+              <Maximize2 className="w-3.5 h-3.5" />
+            </button>
           )}
 
           {/* Plan header - only shown for plan variant */}
@@ -2516,21 +2537,16 @@ export function ResponseCard({
             </div>
           )}
 
-          {/* Scrollable content area with subtle fade at edges (dark mode only) */}
           <div
             ref={contentRef}
             data-search-root="response"
             onMouseDown={handleSelectionPointerDown}
             onMouseUp={handleTextSelection}
-            className="pl-[22px] pr-[16px] py-3 text-sm overflow-y-auto scrollbar-hover"
-            style={{
-              maxHeight: MAX_HEIGHT,
-              // Subtle fade at top and bottom edges (16px) - only in dark mode for better contrast
-              ...(isDarkMode && {
-                maskImage: 'linear-gradient(to bottom, transparent 0%, black 16px, black calc(100% - 16px), transparent 100%)',
-                WebkitMaskImage: 'linear-gradient(to bottom, transparent 0%, black 16px, black calc(100% - 16px), transparent 100%)',
-              }),
-            }}
+            className={cn(
+              "pl-[22px] pr-[16px] py-3 text-sm",
+              shouldCompactResponseWindow ? "overflow-y-auto scrollbar-hover" : "overflow-visible"
+            )}
+            style={responseContentStyle}
           >
             <div ref={contentLayerRef} className="relative">
               <Markdown
@@ -2637,7 +2653,7 @@ export function ResponseCard({
         {/* Fullscreen overlay for reading/annotating response and plan content. */}
         <DocumentFormattedMarkdownOverlay
           content={text}
-          isOpen={isFullscreen}
+          isOpen={shouldCompactResponseWindow && isFullscreen}
           onClose={() => setIsFullscreen(false)}
           variant={isPlan ? 'plan' : undefined}
           onOpenUrl={onOpenUrl}
@@ -2662,21 +2678,16 @@ export function ResponseCard({
     <>
       <div className="bg-background shadow-minimal rounded-[8px] overflow-hidden group">
         {/* Content area - uses displayedText (throttled) for performance */}
-        {/* Subtle fade at top and bottom edges (dark mode only) */}
         <div
           ref={contentRef}
           data-search-root="response"
           onMouseDown={handleSelectionPointerDown}
           onMouseUp={handleTextSelection}
-          className="pl-[22px] pr-4 py-3 text-sm overflow-y-auto scrollbar-hover"
-          style={{
-            maxHeight: MAX_HEIGHT,
-            // Subtle fade at top and bottom edges (16px) - only in dark mode for better contrast
-            ...(isDarkMode && {
-              maskImage: 'linear-gradient(to bottom, transparent 0%, black 16px, black calc(100% - 16px), transparent 100%)',
-              WebkitMaskImage: 'linear-gradient(to bottom, transparent 0%, black 16px, black calc(100% - 16px), transparent 100%)',
-            }),
-          }}
+          className={cn(
+            "pl-[22px] pr-4 py-3 text-sm",
+            shouldCompactResponseWindow ? "overflow-y-auto scrollbar-hover" : "overflow-visible"
+          )}
+          style={responseContentStyle}
         >
           <div ref={contentLayerRef} className="relative">
             <Markdown
@@ -2828,6 +2839,7 @@ export const TurnCard = React.memo(function TurnCard({
   displayMode = 'detailed',
   animateResponse = false,
   compactMode = false,
+  compactResponseWindow = true,
   onBranch,
   onAddAnnotation,
   onRemoveAnnotation,
@@ -3201,6 +3213,7 @@ export const TurnCard = React.memo(function TurnCard({
             onAcceptWithCompact={onAcceptPlanWithCompact}
             isLastResponse={isLastResponse && index === planActivities.length - 1}
             compactMode={compactMode}
+            compactResponseWindow={compactResponseWindow}
             onBranch={onBranch ? (options?: { newPanel?: boolean }) => onBranch(planActivity.messageId ?? planActivity.id, options) : undefined}
             sendMessageKey={sendMessageKey}
             hasActiveFollowUpAnnotations={hasActiveFollowUpAnnotations}
@@ -3240,6 +3253,7 @@ export const TurnCard = React.memo(function TurnCard({
                 onAcceptWithCompact={onAcceptPlanWithCompact}
                 isLastResponse={isLastResponse}
                 compactMode={compactMode}
+                compactResponseWindow={compactResponseWindow}
                 onBranch={onBranch && response.messageId ? (options?: { newPanel?: boolean }) => onBranch(response.messageId!, options) : undefined}
                 sendMessageKey={sendMessageKey}
                 hasActiveFollowUpAnnotations={hasActiveFollowUpAnnotations}
@@ -3272,6 +3286,7 @@ export const TurnCard = React.memo(function TurnCard({
             onAcceptWithCompact={onAcceptPlanWithCompact}
             isLastResponse={isLastResponse}
             compactMode={compactMode}
+            compactResponseWindow={compactResponseWindow}
             onBranch={onBranch && response.messageId ? (options?: { newPanel?: boolean }) => onBranch(response.messageId!, options) : undefined}
             sendMessageKey={sendMessageKey}
             hasActiveFollowUpAnnotations={hasActiveFollowUpAnnotations}
@@ -3306,6 +3321,7 @@ export const TurnCard = React.memo(function TurnCard({
 
   // Re-render if compactMode changed (affects ResponseCard footer rendering)
   if (prev.compactMode !== next.compactMode) return false
+  if (prev.compactResponseWindow !== next.compactResponseWindow) return false
 
   // Re-render if annotation interaction mode changed (interactive vs tooltip-only)
   if (prev.annotationInteractionMode !== next.annotationInteractionMode) return false

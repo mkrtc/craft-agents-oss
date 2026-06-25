@@ -44,6 +44,7 @@ export const KEYS = {
   // TurnCard expansion state (persisted across session switches)
   turnCardExpansion: 'turncard-expansion',
   turnActivitiesExpandedByDefault: 'turn-activities-expanded-by-default',
+  compactChatWindow: 'compact-chat-window',
 
   // Last selected session (workspace-scoped via suffix)
   lastSelectedSessionId: 'last-selected-session-id',
@@ -64,6 +65,7 @@ export const KEYS = {
 
 export const EVENTS = {
   turnActivitiesExpandedByDefaultChanged: 'craft:turn-activities-expanded-by-default-changed',
+  compactChatWindowChanged: 'craft:compact-chat-window-changed',
 } as const
 
 export type StorageKey = typeof KEYS[keyof typeof KEYS]
