@@ -74,7 +74,7 @@ import { navigate, routes } from "@/lib/navigate"
 import { CHAT_LAYOUT } from "@/config/layout"
 import { collectFileChangesFromActivities, getFirstFileChangeIdForActivity } from "@/lib/file-changes"
 import { resolveBranchNewPanelOption } from "./branching"
-import { shouldAutoExpandTurnActivities, shouldUseCompactResponseWindow } from "./ChatDisplay.display-rules"
+import { getAutoManagedActivityTurnKey, shouldAutoExpandTurnActivities, shouldUseCompactResponseWindow } from "./ChatDisplay.display-rules"
 import { handleErrorMessageAction } from "./error-message-actions"
 import * as storage from "@/lib/local-storage"
 
@@ -1740,7 +1740,8 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
 
                     // Assistant turns - render with TurnCard (buffered streaming)
                     const assistantUiKey = getAssistantTurnUiKey(turn, index)
-                    const isAutoCollapsedByUser = autoCollapsedActivityTurns.has(assistantUiKey)
+                    const autoManagedActivityTurnKey = getAutoManagedActivityTurnKey(turn.turnId, turn.timestamp)
+                    const isAutoCollapsedByUser = autoCollapsedActivityTurns.has(autoManagedActivityTurnKey)
                     const shouldAutoExpandActivities = shouldAutoExpandTurnActivities(
                       turnActivitiesExpandedByDefault,
                       turn.isComplete,
@@ -1756,9 +1757,9 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
                         setAutoCollapsedActivityTurns(prev => {
                           const next = new Set(prev)
                           if (expanded) {
-                            next.delete(assistantUiKey)
+                            next.delete(autoManagedActivityTurnKey)
                           } else {
-                            next.add(assistantUiKey)
+                            next.add(autoManagedActivityTurnKey)
                           }
                           return next
                         })

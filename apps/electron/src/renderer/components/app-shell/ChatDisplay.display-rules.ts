@@ -6,6 +6,13 @@ export function shouldAutoExpandTurnActivities(
   return turnActivitiesExpandedByDefault && !isTurnComplete && !wasCollapsedByUser
 }
 
+export function getAutoManagedActivityTurnKey(
+  turnId: string,
+  timestamp: number
+): string {
+  return `assistant:auto:${turnId}:${timestamp}`
+}
+
 export function shouldUseCompactResponseWindow(
   compactChatWindow: boolean,
   isLastResponse: boolean

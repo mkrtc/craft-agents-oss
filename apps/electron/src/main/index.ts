@@ -107,6 +107,7 @@ import { ensureToolIcons, ensurePresetThemes } from '@craft-agent/shared/config'
 import { setBundledAssetsRoot } from '@craft-agent/shared/utils'
 import { initializeBackendHostRuntime } from '@craft-agent/shared/agent/backend'
 import { setPowerShellValidatorRoot } from '@craft-agent/shared/agent'
+import { findDeepLinkArg } from './deep-link-args'
 import { handleDeepLink } from './deep-link'
 import { BrowserPaneManager } from './browser-pane-manager'
 import { OAuthFlowStore } from '@craft-agent/shared/auth'
@@ -285,6 +286,13 @@ if (process.env.CRAFT_SERVER_URL) {
 // Must happen before app.whenReady() — Electron requires early scheme registration.
 registerThumbnailScheme()
 
+// On Windows/Linux, custom-protocol URLs are delivered as command-line args
+// on both cold start and second-instance activation. Capture the cold-start
+// URL now and process it after the app/window managers are initialized.
+if (process.platform === 'win32' || process.platform === 'linux') {
+  pendingDeepLink = findDeepLinkArg(process.argv, DEEPLINK_SCHEME) ?? null
+}
+
 // Handle deeplink on macOS (when app is already running)
 app.on('open-url', (event, url) => {
   event.preventDefault()
@@ -308,7 +316,7 @@ if (!gotTheLock) {
   app.on('second-instance', (_event, commandLine, _workingDirectory) => {
     // Someone tried to run a second instance, we should focus our window.
     // On Windows/Linux, the deeplink is in commandLine
-    const url = commandLine.find(arg => arg.startsWith(`${DEEPLINK_SCHEME}://`))
+    const url = findDeepLinkArg(commandLine, DEEPLINK_SCHEME)
     if (url && windowManager) {
       mainLog.info('Received deeplink from second instance:', url)
       handleDeepLink(url, windowManager, moduleSink ?? undefined, moduleClientResolver ?? undefined).catch(err => {

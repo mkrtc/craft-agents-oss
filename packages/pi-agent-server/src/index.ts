@@ -975,6 +975,7 @@ async function queryLlm(request: LLMQueryRequest): Promise<LLMQueryResult> {
     };
 
     const { session: ephemeralSession } = await createAgentSession(ephemeralOptions);
+    installCodexFastModePayloadHook(ephemeralSession);
 
     // Pi SDK ignores options.model for ephemeral sessions (same issue as options.tools).
     // Explicitly set the model after creation to ensure the mini model is used.

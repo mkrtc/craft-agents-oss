@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import {
+  getAutoManagedActivityTurnKey,
   shouldAutoExpandTurnActivities,
   shouldUseCompactResponseWindow,
 } from '../ChatDisplay.display-rules'
@@ -13,6 +14,14 @@ describe('ChatDisplay display rules', () => {
 
   test('does not auto-expand an active turn after the user collapses it', () => {
     expect(shouldAutoExpandTurnActivities(true, false, true)).toBe(false)
+  })
+
+  test('keys auto-managed activity collapse state independently of response message id and render index', () => {
+    const keyBeforeFinalResponse = getAutoManagedActivityTurnKey('turn-1', 123)
+    const keyAfterFinalResponseMessageIdAppears = getAutoManagedActivityTurnKey('turn-1', 123)
+
+    expect(keyAfterFinalResponseMessageIdAppears).toBe(keyBeforeFinalResponse)
+    expect(keyBeforeFinalResponse).toBe('assistant:auto:turn-1:123')
   })
 
   test('uses full-height response only for the latest response when compact chat window is disabled', () => {
