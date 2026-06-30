@@ -92,7 +92,6 @@ const LlmConnectionSchema = z.object({
   defaultModel: z.string().optional(),
   modelSelectionMode: z.enum(['automaticallySyncedFromProvider', 'userDefined3Tier']).optional(),
   customEndpoint: CustomEndpointSchema.optional(),
-  codexFastMode: z.boolean().optional(),
   createdAt: z.number(),
   // Allow additional fields (codexPath, awsRegion, gcpProjectId, etc.)
 }).passthrough();

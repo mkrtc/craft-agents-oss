@@ -116,40 +116,6 @@ describe('updateLlmConnection – customEndpoint', () => {
   })
 })
 
-describe('updateLlmConnection – Codex Fast Mode', () => {
-  it('persists Codex Fast Mode when provided in updates', () => {
-    const { runUpdate, readConnection } = setup([
-      makeConnection({
-        slug: 'chatgpt-plus',
-        providerType: 'pi',
-        authType: 'oauth',
-        piAuthProvider: 'openai-codex',
-      }),
-    ])
-
-    expect(runUpdate('chatgpt-plus', { codexFastMode: true })).toBe(true)
-    expect(readConnection('chatgpt-plus').codexFastMode).toBe(true)
-
-    expect(runUpdate('chatgpt-plus', { codexFastMode: false })).toBe(true)
-    expect(readConnection('chatgpt-plus').codexFastMode).toBe(false)
-  })
-
-  it('preserves Codex Fast Mode across unrelated updates', () => {
-    const { runUpdate, readConnection } = setup([
-      makeConnection({
-        slug: 'chatgpt-plus',
-        providerType: 'pi',
-        authType: 'oauth',
-        piAuthProvider: 'openai-codex',
-        codexFastMode: true,
-      }),
-    ])
-
-    expect(runUpdate('chatgpt-plus', { name: 'Renamed ChatGPT Plus' })).toBe(true)
-    expect(readConnection('chatgpt-plus').codexFastMode).toBe(true)
-  })
-})
-
 describe('updateLlmConnection – Anthropic OAuth identity (issue #838)', () => {
   const identity = {
     oauthAccountUuid: 'acct-uuid-123',

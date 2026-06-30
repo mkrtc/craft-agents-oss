@@ -6,8 +6,6 @@ import {
   isCompatProvider,
   isAnthropicProvider,
   isPiProvider,
-  isCodexFastModeCapableConnection,
-  resolveCodexFastMode,
   toBedrockNativeId,
   fromBedrockNativeId,
   normalizeBedrockModelId,
@@ -128,31 +126,6 @@ describe('isPiProvider', () => {
 
   it('returns false for anthropic', () => {
     expect(isPiProvider('anthropic')).toBe(false)
-  })
-})
-
-describe('Codex Fast Mode helpers', () => {
-  const codexConnection = {
-    providerType: 'pi',
-    authType: 'oauth',
-    piAuthProvider: 'openai-codex',
-  } as const
-
-  it('is available only for ChatGPT Codex OAuth connections', () => {
-    expect(isCodexFastModeCapableConnection(codexConnection)).toBe(true)
-    expect(isCodexFastModeCapableConnection({
-      ...codexConnection,
-      authType: 'api_key',
-    })).toBe(false)
-    expect(isCodexFastModeCapableConnection({
-      ...codexConnection,
-      piAuthProvider: 'openai',
-    })).toBe(false)
-  })
-
-  it('defaults to disabled when the setting is absent', () => {
-    expect(resolveCodexFastMode(codexConnection)).toBe(false)
-    expect(resolveCodexFastMode({ ...codexConnection, codexFastMode: true })).toBe(true)
   })
 })
 

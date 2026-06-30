@@ -189,9 +189,6 @@ export interface LlmConnection {
    */
   midStreamBehavior?: MidStreamBehavior;
 
-  /** Use Codex Fast Mode for supported ChatGPT Plus Codex models. */
-  codexFastMode?: boolean;
-
   // --- Resolved Anthropic OAuth identity (issue #838) ---
   // Captured from the token-exchange response; lets the UI flag two Claude
   // connections that resolve to the same underlying account. All optional and
@@ -494,20 +491,6 @@ export function resolveMidStreamBehavior(
     return connection.midStreamBehavior;
   }
   return defaultMidStreamBehavior(connection.providerType);
-}
-
-export function isCodexFastModeCapableConnection(
-  connection: Pick<LlmConnection, 'providerType' | 'authType' | 'piAuthProvider'>,
-): boolean {
-  return connection.providerType === 'pi' &&
-    connection.authType === 'oauth' &&
-    connection.piAuthProvider === 'openai-codex';
-}
-
-export function resolveCodexFastMode(
-  connection: Pick<LlmConnection, 'providerType' | 'authType' | 'piAuthProvider' | 'codexFastMode'>,
-): boolean {
-  return isCodexFastModeCapableConnection(connection) && connection.codexFastMode === true;
 }
 
 /**

@@ -1,11 +1,5 @@
 import type { AgentProvider, LlmAuthType } from '@craft-agent/shared/agent/backend'
-import {
-  isCodexFastModeCapableConnection,
-  isCompatProvider,
-  modelSupportsImages,
-  resolveCodexFastMode,
-  type LlmConnection,
-} from '@craft-agent/shared/config'
+import { isCompatProvider, modelSupportsImages, type LlmConnection } from '@craft-agent/shared/config'
 import type { FileAttachment } from '@craft-agent/shared/protocol'
 
 export interface BackendRuntimeSignatureInput {
@@ -48,10 +42,10 @@ function normalizeCustomModels(connection: LlmConnection): Array<Record<string, 
  *
  * Concretely, `update_runtime_config` (see `pi-agent.ts:requestRuntimeConfigUpdate`
  * and the matching handler at `pi-agent-server/src/index.ts:handleUpdateRuntimeConfig`)
- * carries `model, providerType, authType, baseUrl, customEndpoint, customModels,
- * codexFastMode` — but NOT `piAuthProvider`, and switching `slug`/`providerType`/
- * `authType` mid-life pulls in credential routing and provider-registry state the
- * subprocess doesn't fully reset on a runtime update.
+ * carries `model, providerType, authType, baseUrl, customEndpoint, customModels` —
+ * but NOT `piAuthProvider`, and switching `slug`/`providerType`/`authType` mid-life
+ * pulls in credential routing and provider-registry state the subprocess doesn't
+ * fully reset on a runtime update.
  */
 export function buildRestartRequiredSignature(input: BackendRuntimeSignatureInput): string {
   const { connection, provider, authType } = input
@@ -77,9 +71,6 @@ export function buildBackendRuntimeSignature(input: BackendRuntimeSignatureInput
         providerType: connection.providerType,
         authType: connection.authType,
         defaultModel: connection.defaultModel,
-        codexFastMode: isCodexFastModeCapableConnection(connection)
-          ? resolveCodexFastMode(connection)
-          : undefined,
         ...(isCompatProvider(connection.providerType)
           ? {
               baseUrl: connection.baseUrl,

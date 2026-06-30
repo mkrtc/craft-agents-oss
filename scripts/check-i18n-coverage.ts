@@ -26,6 +26,7 @@ const IGNORED_DIRS = new Set([
   'dist',
   'node_modules',
   'out',
+  'release',
 ])
 const SOURCE_EXTENSIONS = new Set(['.ts', '.tsx'])
 const PLURAL_SUFFIXES = ['zero', 'one', 'two', 'few', 'many', 'other']

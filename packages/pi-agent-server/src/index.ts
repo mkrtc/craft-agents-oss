@@ -78,7 +78,6 @@ import { resolveSearchProvider } from './tools/search/resolve-provider.ts';
 import { createSearchTool } from './tools/search/create-search-tool.ts';
 import { allowCraftMetadataProperties, stripCraftMetadata } from './craft-metadata-schema.ts';
 import { applySystemPromptOverride } from './system-prompt-override.ts';
-import { applyCodexFastModeServiceTier } from './codex-fast-mode.ts';
 
 // ============================================================
 // Types — JSONL Protocol
@@ -116,7 +115,6 @@ interface InitMessage {
   branchFromSdkTurnId?: string;
   customEndpoint?: { api: CustomEndpointApi; supportsImages?: boolean };
   customModels?: Array<string | { id: string; contextWindow?: number; supportsImages?: boolean }>;
-  codexFastMode?: boolean;
   piAuth?: { provider: string; credential: PiCredential };
 }
 
@@ -129,7 +127,6 @@ interface RuntimeConfigUpdateMessage {
   baseUrl?: string;
   customEndpoint?: { api: CustomEndpointApi; supportsImages?: boolean };
   customModels?: Array<string | { id: string; contextWindow?: number; supportsImages?: boolean }>;
-  codexFastMode?: boolean;
 }
 
 /** Messages from main process (stdin) */
@@ -518,29 +515,6 @@ function createAuthenticatedRegistry(): {
   return { authStorage, modelRegistry };
 }
 
-function installCodexFastModePayloadHook(session: AgentSession): void {
-  const previousOnPayload = session.agent.onPayload;
-
-  session.agent.onPayload = async (payload, model) => {
-    const previousResult = await previousOnPayload?.(payload, model);
-    const nextPayload = previousResult === undefined ? payload : previousResult;
-    const patchedPayload = applyCodexFastModeServiceTier(nextPayload, {
-      enabled: initConfig?.codexFastMode === true,
-      providerType: initConfig?.providerType,
-      authType: initConfig?.authType,
-      authProvider: initConfig?.piAuth?.provider,
-      model,
-    });
-
-    if (patchedPayload !== nextPayload) {
-      debugLog(`[codex-fast-mode] service_tier=priority model=${model.provider}/${model.id}`);
-      return patchedPayload;
-    }
-
-    return previousResult;
-  };
-}
-
 async function ensureSession(): Promise<AgentSession> {
   if (piSession) return piSession;
   if (!initConfig) throw new Error('Cannot create session: init not received');
@@ -689,7 +663,6 @@ async function ensureSession(): Promise<AgentSession> {
 
   // Create the session — tools flow through customTools + allowlist (see comment above).
   const { session } = await createAgentSession(sessionOptions);
-  installCodexFastModePayloadHook(session);
   piSession = session;
 
   toolsChanged = false;
@@ -975,7 +948,6 @@ async function queryLlm(request: LLMQueryRequest): Promise<LLMQueryResult> {
     };
 
     const { session: ephemeralSession } = await createAgentSession(ephemeralOptions);
-    installCodexFastModePayloadHook(ephemeralSession);
 
     // Pi SDK ignores options.model for ephemeral sessions (same issue as options.tools).
     // Explicitly set the model after creation to ensure the mini model is used.
@@ -1552,7 +1524,6 @@ async function handleUpdateRuntimeConfig(msg: RuntimeConfigUpdateMessage): Promi
       baseUrl: msg.baseUrl,
       customEndpoint: msg.customEndpoint,
       customModels: msg.customModels,
-      codexFastMode: msg.codexFastMode ?? initConfig.codexFastMode,
     };
 
     if (piModelRegistry && initConfig.baseUrl?.trim() && initConfig.customEndpoint) {

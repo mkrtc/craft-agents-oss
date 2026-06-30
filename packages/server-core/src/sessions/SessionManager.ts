@@ -20,18 +20,7 @@ import {
   type BackendHostRuntimeContext,
   type PostInitResult,
 } from '@craft-agent/shared/agent/backend'
-import {
-  getLlmConnection,
-  getLlmConnections,
-  getDefaultLlmConnection,
-  getDefaultThinkingLevel,
-  resetManagedAnthropicAuthEnvVars,
-  resolveMidStreamBehavior,
-  getPersistedUiLanguage,
-  resolveTitleLanguageName,
-  isCodexFastModeCapableConnection,
-  resolveCodexFastMode,
-} from '@craft-agent/shared/config'
+import { getLlmConnection, getLlmConnections, getDefaultLlmConnection, getDefaultThinkingLevel, resetManagedAnthropicAuthEnvVars, resolveMidStreamBehavior, getPersistedUiLanguage, resolveTitleLanguageName } from '@craft-agent/shared/config'
 import { PrivilegedExecutionBroker } from '@craft-agent/server-core/services'
 import { isValidWorkingDirectory } from '../utils/path-validation'
 import { InitGate } from '@craft-agent/server-core/domain'
@@ -2964,9 +2953,9 @@ export class SessionManager implements ISessionManager {
    *   - Restart-required (provider/auth/slug/piAuthProvider): goes straight
    *     to dispose + recreate because `update_runtime_config` cannot fully
    *     re-route credential/provider state in a live subprocess.
-   *   - In-place safe (model/baseUrl/customEndpoint/customModels/codexFastMode):
-   *     attempts `agent.updateRuntimeConfig` and falls back to dispose if the
-   *     backend can't apply the update.
+   *   - In-place safe (model/baseUrl/customEndpoint/customModels): attempts
+   *     `agent.updateRuntimeConfig` and falls back to dispose if the backend
+   *     can't apply the update.
    */
   private async tryRefreshAgentRuntime(managed: ManagedSession, reason: string): Promise<void> {
     // Serialize against any in-flight refresh on this session. The waiter
@@ -3061,9 +3050,6 @@ export class SessionManager implements ISessionManager {
           runtime: connection ? {
             baseUrl: connection.baseUrl,
             piAuthProvider: connection.piAuthProvider,
-            codexFastMode: isCodexFastModeCapableConnection(connection)
-              ? resolveCodexFastMode(connection)
-              : undefined,
             customEndpoint: connection.customEndpoint,
             customModels: connection.models?.map(model => {
               if (typeof model === 'string') return model

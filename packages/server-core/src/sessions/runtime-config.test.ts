@@ -16,31 +16,12 @@ const baseCompat: LlmConnection = {
   models: [{ id: 'gemma', supportsImages: true } as never],
 }
 
-const baseCodex: LlmConnection = {
-  slug: 'chatgpt-plus',
-  name: 'ChatGPT Plus',
-  providerType: 'pi',
-  authType: 'oauth',
-  piAuthProvider: 'openai-codex',
-  defaultModel: 'gpt-5.5',
-  createdAt: 1,
-}
-
 function sig(connection: LlmConnection) {
   return buildBackendRuntimeSignature({
     connection,
     provider: 'pi',
     authType: 'api_key',
     resolvedModel: 'gemma',
-  })
-}
-
-function codexSig(connection: LlmConnection) {
-  return buildBackendRuntimeSignature({
-    connection,
-    provider: 'pi',
-    authType: 'oauth',
-    resolvedModel: 'gpt-5.5',
   })
 }
 
@@ -75,22 +56,6 @@ describe('buildBackendRuntimeSignature', () => {
 
   it('ignores non-runtime metadata such as lastUsedAt', () => {
     expect(sig({ ...baseCompat, lastUsedAt: 1 })).toBe(sig({ ...baseCompat, lastUsedAt: 2 }))
-  })
-
-  it('changes when Codex Fast Mode changes on a ChatGPT Codex connection', () => {
-    expect(codexSig({ ...baseCodex, codexFastMode: true }))
-      .not.toBe(codexSig({ ...baseCodex, codexFastMode: false }))
-  })
-
-  it('ignores Codex Fast Mode on non-Codex connections', () => {
-    const openAiApiConnection: LlmConnection = {
-      ...baseCodex,
-      authType: 'api_key',
-      piAuthProvider: 'openai',
-    }
-
-    expect(codexSig({ ...openAiApiConnection, codexFastMode: true }))
-      .toBe(codexSig({ ...openAiApiConnection, codexFastMode: false }))
   })
 })
 

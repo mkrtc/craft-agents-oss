@@ -1,9 +1,5 @@
 import type { ProviderDriver, DriverTestConnectionArgs } from '../driver-types.ts';
 import type { ModelDefinition } from '../../../../config/models.ts';
-import {
-  isCodexFastModeCapableConnection,
-  resolveCodexFastMode,
-} from '../../../../config/llm-connections.ts';
 import { getAllPiModels, getPiModelsForAuthProvider, isDeprecatedClaudeOpus46Model } from '../../../../config/models-pi.ts';
 import { getPiProviderBaseUrl } from '../../../../config/models-pi.ts';
 
@@ -240,9 +236,6 @@ export const piDriver: ProviderDriver = {
     piAuthProvider: providerOptions?.piAuthProvider || context.connection?.piAuthProvider,
     baseUrl: context.connection?.baseUrl,
     customEndpoint: context.connection?.customEndpoint,
-    codexFastMode: context.connection && isCodexFastModeCapableConnection(context.connection)
-      ? resolveCodexFastMode(context.connection)
-      : undefined,
     customModels: context.connection?.models?.map(m => {
       if (typeof m === 'string') return m;
       const supportsImages = typeof m.supportsImages === 'boolean'

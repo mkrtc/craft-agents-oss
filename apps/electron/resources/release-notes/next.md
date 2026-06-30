@@ -4,8 +4,6 @@ This file accumulates release notes for the next unreleased version. PRs that ad
 
 ## Features
 
-- **Codex Fast Mode for ChatGPT Plus connections** — ChatGPT Plus/Codex OAuth connections can now opt into priority processing for supported Codex models. The setting is persisted per connection, updates active Pi-backed sessions without a restart, and applies the priority service tier only when the provider/model policy matches.
-
 ## Improvements
 
 - **More control over chat response density** — Appearance settings now let users auto-show model activity details only while a turn is running, and choose whether AI responses stay compact or allow the latest response to use full height. User-collapsed active activity details stay collapsed even as the final response message appears.
