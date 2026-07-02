@@ -2870,8 +2870,17 @@ export const TurnCard = React.memo(function TurnCard({
   // Track if user has toggled expansion (skip animation on initial mount)
   const hasUserToggled = useRef(false)
 
-  // Ref for scrollable activities container (to scroll to bottom on expand)
+  // Ref for scrollable activities container (to scroll to bottom on expand/live updates)
   const activitiesContainerRef = useRef<HTMLDivElement>(null)
+  const scrollActivitiesToBottom = useCallback((behavior: ScrollBehavior = 'auto') => {
+    const container = activitiesContainerRef.current
+    if (!container) return
+
+    container.scrollTo({
+      top: container.scrollHeight,
+      behavior,
+    })
+  }, [])
 
   // Track if component has mounted (enable fade-in for new activities after mount)
   const hasMounted = useRef(false)
@@ -2897,20 +2906,17 @@ export const TurnCard = React.memo(function TurnCard({
     }
   }, [turnId, isExpanded, onExpandedChange])
 
-  // Scroll to bottom of activities list when user manually expands
-  // This shows the most recent step instead of the oldest
+  // Scroll to bottom of activities list when user manually expands.
+  // This shows the most recent step instead of the oldest.
   useEffect(() => {
-    if (isExpanded && hasUserToggled.current && activitiesContainerRef.current) {
-      // Wait for expansion animation to complete (250ms) before scrolling
+    if (isExpanded && hasUserToggled.current) {
+      // Wait for expansion animation to complete (250ms) before scrolling.
       const timer = setTimeout(() => {
-        activitiesContainerRef.current?.scrollTo({
-          top: activitiesContainerRef.current.scrollHeight,
-          behavior: 'smooth'
-        })
+        scrollActivitiesToBottom('smooth')
       }, 260)
       return () => clearTimeout(timer)
     }
-  }, [isExpanded])
+  }, [isExpanded, scrollActivitiesToBottom])
 
   // Use local state for activity groups if no controlled state provided
   const [localExpandedActivityGroups, setLocalExpandedActivityGroups] = useState<Set<string>>(new Set())
@@ -2972,6 +2978,50 @@ export const TurnCard = React.memo(function TurnCard({
     () => !hasTaskSubagents ? computeLastChildSet(sortedActivities) : new Set<string>(),
     [sortedActivities, hasTaskSubagents]
   )
+
+  const latestActivity = sortedActivities[sortedActivities.length - 1]
+
+  // Keep expanded live activity details anchored to the newest item.
+  // This covers returning to a chat while "Model activity details" is already on:
+  // the TurnCard remounts expanded, so the manual-toggle scroll path does not run.
+  // Completed turns are intentionally left alone to preserve any historical scroll position.
+  useEffect(() => {
+    if (!isExpanded || isComplete || sortedActivities.length === 0) return
+
+    let animationFrame: number | undefined
+    let immediateTimer: ReturnType<typeof setTimeout> | undefined
+    const settleTimer = setTimeout(() => {
+      scrollActivitiesToBottom('auto')
+    }, 260)
+
+    if (typeof window !== 'undefined' && typeof window.requestAnimationFrame === 'function') {
+      animationFrame = window.requestAnimationFrame(() => {
+        scrollActivitiesToBottom('auto')
+      })
+    } else {
+      immediateTimer = setTimeout(() => {
+        scrollActivitiesToBottom('auto')
+      }, 0)
+    }
+
+    return () => {
+      if (animationFrame !== undefined && typeof window !== 'undefined' && typeof window.cancelAnimationFrame === 'function') {
+        window.cancelAnimationFrame(animationFrame)
+      }
+      if (immediateTimer !== undefined) {
+        clearTimeout(immediateTimer)
+      }
+      clearTimeout(settleTimer)
+    }
+  }, [
+    isExpanded,
+    isComplete,
+    sortedActivities.length,
+    latestActivity?.id,
+    latestActivity?.status,
+    latestActivity?.timestamp,
+    scrollActivitiesToBottom,
+  ])
 
   // Don't render if nothing to show and turn is complete
   if (activities.length === 0 && !response && isComplete) {
