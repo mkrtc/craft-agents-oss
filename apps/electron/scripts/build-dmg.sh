@@ -249,6 +249,33 @@ fi
 # Run electron-builder
 npx electron-builder $BUILDER_ARGS --publish never
 
+# electron-builder can still emit a multi-arch latest-mac.yml when target
+# arches are also listed in electron-builder.yml. This script stages only one
+# arch-specific SDK binary, so keep the updater manifest scoped to the arch we
+# actually packaged for this run.
+LATEST_MAC_YML="$ELECTRON_DIR/release/latest-mac.yml"
+if [ -f "$LATEST_MAC_YML" ]; then
+    TARGET_ARCH="$ARCH" node <<'NODE'
+const fs = require('fs');
+const yaml = require('js-yaml');
+
+const file = 'release/latest-mac.yml';
+const arch = process.env.TARGET_ARCH;
+const doc = yaml.load(fs.readFileSync(file, 'utf8'));
+const marker = `-${arch}.`;
+
+doc.files = (doc.files || []).filter((entry) => typeof entry.url === 'string' && entry.url.includes(marker));
+const primary = doc.files.find((entry) => entry.url.endsWith('.zip')) || doc.files[0];
+if (!primary) {
+  throw new Error(`latest-mac.yml has no files for ${arch}`);
+}
+doc.path = primary.url;
+doc.sha512 = primary.sha512;
+fs.writeFileSync(file, yaml.dump(doc, { lineWidth: -1 }));
+NODE
+    echo "Updated latest-mac.yml artifact list to ${ARCH} only"
+fi
+
 # 8. Verify the DMG was built
 # electron-builder.yml uses artifactName to output: Craft-Agents-${arch}.dmg
 DMG_NAME="Craft-Agents-${ARCH}.dmg"

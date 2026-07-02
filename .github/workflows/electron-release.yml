@@ -154,7 +154,7 @@ jobs:
             apps/electron/release/Craft-Agents-arm64.dmg
             apps/electron/release/Craft-Agents-arm64.zip
             apps/electron/release/latest-mac.yml
-            apps/electron/release/*.blockmap
+            apps/electron/release/Craft-Agents-arm64.*.blockmap
           )
 
           existing=()
