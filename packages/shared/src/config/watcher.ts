@@ -13,6 +13,7 @@
  *   - sources/{slug}/config.json, guide.md, permissions.json
  *   - skills/{slug}/SKILL.md, icon.*
  *   - sessions/{id}/session.jsonl (header metadata only)
+ *   - label-skill-bindings.json
  *   - permissions.json
  */
 
@@ -52,6 +53,7 @@ import {
 import { readSessionHeader } from '../sessions/jsonl.ts';
 import type { SessionHeader } from '../sessions/types.ts';
 import { AUTOMATIONS_CONFIG_FILE } from '../automations/constants.ts';
+import { LABEL_SKILL_BINDINGS_FILE } from '../label-skill-bindings/types.ts';
 import { loadAppTheme, loadPresetThemes, loadPresetTheme, getAppThemesDir } from './storage.ts';
 import type { ThemeOverrides, PresetTheme } from './theme.ts';
 
@@ -148,6 +150,8 @@ export interface ConfigWatcherCallbacks {
   // Label callbacks
   /** Called when labels config.json changes */
   onLabelConfigChange?: (workspaceId: string) => void;
+  /** Called when label-skill-bindings.json changes */
+  onLabelSkillBindingsConfigChange?: (workspaceId: string) => void;
 
   // Automations callbacks
   /** Called when automations.json changes */
@@ -426,6 +430,13 @@ export class ConfigWatcher {
     if (relativePath === AUTOMATIONS_CONFIG_FILE) {
       debug('[ConfigWatcher] automations config change detected:', relativePath);
       this.debounce('automations-config', () => this.handleAutomationsConfigChange());
+      return;
+    }
+
+    // Workspace-level label-skill binding config file
+    if (relativePath === LABEL_SKILL_BINDINGS_FILE) {
+      debug('[ConfigWatcher] label-skill bindings config change detected:', relativePath);
+      this.debounce('label-skill-bindings-config', () => this.handleLabelSkillBindingsConfigChange());
       return;
     }
 
@@ -730,6 +741,11 @@ export class ConfigWatcher {
   private handleSkillsDirChange(): void {
     debug('[ConfigWatcher] Skills directory changed');
 
+    // Directory add/remove events can change any cached full-skill or summary view.
+    // Clear before emitting callbacks so consumers that reload skills during the
+    // callback do not observe stale metadata.
+    invalidateSkillsCache();
+
     if (!existsSync(this.skillsDir)) {
       // Directory was deleted
       const removed = Array.from(this.knownSkills);
@@ -776,8 +792,6 @@ export class ConfigWatcher {
         }
       }
 
-      // Invalidate cache before reloading so we get fresh results
-      invalidateSkillsCache();
       const allSkills = loadAllSkills(this.workspaceDir);
       this.callbacks.onSkillsListChange?.(allSkills);
     } catch (error) {
@@ -794,6 +808,11 @@ export class ConfigWatcher {
   private handleSkillChange(slug: string): void {
     debug('[ConfigWatcher] Skill changed:', slug);
 
+    // SKILL.md/frontmatter and icon changes affect both full-skill and summary
+    // caches. Invalidate before loading/broadcasting so downstream callbacks that
+    // call loadAllSkills/listSkillSummaries see the changed metadata immediately.
+    invalidateSkillsCache();
+
     const skill = loadSkill(this.workspaceDir, slug);
     this.callbacks.onSkillChange?.(slug, skill);
 
@@ -807,6 +826,7 @@ export class ConfigWatcher {
         .then((iconPath) => {
           if (iconPath) {
             // Reload the skill with the new icon and emit another change
+            invalidateSkillsCache();
             const updatedSkill = loadSkill(this.workspaceDir, slug);
             debug('[ConfigWatcher] Icon downloaded, emitting updated skill:', slug);
             this.callbacks.onSkillChange?.(slug, updatedSkill);
@@ -936,6 +956,14 @@ export class ConfigWatcher {
   private handleLabelConfigChange(): void {
     debug('[ConfigWatcher] Labels config.json changed:', this.workspaceId);
     this.callbacks.onLabelConfigChange?.(this.workspaceId);
+  }
+
+  /**
+   * Handle label-skill-bindings.json change.
+   */
+  private handleLabelSkillBindingsConfigChange(): void {
+    debug('[ConfigWatcher] Label-skill bindings config changed:', this.workspaceId);
+    this.callbacks.onLabelSkillBindingsConfigChange?.(this.workspaceId);
   }
 
   /**

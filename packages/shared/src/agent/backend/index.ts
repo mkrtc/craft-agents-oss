@@ -39,6 +39,8 @@ export type {
   SourceChangeCallback,
   SourceActivationCallback,
   ChatOptions,
+  LabelSkillBootstrapChatEntry,
+  LabelSkillBootstrapRegisteredEvent,
   RecoveryMessage,
   SdkMcpServerConfig,
   LlmAuthType,

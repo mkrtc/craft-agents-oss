@@ -19,6 +19,8 @@ import {
   type AgentBackend,
   type BackendHostRuntimeContext,
   type PostInitResult,
+  type LabelSkillBootstrapChatEntry,
+  type LabelSkillBootstrapRegisteredEvent,
 } from '@craft-agent/shared/agent/backend'
 import { getLlmConnection, getLlmConnections, getDefaultLlmConnection, getDefaultThinkingLevel, resetManagedAnthropicAuthEnvVars, resolveMidStreamBehavior, getPersistedUiLanguage, resolveTitleLanguageName } from '@craft-agent/shared/config'
 import { PrivilegedExecutionBroker } from '@craft-agent/server-core/services'
@@ -84,14 +86,15 @@ import { CraftMcpClient, McpClientPool, McpPoolServer } from '@craft-agent/share
 import { type Session, type SessionEvent, type FileAttachment, type SendMessageOptions, type UnreadSummary, type RemoteSessionTransferPayload, type ImportRemoteSessionTransferResult, RPC_CHANNELS, generateMessageId } from '@craft-agent/shared/protocol'
 import { messageToStored, storedToMessage, type Message, type StoredAttachment, type ToolDisplayMeta } from '@craft-agent/core/types'
 import { formatPathsToRelative, formatToolInputPaths, perf, encodeIconToDataUrlAsync, getEmojiIcon, resetSummarizationClient, resolveToolIcon, readFileAttachment, selectSpreadMessages, normalizePath } from '@craft-agent/shared/utils'
-import { loadAllSkills, loadSkillBySlug, invalidateSkillsCache, type LoadedSkill } from '@craft-agent/shared/skills'
+import { loadAllSkills, loadSkillBySlug, invalidateSkillsCache, listSkillSummaries, resolveSkillFilePathBySlug, type LoadedSkill, type SkillSummary } from '@craft-agent/shared/skills'
+import { getDefaultLabelSkillBindingsConfig, loadAndValidateLabelSkillBindingsConfig, resolveActiveLabelSkillAnchors, selectLabelSkillBootstrapCandidates, type LabelSkillAnchorResolution, type LabelSkillAnchorState, type LabelSkillBootstrapCandidateSelection, type LabelSkillBootstrapStateEntry } from '@craft-agent/shared/label-skill-bindings'
 import { invalidateContextFileCache } from '@craft-agent/shared/prompts/system'
 import { getToolIconsDir, getMiniModel } from '@craft-agent/shared/config'
 import { getDefaultSummarizationModel } from '@craft-agent/shared/config/models'
 import type { SummarizeCallback } from '@craft-agent/shared/sources'
 import { type ThinkingLevel, DEFAULT_THINKING_LEVEL, normalizeThinkingLevel } from '@craft-agent/shared/agent/thinking-levels'
 import { evaluateAutoLabels } from '@craft-agent/shared/labels/auto'
-import { listLabels, loadLabelConfig } from '@craft-agent/shared/labels/storage'
+import { listLabels, listLabelsFlat, loadLabelConfig } from '@craft-agent/shared/labels/storage'
 import { extractLabelId, resolveSessionLabels } from '@craft-agent/shared/labels'
 import { ensureLabelsExist } from '@craft-agent/shared/labels/crud'
 import { loadStatusConfig } from '@craft-agent/shared/statuses/storage'
@@ -914,6 +917,8 @@ interface ManagedSession {
   tokenRefreshManager: TokenRefreshManager
   // Metadata for sessions created by automations
   triggeredBy?: { automationName?: string; event?: string; timestamp?: number }
+  // Persistent runtime state for hidden label-skill anchor revocation/supersession.
+  labelSkillAnchorState?: LabelSkillAnchorState
   // Promise that resolves when the agent instance is ready (for title gen to await)
   agentReady?: Promise<void>
   agentReadyResolve?: () => void
@@ -1097,6 +1102,20 @@ const DELTA_BATCH_INTERVAL_MS = 50  // Flush batched deltas every 50ms
 interface PendingDelta {
   delta: string
   turnId?: string
+}
+
+function extractExplicitSkillSlugsForLabelBootstrap(message: string, options?: SendMessageOptions): string[] {
+  const slugs: string[] = []
+  for (const slug of options?.skillSlugs ?? []) {
+    if (slug && !slugs.includes(slug)) slugs.push(slug)
+  }
+  const pattern = /\[skill:(?:[\w .-]+:)?([\w-]+)\]/g
+  let match: RegExpExecArray | null
+  while ((match = pattern.exec(message)) !== null) {
+    const slug = match[1]
+    if (slug && !slugs.includes(slug)) slugs.push(slug)
+  }
+  return slugs
 }
 
 export class SessionManager implements ISessionManager {
@@ -1480,6 +1499,10 @@ export class SessionManager implements ISessionManager {
           })
         }
       },
+      onLabelSkillBindingsConfigChange: () => {
+        sessionLog.info(`Label-skill bindings config changed in ${workspaceId}`)
+        this.broadcastLabelSkillBindingsChanged(workspaceId)
+      },
       onAutomationsConfigChange: () => {
         sessionLog.info(`Automations config changed in ${workspaceId}`)
         // Reload automations config via AutomationSystem
@@ -1641,6 +1664,239 @@ export class SessionManager implements ISessionManager {
     watcher?.notifyFileChange(relativePath)
   }
 
+  private resolveLabelSkillAnchorsForSession(managed: ManagedSession): LabelSkillAnchorResolution | null {
+    try {
+      const skills = listSkillSummaries(
+        managed.workspace.rootPath,
+        managed.workingDirectory,
+      ) as SkillSummary[]
+      const labels = listLabelsFlat(managed.workspace.rootPath)
+      const validation = loadAndValidateLabelSkillBindingsConfig(managed.workspace.rootPath, {
+        labels,
+        skills,
+        workspaceSlug: managed.workspace.id,
+      })
+      if (!validation.valid) {
+        sessionLog.warn(`Label-skill bindings invalid for workspace ${managed.workspace.id}: ${validation.errors.map(e => e.message).join('; ')}`)
+        // Invalid or unreadable binding config must supersede any previously
+        // injected compact instructions. Resolve against an empty canonical config
+        // so sessions with prior active bindings emit a revocation block instead
+        // of leaving stale label-skill anchors authoritative.
+        const fallback = resolveActiveLabelSkillAnchors(getDefaultLabelSkillBindingsConfig(), {
+          sessionLabels: managed.labels ?? [],
+          labels,
+          skills,
+          workspaceSlug: managed.workspace.id,
+          previousState: managed.labelSkillAnchorState,
+        })
+        return fallback
+      }
+      const resolution = resolveActiveLabelSkillAnchors(validation.config, {
+        sessionLabels: managed.labels ?? [],
+        labels,
+        skills,
+        workspaceSlug: managed.workspace.id,
+        previousState: managed.labelSkillAnchorState,
+      })
+      for (const warning of [...validation.warnings, ...resolution.warnings]) {
+        sessionLog.warn(`Label-skill binding warning${warning.bindingId ? ` (${warning.bindingId})` : ''}: ${warning.message}`)
+      }
+      return resolution
+    } catch (error) {
+      sessionLog.warn(`Failed to resolve label-skill bindings for session ${managed.id}:`, error)
+      try {
+        return resolveActiveLabelSkillAnchors(getDefaultLabelSkillBindingsConfig(), {
+          sessionLabels: managed.labels ?? [],
+          labels: listLabelsFlat(managed.workspace.rootPath),
+          skills: [],
+          workspaceSlug: managed.workspace.id,
+          previousState: managed.labelSkillAnchorState,
+        })
+      } catch {
+        return null
+      }
+    }
+  }
+
+  private persistLabelSkillAnchorState(managed: ManagedSession, resolution: LabelSkillAnchorResolution | null): void {
+    if (!resolution) return
+    const prev = JSON.stringify(managed.labelSkillAnchorState ?? null)
+    const next = JSON.stringify(resolution.nextState ?? null)
+    if (prev === next) return
+    managed.labelSkillAnchorState = resolution.nextState
+    this.persistSession(managed)
+  }
+
+  private getUnpreparedLabelSkillSourceSlugs(managed: ManagedSession, resolution: LabelSkillAnchorResolution | null): string[] {
+    const required = resolution?.requiredSourceSlugs ?? []
+    if (required.length === 0) return []
+
+    const enabledSlugs = new Set(managed.enabledSourceSlugs ?? [])
+    const liveSlugs = new Set(managed.agent?.getActiveSourceSlugs() ?? [])
+    return required.filter(slug => !enabledSlugs.has(slug) || !liveSlugs.has(slug))
+  }
+
+  private buildLabelSkillBootstrapEntriesForSession(
+    managed: ManagedSession,
+    resolution: LabelSkillAnchorResolution | null,
+    args: {
+      messagesBeforeModelCall: Message[]
+      isQueuedReplay: boolean
+      explicitSkillSlugs: string[]
+    },
+  ): { entries: LabelSkillBootstrapChatEntry[]; overflowBindingIds: string[]; selection: LabelSkillBootstrapCandidateSelection } | null {
+    if (!resolution || resolution.blockKind !== 'active') return null
+    const selection = selectLabelSkillBootstrapCandidates({
+      activeAnchors: resolution.activeAnchors,
+      configHash: resolution.configHash,
+      previousState: managed.labelSkillAnchorState,
+      messagesBeforeModelCall: args.messagesBeforeModelCall,
+      explicitSkillSlugs: args.explicitSkillSlugs,
+      isQueuedReplay: args.isQueuedReplay,
+    })
+    if (!selection.eligible || selection.anchors.length === 0) return { entries: [], overflowBindingIds: [], selection }
+
+    const entries: LabelSkillBootstrapChatEntry[] = []
+    const missingPaths: string[] = []
+    for (const anchor of selection.anchors) {
+      const skillPath = resolveSkillFilePathBySlug(managed.workspace.rootPath, anchor.skillSlug, managed.workingDirectory)
+      if (!skillPath) {
+        missingPaths.push(anchor.skillSlug)
+        continue
+      }
+      entries.push({
+        bindingId: anchor.bindingId,
+        labelId: anchor.labelId,
+        skillSlug: anchor.skillSlug,
+        skillPath,
+      })
+    }
+
+    if (missingPaths.length > 0) {
+      const reason = `Unable to resolve SKILL.md path for label-bound bootstrap skill(s): ${missingPaths.join(', ')}`
+      sessionLog.warn(reason)
+      this.markLabelSkillBootstrapFailure(managed, selection.anchors.map(anchor => ({
+        bindingId: anchor.bindingId,
+        labelId: anchor.labelId,
+        skillSlug: anchor.skillSlug,
+      })), resolution.configHash, reason)
+    }
+
+    return {
+      entries,
+      overflowBindingIds: selection.overflowAnchors.map(anchor => anchor.bindingId),
+      selection,
+    }
+  }
+
+  private markLabelSkillBootstrapAttempted(
+    managed: ManagedSession,
+    entries: LabelSkillBootstrapChatEntry[],
+    configHash: string,
+  ): void {
+    if (entries.length === 0) return
+    const now = new Date().toISOString()
+    this.updateLabelSkillBootstrapState(managed, configHash, now, draft => {
+      for (const entry of entries) {
+        const existing = draft.entries.get(entry.bindingId)
+        draft.entries.set(entry.bindingId, {
+          bindingId: entry.bindingId,
+          labelId: entry.labelId,
+          skillSlug: entry.skillSlug,
+          status: existing?.status === 'completed' ? 'completed' : 'attempted',
+          attemptedAt: now,
+          completedAt: existing?.completedAt,
+        })
+      }
+      draft.lastFailureReason = undefined
+    })
+  }
+
+  private markLabelSkillBootstrapCompleted(
+    managed: ManagedSession,
+    event: LabelSkillBootstrapRegisteredEvent,
+  ): void {
+    if (event.bindingIds.length === 0) return
+    this.updateLabelSkillBootstrapState(managed, event.configHash, event.registeredAt, draft => {
+      for (const bindingId of event.bindingIds) {
+        const existing = draft.entries.get(bindingId)
+        if (!existing) continue
+        draft.entries.set(bindingId, {
+          ...existing,
+          status: 'completed',
+          completedAt: event.registeredAt,
+          lastFailureReason: undefined,
+        })
+      }
+      for (const slug of event.skillSlugs) draft.bootstrappedSkillSlugs.add(slug)
+      draft.lastFailureReason = undefined
+    })
+  }
+
+  private markLabelSkillBootstrapFailure(
+    managed: ManagedSession,
+    entries: Array<{ bindingId: string; labelId?: string; skillSlug: string }>,
+    configHash: string,
+    reason: string,
+  ): void {
+    if (entries.length === 0) return
+    const now = new Date().toISOString()
+    this.updateLabelSkillBootstrapState(managed, configHash, now, draft => {
+      let updated = false
+      for (const entry of entries) {
+        const existing = draft.entries.get(entry.bindingId)
+        if (existing?.status === 'completed') continue
+        draft.entries.set(entry.bindingId, {
+          bindingId: entry.bindingId,
+          labelId: entry.labelId ?? existing?.labelId,
+          skillSlug: entry.skillSlug,
+          status: existing?.status ?? 'attempted',
+          attemptedAt: existing?.attemptedAt ?? now,
+          completedAt: existing?.completedAt,
+          lastFailureReason: reason,
+        })
+        updated = true
+      }
+      if (updated) draft.lastFailureReason = reason
+    })
+  }
+
+  private updateLabelSkillBootstrapState(
+    managed: ManagedSession,
+    configHash: string,
+    updatedAt: string,
+    mutate: (draft: {
+      entries: Map<string, LabelSkillBootstrapStateEntry>
+      bootstrappedSkillSlugs: Set<string>
+      lastFailureReason?: string
+    }) => void,
+  ): void {
+    const previousState = managed.labelSkillAnchorState ?? {}
+    const previousBootstrap = previousState.bootstrap?.configHash === configHash ? previousState.bootstrap : undefined
+    const draft = {
+      entries: new Map((previousBootstrap?.entries ?? []).map(entry => [entry.bindingId, entry] as const)),
+      bootstrappedSkillSlugs: new Set(previousBootstrap?.bootstrappedSkillSlugs ?? []),
+      lastFailureReason: previousBootstrap?.lastFailureReason,
+    }
+    mutate(draft)
+    const nextState: LabelSkillAnchorState = {
+      ...previousState,
+      lastConfigHash: previousState.lastConfigHash ?? configHash,
+      bootstrap: {
+        configHash,
+        entries: Array.from(draft.entries.values()).sort((a, b) => a.bindingId.localeCompare(b.bindingId)),
+        bootstrappedSkillSlugs: Array.from(draft.bootstrappedSkillSlugs).sort(),
+        updatedAt,
+        lastFailureReason: draft.lastFailureReason,
+      },
+    }
+    const prev = JSON.stringify(managed.labelSkillAnchorState ?? null)
+    const next = JSON.stringify(nextState)
+    if (prev === next) return
+    managed.labelSkillAnchorState = nextState
+    this.persistSession(managed)
+  }
+
   /**
    * Reload sources for all sessions in a workspace, skipping those currently processing.
    */
@@ -1671,6 +1927,12 @@ export class SessionManager implements ISessionManager {
     if (!this.eventSink) return
     sessionLog.info(`Broadcasting labels changed for ${workspaceId}`)
     this.eventSink(RPC_CHANNELS.labels.CHANGED, { to: 'workspace', workspaceId }, workspaceId)
+  }
+
+  private broadcastLabelSkillBindingsChanged(workspaceId: string): void {
+    if (!this.eventSink) return
+    sessionLog.info(`Broadcasting label-skill bindings changed for ${workspaceId}`)
+    this.eventSink(RPC_CHANNELS.labelSkillBindings.CHANGED, { to: 'workspace', workspaceId }, workspaceId)
   }
 
   private broadcastAutomationsChanged(workspaceId: string): void {
@@ -5485,8 +5747,47 @@ export class SessionManager implements ISessionManager {
 
       const agent = managed.agent
       let steered = false
+      let steeredAnchorResolution: LabelSkillAnchorResolution | null = null
       if (behavior === 'steer') {
-        steered = agent?.redirect(message) ?? false
+        // Auto-label and label-skill anchors must apply to steered messages too,
+        // but the persisted visible user message remains the raw user text.
+        try {
+          const labelTree = listLabels(managed.workspace.rootPath)
+          const autoMatches = evaluateAutoLabels(message, labelTree)
+          if (autoMatches.length > 0) {
+            const existingLabels = managed.labels ?? []
+            const newEntries = autoMatches
+              .map(m => `${m.labelId}::${m.value}`)
+              .filter(entry => !existingLabels.includes(entry))
+            if (newEntries.length > 0) {
+              managed.labels = [...existingLabels, ...newEntries]
+              this.persistSession(managed)
+              this.sendEvent({ type: 'labels_changed', sessionId, labels: managed.labels }, managed.workspace.id)
+            }
+          }
+        } catch (e) {
+          sessionLog.warn(`Auto-label evaluation failed for steered session ${sessionId}:`, e)
+        }
+
+        steeredAnchorResolution = this.resolveLabelSkillAnchorsForSession(managed)
+        const unpreparedSourceSlugs = this.getUnpreparedLabelSkillSourceSlugs(managed, steeredAnchorResolution)
+        if (unpreparedSourceSlugs.length > 0) {
+          // Do not inject source-dependent label-skill anchors into an in-flight
+          // backend that has not seen those source servers. Queue instead; the
+          // replay path below runs the normal pre-enable/source setup flow before
+          // sending the hidden anchor block.
+          sessionLog.info(`Queueing steered label-skill message until required sources are prepared: ${unpreparedSourceSlugs.join(', ')}`)
+        } else {
+          const steerMessage = steeredAnchorResolution?.block
+            ? (message.startsWith('/compact')
+                ? `${message}\n\n${steeredAnchorResolution.block}`
+                : `${steeredAnchorResolution.block}\n\n${message}`)
+            : message
+          steered = agent?.redirect(steerMessage) ?? false
+          if (steered) {
+            this.persistLabelSkillAnchorState(managed, steeredAnchorResolution)
+          }
+        }
       }
       // For 'queue': skip redirect entirely. The current turn is undisturbed.
 
@@ -5537,6 +5838,13 @@ export class SessionManager implements ISessionManager {
       onAck?.(userMessage.id)
       return
     }
+
+    // Capture the pre-model-call conversation state before a fresh user message is
+    // appended. Label-bound skill bootstrap eligibility is based on whether any
+    // prior final assistant/model response exists, not on user-message counts after
+    // this send is persisted.
+    const labelSkillMessagesBeforeModelCall = [...managed.messages]
+    const isQueuedReplayForLabelSkillBootstrap = Boolean(existingMessageId)
 
     // Add user message with stored attachments for persistence
     // Skip if existingMessageId is provided (message was already created when queued)
@@ -5723,6 +6031,60 @@ export class SessionManager implements ISessionManager {
       }
     }
 
+    // Resolve compact label → skill bindings after auto-label evaluation and before
+    // source/server setup. This does not read full SKILL.md bodies; it uses
+    // metadata-only skill summaries and persists only anchor state for revocation.
+    const labelSkillAnchorResolution = this.resolveLabelSkillAnchorsForSession(managed)
+    this.persistLabelSkillAnchorState(managed, labelSkillAnchorResolution)
+    const explicitSkillSlugsForBootstrap = extractExplicitSkillSlugsForLabelBootstrap(message, options)
+    const labelSkillBootstrapForChat = this.buildLabelSkillBootstrapEntriesForSession(managed, labelSkillAnchorResolution, {
+      messagesBeforeModelCall: labelSkillMessagesBeforeModelCall,
+      isQueuedReplay: isQueuedReplayForLabelSkillBootstrap,
+      explicitSkillSlugs: explicitSkillSlugsForBootstrap,
+    })
+    if (labelSkillBootstrapForChat?.entries.length) {
+      this.markLabelSkillBootstrapAttempted(managed, labelSkillBootstrapForChat.entries, labelSkillAnchorResolution!.configHash)
+      if (labelSkillBootstrapForChat.overflowBindingIds.length > 0) {
+        sessionLog.info(`Label-skill bootstrap capped; overflow bindings remain compact-only: ${labelSkillBootstrapForChat.overflowBindingIds.join(', ')}`)
+      }
+    }
+
+    if (labelSkillAnchorResolution?.requiredSourceSlugs.length) {
+      try {
+        const workspaceRoot = managed.workspace.rootPath
+        const currentSlugs = new Set(managed.enabledSourceSlugs || [])
+        const candidateSlugs = labelSkillAnchorResolution.requiredSourceSlugs
+        const loadedSources = getSourcesBySlugs(workspaceRoot, candidateSlugs)
+        const usableSources = new Set(
+          loadedSources
+            .filter(isSourceUsable)
+            .map(source => source.config.slug)
+        )
+        const toEnable: string[] = []
+        const skipped: string[] = []
+        for (const srcSlug of candidateSlugs) {
+          if (currentSlugs.has(srcSlug)) continue
+          if (usableSources.has(srcSlug)) toEnable.push(srcSlug)
+          else skipped.push(srcSlug)
+        }
+        if (skipped.length > 0) {
+          sessionLog.warn(`Label-skill bindings require sources that are not usable (missing or unauthenticated): ${skipped.join(', ')}`)
+        }
+        if (toEnable.length > 0) {
+          managed.enabledSourceSlugs = [...(managed.enabledSourceSlugs || []), ...toEnable]
+          sessionLog.info(`Pre-enabled sources for label-skill bindings: ${toEnable.join(', ')}`)
+          this.persistSession(managed)
+          this.sendEvent({
+            type: 'sources_changed',
+            sessionId,
+            enabledSourceSlugs: managed.enabledSourceSlugs,
+          }, managed.workspace.id)
+        }
+      } catch (e) {
+        sessionLog.warn(`Failed to pre-enable label-skill binding sources for session ${sessionId}:`, e)
+      }
+    }
+
     // Start perf span for entire sendMessage flow
     const sendSpan = perf.span('session.sendMessage', { sessionId })
 
@@ -5835,7 +6197,31 @@ export class SessionManager implements ISessionManager {
       }
 
       sendSpan.mark('chat.starting')
-      const chatIterator = agent.chat(effectiveMessage, modelInputAttachments.attachments)
+      const chatOptions = (labelSkillAnchorResolution?.block || labelSkillBootstrapForChat?.entries.length)
+        ? {
+            internal: {
+              ...(labelSkillAnchorResolution?.block ? {
+                labelSkillAnchors: {
+                  block: labelSkillAnchorResolution.block,
+                  kind: labelSkillAnchorResolution.blockKind === 'revocation' ? 'revocation' as const : 'active' as const,
+                  activeBindingIds: labelSkillAnchorResolution.activeAnchors.map(anchor => anchor.bindingId),
+                  configHash: labelSkillAnchorResolution.configHash,
+                },
+              } : {}),
+              ...(labelSkillBootstrapForChat?.entries.length && labelSkillAnchorResolution ? {
+                labelSkillBootstrap: {
+                  entries: labelSkillBootstrapForChat.entries,
+                  overflowBindingIds: labelSkillBootstrapForChat.overflowBindingIds,
+                  configHash: labelSkillAnchorResolution.configHash,
+                  onRegistered: (event: LabelSkillBootstrapRegisteredEvent) => {
+                    this.markLabelSkillBootstrapCompleted(managed, event)
+                  },
+                },
+              } : {}),
+            },
+          }
+        : undefined
+      const chatIterator = agent.chat(effectiveMessage, modelInputAttachments.attachments, chatOptions)
       sessionLog.info('Got chat iterator, starting iteration...')
 
       for await (const event of chatIterator) {
@@ -5969,6 +6355,15 @@ export class SessionManager implements ISessionManager {
         sessionLog.info('Chat loop exited unexpectedly')
       }
     } catch (error) {
+      if (labelSkillBootstrapForChat?.entries.length && labelSkillAnchorResolution) {
+        this.markLabelSkillBootstrapFailure(
+          managed,
+          labelSkillBootstrapForChat.entries.map(entry => ({ bindingId: entry.bindingId, labelId: entry.labelId, skillSlug: entry.skillSlug })),
+          labelSkillAnchorResolution.configHash,
+          error instanceof Error ? error.message : String(error),
+        )
+      }
+
       // Check if this is an abort error (expected when interrupted)
       const isAbortError = error instanceof Error && (
         error.name === 'AbortError' ||

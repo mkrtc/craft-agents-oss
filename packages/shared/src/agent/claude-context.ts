@@ -37,6 +37,7 @@ import {
   validateWorkspacePermissions,
   validateSourcePermissions,
   validateAllPermissions,
+  validateLabelSkillBindings,
   validateToolIcons,
 } from '../config/validators.ts';
 import { validateAutomations } from '../automations/index.ts';
@@ -128,6 +129,7 @@ export function createClaudeContext(options: ClaudeContextOptions): SessionToolC
       return validateAllPermissions(wsPath);
     },
     validateAutomations: (wsPath: string) => validateAutomations(wsPath),
+    validateLabelSkillBindings: (wsPath: string) => validateLabelSkillBindings(wsPath),
     validateToolIcons: () => validateToolIcons(),
     validateAll: (wsPath: string) => validateAll(wsPath),
     validateSkill: (wsPath: string, slug: string) => validateSkill(wsPath, slug),

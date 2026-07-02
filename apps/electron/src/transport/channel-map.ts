@@ -244,6 +244,13 @@ export const CHANNEL_MAP = {
   deleteLabel: invoke(RPC_CHANNELS.labels.DELETE),
   onLabelsChanged: listener(RPC_CHANNELS.labels.CHANGED),
 
+  // Label → Skill Bindings
+  getLabelSkillBindings: invoke(RPC_CHANNELS.labelSkillBindings.GET),
+  saveLabelSkillBindings: invoke(RPC_CHANNELS.labelSkillBindings.SAVE),
+  listBindableSkills: invoke(RPC_CHANNELS.labelSkillBindings.LIST_BINDABLE_SKILLS),
+  generateLabelSkillCompactInstruction: invoke(RPC_CHANNELS.labelSkillBindings.GENERATE_COMPACT_INSTRUCTION),
+  onLabelSkillBindingsChanged: listener(RPC_CHANNELS.labelSkillBindings.CHANGED),
+
   // LLM connections change listener
   onLlmConnectionsChanged: listener(RPC_CHANNELS.llmConnections.CHANGED),
 

@@ -17,6 +17,8 @@ import type {
 import type { PermissionMode } from '../agent/mode-types'
 import type { ThinkingLevel } from '../agent/thinking-levels'
 import type { CustomEndpointConfig } from '../config/llm-connections'
+import type { LabelSkillBindingsConfig, LabelSkillBindingsValidationResult, LabelSkillBindingGeneratedFrom } from '../label-skill-bindings/types'
+import type { SkillSummary } from '../skills/types'
 import type {
   AuthRequest as SharedAuthRequest,
   CredentialInputMode as SharedCredentialInputMode,
@@ -215,6 +217,28 @@ export interface SendMessageOptions {
   badges?: ContentBadge[]
   optimisticMessageId?: string
 }
+
+export interface LabelSkillBindingsGetResult extends LabelSkillBindingsValidationResult {}
+
+export interface LabelSkillBindingsSaveInput {
+  config: LabelSkillBindingsConfig
+  workingDirectory?: string
+}
+
+export interface LabelSkillBindingsSaveResult extends LabelSkillBindingsValidationResult {}
+
+export interface LabelSkillBindingsGenerateParams {
+  skillSlug: string
+  workingDirectory?: string
+}
+
+export interface LabelSkillBindingsGenerateResult {
+  compactInstruction: string
+  generatedFrom: LabelSkillBindingGeneratedFrom
+  warnings: string[]
+}
+
+export type BindableSkillSummary = SkillSummary
 
 // ---------------------------------------------------------------------------
 // Session commands (consolidated operations)

@@ -211,6 +211,12 @@ import type {
   DirectoryListingResult,
   RemoteSessionTransferPayload,
   ImportRemoteSessionTransferResult,
+  LabelSkillBindingsGetResult,
+  LabelSkillBindingsSaveInput,
+  LabelSkillBindingsSaveResult,
+  LabelSkillBindingsGenerateParams,
+  LabelSkillBindingsGenerateResult,
+  BindableSkillSummary,
 } from '@craft-agent/shared/protocol'
 
 export interface ElectronAPI {
@@ -492,6 +498,13 @@ export interface ElectronAPI {
   createLabel(workspaceId: string, input: import('@craft-agent/shared/labels').CreateLabelInput): Promise<import('@craft-agent/shared/labels').LabelConfig>
   deleteLabel(workspaceId: string, labelId: string): Promise<{ stripped: number }>
   onLabelsChanged(callback: (workspaceId: string) => void): () => void
+
+  // Label → Skill Bindings (workspace-scoped)
+  getLabelSkillBindings(workspaceId: string, workingDirectory?: string): Promise<LabelSkillBindingsGetResult>
+  saveLabelSkillBindings(workspaceId: string, input: LabelSkillBindingsSaveInput): Promise<LabelSkillBindingsSaveResult>
+  listBindableSkills(workspaceId: string, workingDirectory?: string): Promise<BindableSkillSummary[]>
+  generateLabelSkillCompactInstruction(workspaceId: string, params: LabelSkillBindingsGenerateParams): Promise<LabelSkillBindingsGenerateResult>
+  onLabelSkillBindingsChanged(callback: (workspaceId: string) => void): () => void
 
   // LLM connections change listener
   onLlmConnectionsChanged(callback: () => void): () => void

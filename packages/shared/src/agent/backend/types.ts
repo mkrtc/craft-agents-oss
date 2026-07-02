@@ -294,11 +294,54 @@ export interface CoreBackendConfig {
 /**
  * Options for the chat method.
  */
+export interface LabelSkillAnchorChatContext {
+  /** Fully serialized hidden label-skill block to prepend/append to the provider message */
+  block: string;
+  /** Whether this block activates current bindings or revokes stale prior bindings */
+  kind: 'active' | 'revocation';
+  /** Active binding IDs represented by the block */
+  activeBindingIds: string[];
+  /** Hash of the binding config used to produce the block */
+  configHash: string;
+}
+
+export interface LabelSkillBootstrapChatEntry {
+  bindingId: string;
+  labelId: string;
+  skillSlug: string;
+  /** Absolute SKILL.md path resolved by the host. Never sent as a provider option. */
+  skillPath: string;
+  /** Display-safe skill source for diagnostics. */
+  source?: 'global' | 'workspace' | 'project';
+}
+
+export interface LabelSkillBootstrapRegisteredEvent {
+  bindingIds: string[];
+  skillSlugs: string[];
+  configHash: string;
+  registeredAt: string;
+}
+
+export interface LabelSkillBootstrapChatContext {
+  entries: LabelSkillBootstrapChatEntry[];
+  overflowBindingIds?: string[];
+  configHash: string;
+  onRegistered?: (event: LabelSkillBootstrapRegisteredEvent) => void;
+}
+
 export interface ChatOptions {
   /** Retry flag (internal use for session recovery) */
   isRetry?: boolean;
   /** Override thinking level for this message only */
   thinkingOverride?: ThinkingLevel;
+  /**
+   * Internal, non-RPC options for provider message construction.
+   * BaseAgent consumes and strips these before provider-specific SDK calls.
+   */
+  internal?: {
+    labelSkillAnchors?: LabelSkillAnchorChatContext;
+    labelSkillBootstrap?: LabelSkillBootstrapChatContext;
+  };
 }
 
 /**

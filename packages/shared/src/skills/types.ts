@@ -57,3 +57,37 @@ export interface LoadedSkill {
   /** Where this skill was loaded from */
   source: SkillSource;
 }
+
+/**
+ * Display-safe, metadata-only skill summary.
+ *
+ * This intentionally excludes full SKILL.md content and absolute local paths so
+ * renderer/RPC callers can list bindable skills without exposing private file
+ * system details or triggering full skill-body reads.
+ */
+export interface SkillSummary {
+  /** Directory name (slug) */
+  slug: string;
+  /** Parsed metadata from YAML frontmatter */
+  metadata: SkillMetadata;
+  /** Where this skill was resolved from after priority overlay */
+  source: SkillSource;
+  /** Stable hash of the parsed frontmatter metadata */
+  metadataHash: string;
+  /** Optional full-content hash; only populated for explicit callers that opt in */
+  contentHash?: string;
+  /** Display-only scope hint such as "Global", "Workspace", or a project folder name */
+  scopeLabel: string;
+  /** Fingerprint for source/scope matching; not a local path */
+  scopeFingerprint: string;
+  /** Required source slugs copied from frontmatter for pre-enable flows */
+  requiredSources?: string[];
+}
+
+/** Internal metadata summary that can include local paths. Do not send over RPC. */
+export interface SkillPathSummary extends SkillSummary {
+  /** Absolute path to the skill directory */
+  path: string;
+  /** Absolute path to SKILL.md */
+  skillFilePath: string;
+}

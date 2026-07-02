@@ -6,16 +6,20 @@
  */
 
 import {
+  closeSync,
   existsSync,
+  openSync,
   readFileSync,
+  readSync,
   readdirSync,
   rmSync,
   statSync,
 } from 'fs';
+import { createHash } from 'crypto';
 import { homedir } from 'os';
-import { join } from 'path';
+import { basename, join } from 'path';
 import matter from 'gray-matter';
-import type { LoadedSkill, SkillMetadata, SkillSource } from './types.ts';
+import type { LoadedSkill, SkillMetadata, SkillPathSummary, SkillSource, SkillSummary } from './types.ts';
 import { getWorkspaceSkillsPath } from '../workspaces/storage.ts';
 import {
   validateIconValue,
@@ -68,30 +72,97 @@ function normalizeRequiredSources(value: unknown): string[] | undefined {
 function parseSkillFile(content: string): { metadata: SkillMetadata; body: string } | null {
   try {
     const parsed = matter(content);
-
-    // Validate required fields
-    if (!parsed.data.name || !parsed.data.description) {
-      return null;
-    }
-
-    // Validate and extract optional icon field
-    // Only accepts emoji or URL - rejects inline SVG and relative paths
-    const icon = validateIconValue(parsed.data.icon, 'Skills');
+    const metadata = parseSkillMetadata(parsed.data);
+    if (!metadata) return null;
 
     return {
-      metadata: {
-        name: parsed.data.name as string,
-        description: parsed.data.description as string,
-        globs: parsed.data.globs as string[] | undefined,
-        alwaysAllow: parsed.data.alwaysAllow as string[] | undefined,
-        icon,
-        requiredSources: normalizeRequiredSources(parsed.data.requiredSources),
-      },
+      metadata,
       body: parsed.content,
     };
   } catch {
     return null;
   }
+}
+
+function parseSkillMetadata(data: Record<string, unknown>): SkillMetadata | null {
+  // Validate required fields
+  if (typeof data.name !== 'string' || typeof data.description !== 'string') {
+    return null;
+  }
+
+  // Validate and extract optional icon field
+  // Only accepts emoji or URL - rejects inline SVG and relative paths
+  const icon = validateIconValue(data.icon, 'Skills');
+
+  return {
+    name: data.name,
+    description: data.description,
+    globs: Array.isArray(data.globs) ? data.globs as string[] : undefined,
+    alwaysAllow: Array.isArray(data.alwaysAllow) ? data.alwaysAllow as string[] : undefined,
+    icon,
+    requiredSources: normalizeRequiredSources(data.requiredSources),
+  };
+}
+
+const MAX_SKILL_FRONTMATTER_BYTES = 64 * 1024;
+
+function stableStringify(value: unknown): string {
+  if (value === null || typeof value !== 'object') {
+    return JSON.stringify(value);
+  }
+  if (Array.isArray(value)) {
+    return `[${value.map(stableStringify).join(',')}]`;
+  }
+  const obj = value as Record<string, unknown>;
+  return `{${Object.keys(obj).sort().map(key => `${JSON.stringify(key)}:${stableStringify(obj[key])}`).join(',')}}`;
+}
+
+function hashString(value: string): string {
+  return createHash('sha256').update(value).digest('hex');
+}
+
+function readSkillFrontmatter(skillFile: string): string | null {
+  let fd: number | null = null;
+  try {
+    fd = openSync(skillFile, 'r');
+    const buffer = Buffer.alloc(MAX_SKILL_FRONTMATTER_BYTES);
+    const bytesRead = readSync(fd, buffer, 0, buffer.length, 0);
+    const text = buffer.toString('utf8', 0, bytesRead);
+    const match = text.match(/^---\r?\n[\s\S]*?\r?\n---[ \t]*(?:\r?\n|$)/);
+    return match ? match[0] : null;
+  } catch {
+    return null;
+  } finally {
+    if (fd !== null) {
+      try { closeSync(fd); } catch {}
+    }
+  }
+}
+
+function parseSkillMetadataFile(skillFile: string): { metadata: SkillMetadata; rawFrontmatter: string } | null {
+  const rawFrontmatter = readSkillFrontmatter(skillFile);
+  if (!rawFrontmatter) return null;
+
+  try {
+    const parsed = matter(rawFrontmatter);
+    const metadata = parseSkillMetadata(parsed.data);
+    if (!metadata) return null;
+    return { metadata, rawFrontmatter };
+  } catch {
+    return null;
+  }
+}
+
+function buildScopeLabel(source: SkillSource, projectRoot?: string): string {
+  if (source === 'global') return 'Global';
+  if (source === 'workspace') return 'Workspace';
+  return projectRoot ? `Project: ${basename(projectRoot)}` : 'Project';
+}
+
+function buildScopeFingerprint(source: SkillSource, workspaceRoot: string, projectRoot?: string): string {
+  if (source === 'global') return `global:${hashString(GLOBAL_AGENT_SKILLS_DIR)}`;
+  if (source === 'workspace') return `workspace:${hashString(workspaceRoot)}`;
+  return `project:${hashString(projectRoot ?? workspaceRoot)}`;
 }
 
 // ============================================================
@@ -138,6 +209,47 @@ function loadSkillFromDir(skillsDir: string, slug: string, source: SkillSource):
     iconPath: findIconFile(skillDir),
     path: skillDir,
     source,
+  };
+}
+
+function loadSkillSummaryFromDir(
+  skillsDir: string,
+  slug: string,
+  source: SkillSource,
+  workspaceRoot: string,
+  projectRoot?: string,
+  options?: { includeContentHash?: boolean }
+): SkillPathSummary | null {
+  const skillDir = join(skillsDir, slug);
+  const skillFile = join(skillDir, 'SKILL.md');
+
+  if (!existsSync(skillDir) || !statSync(skillDir).isDirectory() || !existsSync(skillFile)) {
+    return null;
+  }
+
+  const parsed = parseSkillMetadataFile(skillFile);
+  if (!parsed) return null;
+
+  let contentHash: string | undefined;
+  if (options?.includeContentHash) {
+    try {
+      contentHash = hashString(readFileSync(skillFile, 'utf-8'));
+    } catch {
+      contentHash = undefined;
+    }
+  }
+
+  return {
+    slug,
+    metadata: parsed.metadata,
+    source,
+    metadataHash: hashString(stableStringify(parsed.metadata)),
+    contentHash,
+    scopeLabel: buildScopeLabel(source, projectRoot),
+    scopeFingerprint: buildScopeFingerprint(source, workspaceRoot, projectRoot),
+    requiredSources: parsed.metadata.requiredSources,
+    path: skillDir,
+    skillFilePath: skillFile,
   };
 }
 
@@ -195,11 +307,13 @@ export function loadWorkspaceSkills(workspaceRoot: string): LoadedSkill[] {
 // (workspaceRoot, projectRoot) pair with a 5-minute safety TTL.
 
 const skillsCache = new Map<string, { skills: LoadedSkill[]; ts: number }>();
+const skillSummariesCache = new Map<string, { summaries: SkillPathSummary[]; ts: number }>();
 const SKILLS_CACHE_TTL = 5 * 60_000; // 5 minutes
 
 /** Invalidate the skills cache (call on working dir change or skill file events). */
 export function invalidateSkillsCache(): void {
   skillsCache.clear();
+  skillSummariesCache.clear();
 }
 
 /**
@@ -244,6 +358,129 @@ export function loadAllSkills(workspaceRoot: string, projectRoot?: string): Load
   const result = Array.from(skillsBySlug.values());
   skillsCache.set(cacheKey, { skills: result, ts: now });
   return result;
+}
+
+function listSkillSummariesFromDir(
+  skillsDir: string,
+  source: SkillSource,
+  workspaceRoot: string,
+  projectRoot?: string,
+  options?: { includeContentHash?: boolean }
+): SkillPathSummary[] {
+  if (!existsSync(skillsDir)) return [];
+
+  const summaries: SkillPathSummary[] = [];
+  try {
+    const entries = readdirSync(skillsDir, { withFileTypes: true });
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      const summary = loadSkillSummaryFromDir(skillsDir, entry.name, source, workspaceRoot, projectRoot, options);
+      if (summary) summaries.push(summary);
+    }
+  } catch {
+    // Ignore errors reading skills directory
+  }
+  return summaries;
+}
+
+/**
+ * List display-safe metadata-only skills from all sources (global < workspace < project).
+ * Does not read full SKILL.md bodies unless includeContentHash is explicitly true.
+ */
+export function listSkillSummaries(
+  workspaceRoot: string,
+  projectRoot?: string,
+  options?: { includeContentHash?: boolean; includeInternalPaths?: false }
+): SkillSummary[];
+export function listSkillSummaries(
+  workspaceRoot: string,
+  projectRoot: string | undefined,
+  options: { includeContentHash?: boolean; includeInternalPaths: true }
+): SkillPathSummary[];
+export function listSkillSummaries(
+  workspaceRoot: string,
+  projectRoot?: string,
+  options?: { includeContentHash?: boolean; includeInternalPaths?: boolean }
+): Array<SkillSummary | SkillPathSummary> {
+  const cacheKey = `${workspaceRoot}::${projectRoot ?? ''}::${options?.includeContentHash ? 'content' : 'metadata'}`;
+  const now = Date.now();
+  if (!options?.includeContentHash) {
+    const cached = skillSummariesCache.get(cacheKey);
+    if (cached && now - cached.ts < SKILLS_CACHE_TTL) {
+      return options?.includeInternalPaths ? cached.summaries : cached.summaries.map(stripSkillSummaryPaths);
+    }
+  }
+
+  const summariesBySlug = new Map<string, SkillPathSummary>();
+
+  for (const summary of listSkillSummariesFromDir(GLOBAL_AGENT_SKILLS_DIR, 'global', workspaceRoot, projectRoot, options)) {
+    summariesBySlug.set(summary.slug, summary);
+  }
+
+  for (const summary of listSkillSummariesFromDir(getWorkspaceSkillsPath(workspaceRoot), 'workspace', workspaceRoot, projectRoot, options)) {
+    summariesBySlug.set(summary.slug, summary);
+  }
+
+  if (projectRoot) {
+    const projectSkillsDir = join(projectRoot, PROJECT_AGENT_SKILLS_DIR);
+    for (const summary of listSkillSummariesFromDir(projectSkillsDir, 'project', workspaceRoot, projectRoot, options)) {
+      summariesBySlug.set(summary.slug, summary);
+    }
+  }
+
+  const result = Array.from(summariesBySlug.values());
+  if (!options?.includeContentHash) {
+    skillSummariesCache.set(cacheKey, { summaries: result, ts: now });
+  }
+  return options?.includeInternalPaths ? result : result.map(stripSkillSummaryPaths);
+}
+
+function stripSkillSummaryPaths(summary: SkillPathSummary): SkillSummary {
+  const { path: _path, skillFilePath: _skillFilePath, ...safe } = summary;
+  return safe;
+}
+
+/**
+ * Load one metadata-only skill summary by slug using project > workspace > global priority.
+ * Does not read the full SKILL.md body unless includeContentHash is explicitly true.
+ */
+export function loadSkillSummaryBySlug(
+  workspaceRoot: string,
+  slug: string,
+  projectRoot?: string,
+  options?: { includeContentHash?: boolean; includeInternalPaths?: false }
+): SkillSummary | null;
+export function loadSkillSummaryBySlug(
+  workspaceRoot: string,
+  slug: string,
+  projectRoot: string | undefined,
+  options: { includeContentHash?: boolean; includeInternalPaths: true }
+): SkillPathSummary | null;
+export function loadSkillSummaryBySlug(
+  workspaceRoot: string,
+  slug: string,
+  projectRoot?: string,
+  options?: { includeContentHash?: boolean; includeInternalPaths?: boolean }
+): SkillSummary | SkillPathSummary | null {
+  if (projectRoot) {
+    const projectSkillsDir = join(projectRoot, PROJECT_AGENT_SKILLS_DIR);
+    const summary = loadSkillSummaryFromDir(projectSkillsDir, slug, 'project', workspaceRoot, projectRoot, options);
+    if (summary) return options?.includeInternalPaths ? summary : stripSkillSummaryPaths(summary);
+  }
+
+  const workspaceSummary = loadSkillSummaryFromDir(getWorkspaceSkillsPath(workspaceRoot), slug, 'workspace', workspaceRoot, projectRoot, options);
+  if (workspaceSummary) return options?.includeInternalPaths ? workspaceSummary : stripSkillSummaryPaths(workspaceSummary);
+
+  const globalSummary = loadSkillSummaryFromDir(GLOBAL_AGENT_SKILLS_DIR, slug, 'global', workspaceRoot, projectRoot, options);
+  if (globalSummary) return options?.includeInternalPaths ? globalSummary : stripSkillSummaryPaths(globalSummary);
+
+  return null;
+}
+
+/** Resolve a SKILL.md path for explicit [skill:] invocation without reading the file body. */
+export function resolveSkillFilePathBySlug(workspaceRoot: string, slug: string, projectRoot?: string): string | null {
+  const summary = loadSkillSummaryBySlug(workspaceRoot, slug, projectRoot, { includeInternalPaths: true });
+  return summary?.skillFilePath ?? null;
 }
 
 /**

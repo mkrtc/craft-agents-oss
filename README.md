@@ -7,6 +7,24 @@
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Contributor Covenant](https://img.shields.io/badge/Contributor%20Covenant-2.1-4baaaa.svg)](CODE_OF_CONDUCT.md)
 
+> [!NOTE]
+> This repository is a personal fork of Craft Agents maintained at
+> [`mkrtc/craft-agents-oss`](https://github.com/mkrtc/craft-agents-oss).
+> The original upstream project lives at
+> [`craft-ai-agents/craft-agents-oss`](https://github.com/craft-ai-agents/craft-agents-oss).
+>
+> This fork keeps the upstream app intact and adds local workflow/UX changes listed below.
+
+## What this fork adds
+
+- **Label → Skill bindings**: bind workspace/session labels to skills so labelled sessions can automatically activate compact role/skill behavior.
+- **Compact role anchors**: label-bound skills use generated compact anchors on normal turns instead of injecting full `SKILL.md` content into hidden prompts.
+- **Safe skill bootstrap/revocation flow**: first-turn label-bound skill activation uses the existing skill read-prerequisite flow, while invalid/deleted bindings are revoked safely.
+- **Settings UI for label-bound skills**: manage label/skill bindings from Settings with searchable label and skill selectors.
+- **Improved role UX**: active label-bound skills are surfaced as actual roles while preserving explicit `[skill:slug]` behavior.
+- **Chat scroll-to-bottom control**: adds a down-button in the input-zone top row next to the `Info` button.
+- **Fork update feed**: packaged builds and install scripts are configured to pull updates from this fork's GitHub Releases.
+
 ## How it Works (Video)
 To understand what Craft Agents does and how it works watch this video.
 
@@ -64,22 +82,56 @@ Yes. That's the core idea behind agent-native software. You describe what you wa
 
 ## Installation
 
-### One-Line Install (Recommended)
+### One-Line Install from this fork (Recommended)
 
-**macOS / Linux:**
+The install scripts below download the latest published desktop release from
+[`mkrtc/craft-agents-oss`](https://github.com/mkrtc/craft-agents-oss/releases/latest).
+
+**macOS:**
+
 ```bash
-curl -fsSL https://agents.craft.do/install-app.sh | bash
+curl -fsSL https://raw.githubusercontent.com/mkrtc/craft-agents-oss/main/scripts/install-app.sh | bash
+```
+
+**Linux:**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/mkrtc/craft-agents-oss/main/scripts/install-app.sh | bash
 ```
 
 **Windows (PowerShell):**
+
 ```powershell
-irm https://agents.craft.do/install-app.ps1 | iex
+irm https://raw.githubusercontent.com/mkrtc/craft-agents-oss/main/scripts/install-app.ps1 | iex
 ```
 
-### Build from Source
+By default, these scripts read updater manifests and artifacts from:
+
+```txt
+https://github.com/mkrtc/craft-agents-oss/releases/latest/download
+```
+
+For staging or custom feeds, override the release asset base URL:
 
 ```bash
-git clone https://github.com/lukilabs/craft-agents-oss.git
+CRAFT_AGENTS_DOWNLOAD_BASE_URL=https://example.com/releases/latest/download \
+  bash <(curl -fsSL https://raw.githubusercontent.com/mkrtc/craft-agents-oss/main/scripts/install-app.sh)
+```
+
+```powershell
+$env:CRAFT_AGENTS_DOWNLOAD_BASE_URL = "https://example.com/releases/latest/download"
+irm https://raw.githubusercontent.com/mkrtc/craft-agents-oss/main/scripts/install-app.ps1 | iex
+```
+
+### Official upstream install
+
+For the official upstream Craft Agents build, use the upstream project and install
+instructions from [`craft-ai-agents/craft-agents-oss`](https://github.com/craft-ai-agents/craft-agents-oss).
+
+### Build this fork from Source
+
+```bash
+git clone https://github.com/mkrtc/craft-agents-oss.git
 cd craft-agents-oss
 bun install
 bun run electron:start

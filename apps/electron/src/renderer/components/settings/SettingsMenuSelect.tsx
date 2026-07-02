@@ -20,6 +20,8 @@ export interface SettingsMenuSelectOption {
   label: string
   /** Optional description/subtitle */
   description?: string
+  /** Extra normalized/searchable metadata that is not displayed. */
+  searchText?: string
 }
 
 export interface SettingsMenuSelectProps {
@@ -83,7 +85,8 @@ export function SettingsMenuSelect({
       (option) =>
         option.label.toLowerCase().includes(query) ||
         option.value.toLowerCase().includes(query) ||
-        option.description?.toLowerCase().includes(query)
+        option.description?.toLowerCase().includes(query) ||
+        option.searchText?.toLowerCase().includes(query)
     )
   }, [options, searchQuery])
 
@@ -154,7 +157,7 @@ export function SettingsMenuSelect({
         <div className="space-y-0.5 max-h-64 overflow-auto">
           {filteredOptions.length === 0 ? (
             <div className="px-2.5 py-3 text-sm text-muted-foreground text-center">
-              No results found
+              {t("common.noResults")}
             </div>
           ) : (
             filteredOptions.map((option) => {

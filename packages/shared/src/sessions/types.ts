@@ -11,6 +11,7 @@
 
 import type { PermissionMode } from '../agent/mode-manager.ts';
 import type { ThinkingLevel } from '../agent/thinking-levels.ts';
+import type { LabelSkillAnchorState } from '../label-skill-bindings/types.ts';
 import type { StoredAttachment, MessageRole, ToolStatus, AuthRequestType, AuthStatus, CredentialInputMode, StoredMessage } from '@craft-agent/core/types';
 
 /**
@@ -53,6 +54,8 @@ export const SESSION_PERSISTENT_FIELDS = [
   'transferredSessionSummaryApplied',
   // Automation origin
   'triggeredBy',
+  // Runtime hidden context state
+  'labelSkillAnchorState',
 ] as const;
 
 export type SessionPersistentField = typeof SESSION_PERSISTENT_FIELDS[number];
@@ -197,6 +200,8 @@ export interface SessionConfig {
   transferredSessionSummaryApplied?: boolean;
   /** Metadata for sessions created by automations */
   triggeredBy?: { automationName?: string; event?: string; timestamp?: number };
+  /** Persistent runtime state for hidden label-skill anchor revocation/supersession. */
+  labelSkillAnchorState?: LabelSkillAnchorState;
 }
 
 /**
@@ -288,6 +293,8 @@ export interface SessionHeader {
   transferredSessionSummaryApplied?: boolean;
   /** Metadata for sessions created by automations */
   triggeredBy?: { automationName?: string; event?: string; timestamp?: number };
+  /** Persistent runtime state for hidden label-skill anchor revocation/supersession. */
+  labelSkillAnchorState?: LabelSkillAnchorState;
   // Pre-computed fields for fast list loading
   /** Number of messages in session */
   messageCount: number;

@@ -4,8 +4,12 @@ This file accumulates release notes for the next unreleased version. PRs that ad
 
 ## Features
 
+- **Label-to-skill binding foundations** — Workspace configs can now store compact label → skill bindings, list bindable skills through metadata-only APIs, and inject compact hidden guidance when matching session labels are active without reading full skill bodies on normal turns.
+- **Label-to-skill settings and portability** — Settings now includes a Label → Skill Bindings page for adding, generating, reviewing, and saving compact bindings, with config validation, docs, and resource export/import support for the workspace binding file.
+
 ## Improvements
 
+- **Stronger label-to-skill role activation** — Label-bound skills now announce themselves as active runtime roles, can bootstrap an empty chat's first model call through the standard skill-read prerequisite flow, revoke only prior label-bound role context when labels stop matching, and offer aligned searchable Label/Skill selectors in Settings.
 - **More control over chat response density** — Appearance settings now let users auto-show model activity details only while a turn is running, and choose whether AI responses stay compact or allow the latest response to use full height. User-collapsed active activity details stay collapsed even as the final response message appears.
 
 ## Bug Fixes

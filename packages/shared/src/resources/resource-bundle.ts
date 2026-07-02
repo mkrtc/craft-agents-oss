@@ -1,7 +1,7 @@
 /**
  * Resource Bundle — Export/Import Logic
  *
- * Exports workspace resources (sources, skills, automations) to a portable
+ * Exports workspace resources (sources, skills, automations, label-skill bindings) to a portable
  * ResourceBundle, and imports bundles into a target workspace.
  *
  * Key behaviors:
@@ -10,6 +10,7 @@
  * - Import uses staging + atomic rename per resource (single watcher event)
  * - Source overwrite clears stored credentials
  * - Automations overwrite clears history + retry queue
+ * - Label-skill bindings are imported as a workspace config bucket
  * - Relies on existing ConfigWatcher for change notifications (no manual events)
  */
 
@@ -24,11 +25,19 @@ import {
   validateBundleFile,
 } from '../utils/bundle-files.ts'
 import { getWorkspaceSourcesPath, getWorkspaceSkillsPath } from '../workspaces/storage.ts'
-import { loadSourceConfig, getSourcePath } from '../sources/storage.ts'
+import { loadSourceConfig, getSourcePath, loadWorkspaceSources } from '../sources/storage.ts'
 import { isBuiltinSource } from '../sources/builtin-sources.ts'
 import { validateSourceConfig } from '../config/validators.ts'
 import { AUTOMATIONS_CONFIG_FILE, AUTOMATIONS_HISTORY_FILE, AUTOMATIONS_RETRY_QUEUE_FILE } from '../automations/constants.ts'
 import { validateAutomationsConfig } from '../automations/validation.ts'
+import {
+  LABEL_SKILL_BINDINGS_FILE,
+  validateLabelSkillBindingsConfig,
+  type LabelSkillBindingsConfig,
+} from '../label-skill-bindings/index.ts'
+import { listLabelsFlat } from '../labels/storage.ts'
+import { listSkillSummaries } from '../skills/storage.ts'
+import type { SkillSummary } from '../skills/types.ts'
 import { generateShortId } from '../automations/resolve-config-path.ts'
 import { VALID_EVENTS } from '../automations/schemas.ts'
 import { debug } from '../utils/debug.ts'
@@ -40,6 +49,7 @@ import type {
   SourceBundleEntry,
   SkillBundleEntry,
   AutomationBundleEntry,
+  LabelSkillBindingsBundleEntry,
   ExportResourcesOptions,
   ExportResult,
   ResourceImportMode,
@@ -155,6 +165,12 @@ export function exportResources(
   const automationSelection = options.automations === true ? 'all' : options.automations
   if (automationSelection) {
     bundle.resources.automations = exportAutomations(workspaceRootPath, automationSelection, warnings)
+  }
+
+  // --- Export label → skill bindings ---
+  if (options.labelSkillBindings) {
+    const labelSkillBindings = exportLabelSkillBindings(workspaceRootPath, warnings)
+    if (labelSkillBindings) bundle.resources.labelSkillBindings = labelSkillBindings
   }
 
   // Validate total size
@@ -404,6 +420,37 @@ function exportAutomations(
 }
 
 // ============================================================
+// Export: Label → Skill Bindings
+// ============================================================
+
+function exportLabelSkillBindings(
+  workspaceRootPath: string,
+  warnings: string[],
+): LabelSkillBindingsBundleEntry | undefined {
+  const configPath = join(workspaceRootPath, LABEL_SKILL_BINDINGS_FILE)
+  if (!existsSync(configPath)) {
+    warnings.push('No label-skill-bindings.json found in workspace')
+    return undefined
+  }
+
+  let raw: unknown
+  try {
+    raw = JSON.parse(readFileSync(configPath, 'utf-8'))
+  } catch (err) {
+    warnings.push(`Failed to read label-skill-bindings.json: ${err}`)
+    return undefined
+  }
+
+  const validation = validateLabelSkillBindingsConfig(raw, buildLabelSkillBindingsContext(workspaceRootPath).context)
+  if (!validation.valid) {
+    warnings.push(`label-skill-bindings.json is invalid: ${validation.errors.map(error => error.message).join('; ')}`)
+    return undefined
+  }
+
+  return { config: validation.config }
+}
+
+// ============================================================
 // Validation
 // ============================================================
 
@@ -573,6 +620,20 @@ export function validateResourceBundle(bundle: unknown): { valid: boolean; error
     }
   }
 
+  // Validate label-skill bindings
+  if (res.labelSkillBindings !== undefined) {
+    const entry = res.labelSkillBindings
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+      errors.push('resources.labelSkillBindings must be an object')
+    } else {
+      const e = entry as Record<string, unknown>
+      const validation = validateLabelSkillBindingsConfig(e.config)
+      if (!validation.valid) {
+        errors.push(`resources.labelSkillBindings.config is invalid: ${validation.errors.map(error => error.message).join('; ')}`)
+      }
+    }
+  }
+
   // Validate total bundle size
   try {
     const size = Buffer.byteLength(JSON.stringify(bundle))
@@ -639,6 +700,7 @@ export async function importResources(
       sources: { ...failedBucket },
       skills: { ...failedBucket },
       automations: { ...failedBucket },
+      labelSkillBindings: { ...failedBucket },
     }
   }
 
@@ -657,10 +719,15 @@ export async function importResources(
     ? importAutomations(workspaceRootPath, bundle.resources.automations, mode)
     : emptyBucketResult()
 
+  const labelSkillBindingsResult = bundle.resources.labelSkillBindings
+    ? importLabelSkillBindings(workspaceRootPath, bundle.resources.labelSkillBindings, mode)
+    : emptyBucketResult()
+
   return {
     sources: sourcesResult,
     skills: skillsResult,
     automations: automationsResult,
+    labelSkillBindings: labelSkillBindingsResult,
   }
 }
 
@@ -812,6 +879,109 @@ function importSkills(
       const message = err instanceof Error ? err.message : String(err)
       result.failed.push({ id: entry.slug, error: message })
     }
+  }
+
+  return result
+}
+
+// ============================================================
+// Import: Label → Skill Bindings
+// ============================================================
+
+function buildLabelSkillBindingsContext(workspaceRootPath: string): { context: { labels: Array<{ id: string }>; skills: SkillSummary[]; workspaceSlug: string }; skills: SkillSummary[] } {
+  let labels: Array<{ id: string }> = []
+  let skills: SkillSummary[] = []
+  try {
+    labels = listLabelsFlat(workspaceRootPath).map(label => ({ id: label.id }))
+  } catch {
+    labels = []
+  }
+  try {
+    skills = listSkillSummaries(workspaceRootPath) as SkillSummary[]
+  } catch {
+    skills = []
+  }
+  return {
+    context: { labels, skills, workspaceSlug: basename(workspaceRootPath) },
+    skills,
+  }
+}
+
+function collectBindingRequiredSources(binding: LabelSkillBindingsConfig['bindings'][number], skill?: SkillSummary): string[] {
+  const slugs = new Set<string>()
+  for (const slug of skill?.requiredSources ?? []) slugs.add(slug)
+  for (const slug of binding.generatedFrom?.requiredSources ?? []) slugs.add(slug)
+  for (const source of binding.requiredSourcesSnapshot ?? []) {
+    if (source.slug) slugs.add(source.slug)
+  }
+  return Array.from(slugs).sort()
+}
+
+function appendBindingImportReferenceWarnings(
+  workspaceRootPath: string,
+  config: LabelSkillBindingsConfig,
+  labels: Array<{ id: string }>,
+  skills: SkillSummary[],
+  warnings: string[],
+): void {
+  const labelIds = new Set(labels.map(label => label.id))
+  const skillsBySlug = new Map(skills.map(skill => [skill.slug, skill] as const))
+  let sourceSlugs = new Set<string>()
+  try {
+    sourceSlugs = new Set(loadWorkspaceSources(workspaceRootPath).map(source => source.config.slug))
+  } catch {
+    sourceSlugs = new Set()
+  }
+
+  for (const binding of config.bindings) {
+    if (!labelIds.has(binding.labelId)) {
+      warnings.push(`Label-skill binding '${binding.id}': label '${binding.labelId}' is missing in the target workspace`)
+    }
+    if (!skillsBySlug.has(binding.skillSlug)) {
+      warnings.push(`Label-skill binding '${binding.id}': skill '${binding.skillSlug}' is missing in the target workspace`)
+    }
+    for (const slug of collectBindingRequiredSources(binding, skillsBySlug.get(binding.skillSlug))) {
+      if (!sourceSlugs.has(slug)) {
+        warnings.push(`Label-skill binding '${binding.id}': required source '${slug}' is missing in the target workspace`)
+      }
+    }
+  }
+}
+
+function importLabelSkillBindings(
+  workspaceRootPath: string,
+  entry: LabelSkillBindingsBundleEntry,
+  mode: ResourceImportMode,
+): ImportBucketResult {
+  const result = emptyBucketResult()
+  const configPath = join(workspaceRootPath, LABEL_SKILL_BINDINGS_FILE)
+  const exists = existsSync(configPath)
+  const bucketId = LABEL_SKILL_BINDINGS_FILE
+
+  if (exists && mode === 'skip') {
+    result.skipped.push(bucketId)
+    return result
+  }
+
+  const { context, skills } = buildLabelSkillBindingsContext(workspaceRootPath)
+  const validation = validateLabelSkillBindingsConfig(entry.config, context)
+  if (!validation.valid) {
+    result.failed.push({ id: bucketId, error: validation.errors.map(error => error.message).join('; ') })
+    return result
+  }
+
+  for (const warning of validation.warnings) {
+    result.warnings.push(`Label-skill bindings: ${warning.message}`)
+  }
+  appendBindingImportReferenceWarnings(workspaceRootPath, validation.config, context.labels ?? [], skills, result.warnings)
+
+  try {
+    const tmpPath = configPath + `.tmp-${randomUUID().slice(0, 8)}`
+    writeFileSync(tmpPath, JSON.stringify(validation.config, null, 2) + '\n', 'utf-8')
+    renameSync(tmpPath, configPath)
+    result.imported.push(bucketId)
+  } catch (err) {
+    result.failed.push({ id: bucketId, error: `Failed to write label-skill-bindings.json: ${err}` })
   }
 
   return result

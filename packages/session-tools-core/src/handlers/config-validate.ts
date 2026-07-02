@@ -20,7 +20,7 @@ import {
 import { getSourceConfigPath } from '../source-helpers.ts';
 
 export interface ConfigValidateArgs {
-  target: 'config' | 'sources' | 'statuses' | 'preferences' | 'permissions' | 'automations' | 'tool-icons' | 'all';
+  target: 'config' | 'sources' | 'statuses' | 'preferences' | 'permissions' | 'automations' | 'label-skill-bindings' | 'tool-icons' | 'all';
   sourceSlug?: string;
 }
 
@@ -64,6 +64,9 @@ export async function handleConfigValidate(
           break;
         case 'automations':
           result = ctx.validators.validateAutomations(ctx.workspacePath);
+          break;
+        case 'label-skill-bindings':
+          result = ctx.validators.validateLabelSkillBindings(ctx.workspacePath);
           break;
         case 'tool-icons':
           result = ctx.validators.validateToolIcons();
@@ -163,6 +166,15 @@ export async function handleConfigValidate(
       return successResponse(`✓ No ${AUTOMATIONS_CONFIG_FILE} (no automations configured)`);
     }
 
+    case 'label-skill-bindings': {
+      const bindingsPath = join(ctx.workspacePath, 'label-skill-bindings.json');
+      if (!ctx.fs.exists(bindingsPath)) {
+        return successResponse('✓ No label-skill-bindings.json (no label-skill bindings configured)');
+      }
+      const result = validateJsonFileHasFields(bindingsPath, ['version', 'bindings']);
+      return successResponse(formatValidationResult(result));
+    }
+
     case 'tool-icons': {
       const result = validateJsonFileHasFields(
         join(craftAgentRoot, 'tool-icons', 'tool-icons.json'),
@@ -180,13 +192,17 @@ export async function handleConfigValidate(
         join(craftAgentRoot, 'preferences.json'),
         []
       );
-      const merged = mergeResults(configResult, prefsResult);
+      const bindingsPath = join(ctx.workspacePath, 'label-skill-bindings.json');
+      const bindingsResult = ctx.fs.exists(bindingsPath)
+        ? validateJsonFileHasFields(bindingsPath, ['version', 'bindings'])
+        : { valid: true, errors: [], warnings: [] };
+      const merged = mergeResults(configResult, prefsResult, bindingsResult);
       return successResponse(formatValidationResult(merged));
     }
 
     default:
       return errorResponse(
-        `Unknown validation target: ${target}. Valid targets: config, sources, statuses, preferences, permissions, automations, tool-icons, all`
+        `Unknown validation target: ${target}. Valid targets: config, sources, statuses, preferences, permissions, automations, label-skill-bindings, tool-icons, all`
       );
   }
 }

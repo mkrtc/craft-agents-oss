@@ -82,6 +82,26 @@ function createTestAutomations(
   writeFileSync(join(wsDir, 'automations.json'), JSON.stringify({ version, automations }, null, 2))
 }
 
+function createTestLabelSkillBindings(wsDir: string, overrides: Record<string, unknown> = {}): void {
+  const now = new Date('2026-01-01T00:00:00.000Z').toISOString()
+  const config = {
+    version: 1,
+    bindings: [{
+      id: 'binding-review',
+      enabled: true,
+      labelId: 'priority',
+      skillSlug: 'pdf',
+      compactInstruction: 'Apply the compact PDF skill intent.',
+      applyScope: { mode: 'workspace-slug', workspaceSlug: 'workspace' },
+      requiredSourcesSnapshot: [{ slug: 'github' }],
+      createdAt: now,
+      updatedAt: now,
+      ...overrides,
+    }],
+  }
+  writeFileSync(join(wsDir, 'label-skill-bindings.json'), JSON.stringify(config, null, 2))
+}
+
 function makeAutomationEntry(overrides: Partial<AutomationBundleEntry> & { id: string; event: string }): AutomationBundleEntry {
   return {
     matcher: {
@@ -374,6 +394,18 @@ describe('resource-bundle', () => {
       expect(bundle.resources.automations).toHaveLength(1)
     })
 
+    it('exports label-skill bindings as a workspace config bucket', () => {
+      const wsDir = createTestWorkspace(tmpDir)
+      createTestSkill(wsDir, 'pdf')
+      createTestLabelSkillBindings(wsDir)
+
+      const { bundle } = exportResources(wsDir, { labelSkillBindings: true })
+
+      expect(bundle.resources.labelSkillBindings?.config.version).toBe(1)
+      expect(bundle.resources.labelSkillBindings?.config.bindings).toHaveLength(1)
+      expect(bundle.resources.labelSkillBindings?.config.bindings[0]!.compactInstruction).toContain('PDF')
+    })
+
     it('warns for non-existent sources', () => {
       const wsDir = createTestWorkspace(tmpDir)
       const { warnings } = exportResources(wsDir, { sources: ['nonexistent'] })
@@ -426,6 +458,63 @@ describe('resource-bundle', () => {
       const { valid, errors } = validateResourceBundle(bundle)
       expect(valid).toBe(true)
       expect(errors).toHaveLength(0)
+    })
+
+    it('accepts label-skill binding config bucket', () => {
+      const bundle = {
+        version: 1,
+        exportedAt: Date.now(),
+        resources: {
+          labelSkillBindings: { config: { version: 1, bindings: [] } },
+        },
+      }
+
+      const { valid, errors } = validateResourceBundle(bundle)
+      expect(valid).toBe(true)
+      expect(errors).toHaveLength(0)
+    })
+
+    it('rejects invalid label-skill binding config bucket', () => {
+      const bundle = {
+        version: 1,
+        exportedAt: Date.now(),
+        resources: {
+          labelSkillBindings: { config: { version: 1 } },
+        },
+      }
+
+      const { valid, errors } = validateResourceBundle(bundle)
+      expect(valid).toBe(false)
+      expect(errors.some(e => e.includes('labelSkillBindings'))).toBe(true)
+    })
+
+    it('rejects label-skill binding bundles with bare-dot workspaceSlug', () => {
+      const now = new Date('2026-01-01T00:00:00.000Z').toISOString()
+      const bundle = {
+        version: 1,
+        exportedAt: Date.now(),
+        resources: {
+          labelSkillBindings: {
+            config: {
+              version: 1,
+              bindings: [{
+                id: 'binding-review',
+                enabled: true,
+                labelId: 'priority',
+                skillSlug: 'pdf',
+                compactInstruction: 'Use PDF mode.',
+                applyScope: { mode: 'workspace-slug', workspaceSlug: '  .  ' },
+                createdAt: now,
+                updatedAt: now,
+              }],
+            },
+          },
+        },
+      }
+
+      const { valid, errors } = validateResourceBundle(bundle)
+      expect(valid).toBe(false)
+      expect(errors.some(e => e.includes('workspaceSlug'))).toBe(true)
     })
 
     it('rejects non-object', () => {
@@ -689,6 +778,73 @@ describe('resource-bundle', () => {
       expect(existsSync(join(wsDir, 'skills', 'pdf-tools', 'SKILL.md'))).toBe(true)
       expect(existsSync(join(wsDir, 'skills', 'pdf-tools', 'forms.md'))).toBe(true)
       expect(existsSync(join(wsDir, 'skills', 'pdf-tools', 'scripts', 'extract.py'))).toBe(true)
+    })
+
+    it('imports label-skill bindings and warns for missing required sources', async () => {
+      const wsDir = createTestWorkspace(tmpDir)
+      createTestSkill(wsDir, 'pdf')
+      const now = new Date('2026-01-01T00:00:00.000Z').toISOString()
+      const bundle: ResourceBundle = {
+        version: 1,
+        exportedAt: Date.now(),
+        resources: {
+          labelSkillBindings: {
+            config: {
+              version: 1,
+              bindings: [{
+                id: 'binding-review',
+                enabled: true,
+                labelId: 'priority',
+                skillSlug: 'pdf',
+                compactInstruction: 'Use PDF mode.',
+                applyScope: { mode: 'workspace-slug', workspaceSlug: 'workspace' },
+                requiredSourcesSnapshot: [{ slug: 'github' }],
+                createdAt: now,
+                updatedAt: now,
+              }],
+            },
+          },
+        },
+      }
+
+      const result = await importResources(wsDir, bundle, 'overwrite', noopDeps)
+
+      expect(result.labelSkillBindings.imported).toEqual(['label-skill-bindings.json'])
+      expect(result.labelSkillBindings.warnings.some(w => w.includes('github'))).toBe(true)
+      const imported = JSON.parse(readFileSync(join(wsDir, 'label-skill-bindings.json'), 'utf-8'))
+      expect(imported.bindings[0].skillSlug).toBe('pdf')
+    })
+
+    it('skips existing label-skill bindings in skip mode', async () => {
+      const wsDir = createTestWorkspace(tmpDir)
+      createTestLabelSkillBindings(wsDir, { compactInstruction: 'Original instruction.' })
+      const now = new Date('2026-01-02T00:00:00.000Z').toISOString()
+      const bundle: ResourceBundle = {
+        version: 1,
+        exportedAt: Date.now(),
+        resources: {
+          labelSkillBindings: {
+            config: {
+              version: 1,
+              bindings: [{
+                id: 'binding-review',
+                enabled: true,
+                labelId: 'priority',
+                skillSlug: 'pdf',
+                compactInstruction: 'Imported instruction.',
+                applyScope: { mode: 'workspace-slug', workspaceSlug: 'workspace' },
+                createdAt: now,
+                updatedAt: now,
+              }],
+            },
+          },
+        },
+      }
+
+      const result = await importResources(wsDir, bundle, 'skip', noopDeps)
+
+      expect(result.labelSkillBindings.skipped).toEqual(['label-skill-bindings.json'])
+      expect(readFileSync(join(wsDir, 'label-skill-bindings.json'), 'utf-8')).toContain('Original instruction')
     })
 
     it('skips existing resources in skip mode', async () => {

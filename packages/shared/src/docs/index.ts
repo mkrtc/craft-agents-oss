@@ -108,6 +108,7 @@ export const DOC_REFS = {
   themes: `${APP_ROOT}/docs/themes.md`,
   statuses: `${APP_ROOT}/docs/statuses.md`,
   labels: `${APP_ROOT}/docs/labels.md`,
+  labelSkillBindings: `${APP_ROOT}/docs/label-skill-bindings.md`,
   toolIcons: `${APP_ROOT}/docs/tool-icons.md`,
   automations: `${APP_ROOT}/docs/automations.md`,
   hooks: `${APP_ROOT}/docs/automations.md`,

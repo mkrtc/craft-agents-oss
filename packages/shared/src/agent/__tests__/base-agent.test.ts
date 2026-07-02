@@ -6,6 +6,9 @@
  * and lifecycle management.
  */
 import { describe, it, expect, beforeEach } from 'bun:test';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'fs';
+import { tmpdir } from 'os';
+import { join } from 'path';
 import { AbortReason } from '../backend/types.ts';
 import {
   TestAgent,
@@ -184,6 +187,131 @@ describe('BaseAgent', () => {
       await collectEvents(agent.chat('test message'));
       expect(agent.chatCalls).toHaveLength(1);
       expect(agent.chatCalls[0]?.message).toBe('test message');
+    });
+
+    it('injects internal label-skill anchor context and strips provider options', async () => {
+      await collectEvents(agent.chat('test message', undefined, {
+        internal: {
+          labelSkillAnchors: {
+            block: '<label-skill-bindings-context>{}</label-skill-bindings-context>',
+            kind: 'active',
+            activeBindingIds: ['binding-1'],
+            configHash: 'hash',
+          },
+        },
+      }));
+      expect(agent.chatCalls[0]?.message).toStartWith('<label-skill-bindings-context>');
+      expect(agent.chatCalls[0]?.message).toEndWith('test message');
+      expect(agent.chatCalls[0]?.options).toBeUndefined();
+    });
+
+    it('keeps /compact as the first bytes when injecting hidden context', async () => {
+      await collectEvents(agent.chat('/compact preserve this', undefined, {
+        internal: {
+          labelSkillAnchors: {
+            block: '<label-skill-bindings-context>{}</label-skill-bindings-context>',
+            kind: 'active',
+            activeBindingIds: ['binding-1'],
+            configHash: 'hash',
+          },
+        },
+      }));
+      expect(agent.chatCalls[0]?.message.startsWith('/compact')).toBe(true);
+      expect(agent.chatCalls[0]?.message).toContain('<label-skill-bindings-context>');
+      expect(agent.chatCalls[0]?.options).toBeUndefined();
+    });
+
+    it('bootstraps label-bound skill paths through the standard read directive and strips internal options', async () => {
+      let registered: unknown;
+      await collectEvents(agent.chat('test message', undefined, {
+        internal: {
+          labelSkillAnchors: {
+            block: '<label-skill-bindings-context>{}</label-skill-bindings-context>',
+            kind: 'active',
+            activeBindingIds: ['binding-1'],
+            configHash: 'hash',
+          },
+          labelSkillBootstrap: {
+            entries: [{
+              bindingId: 'binding-1',
+              labelId: 'review',
+              skillSlug: 'audit',
+              skillPath: '/tmp/audit/SKILL.md',
+            }],
+            configHash: 'hash',
+            onRegistered: event => { registered = event; },
+          },
+        },
+      }));
+
+      expect(agent.chatCalls[0]?.message).toContain('Before proceeding with the user\'s request, you MUST read the following skill instruction files');
+      expect(agent.chatCalls[0]?.message).toContain('/tmp/audit/SKILL.md (skill: audit)');
+      expect(agent.chatCalls[0]?.message).toContain('<label-skill-bindings-context>');
+      expect(agent.chatCalls[0]?.message).toEndWith('test message');
+      expect(agent.chatCalls[0]?.options).toBeUndefined();
+      expect(registered).toMatchObject({ bindingIds: ['binding-1'], skillSlugs: ['audit'], configHash: 'hash' });
+    });
+
+    it('keeps /compact as the first bytes when bootstrap options are present', async () => {
+      await collectEvents(agent.chat('/compact preserve this', undefined, {
+        internal: {
+          labelSkillBootstrap: {
+            entries: [{
+              bindingId: 'binding-1',
+              labelId: 'review',
+              skillSlug: 'audit',
+              skillPath: '/tmp/audit/SKILL.md',
+            }],
+            configHash: 'hash',
+          },
+        },
+      }));
+
+      expect(agent.chatCalls[0]?.message.startsWith('/compact')).toBe(true);
+      expect(agent.chatCalls[0]?.message).toContain('/tmp/audit/SKILL.md (skill: audit)');
+      expect(agent.chatCalls[0]?.options).toBeUndefined();
+    });
+
+    it('dedupes explicit skill mentions before label-bound bootstrap paths', async () => {
+      const tmpRoot = mkdtempSync(join(tmpdir(), 'base-agent-skill-'));
+      try {
+        const skillDir = join(tmpRoot, 'skills', 'audit');
+        mkdirSync(skillDir, { recursive: true });
+        const skillPath = join(skillDir, 'SKILL.md');
+        writeFileSync(skillPath, '---\nname: Audit\ndescription: Audit carefully\n---\nRead this skill.\n', 'utf-8');
+        const tmpAgent = new TestAgent(createMockBackendConfig({
+          workspace: {
+            id: 'test-workspace-id',
+            name: 'Test Workspace',
+            slug: 'workspace',
+            rootPath: tmpRoot,
+            createdAt: Date.now(),
+          },
+          session: {
+            id: 'test-session-id',
+            workspaceRootPath: tmpRoot,
+            createdAt: Date.now(),
+            lastUsedAt: Date.now(),
+            workingDirectory: tmpRoot,
+          },
+        }));
+
+        await collectEvents(tmpAgent.chat('[skill:audit] do it', undefined, {
+          internal: {
+            labelSkillBootstrap: {
+              entries: [{ bindingId: 'binding-1', labelId: 'review', skillSlug: 'audit', skillPath: '/different/audit/SKILL.md' }],
+              configHash: 'hash',
+            },
+          },
+        }));
+
+        const message = tmpAgent.chatCalls[0]?.message ?? '';
+        expect(message).toContain(`${skillPath} (skill: audit)`);
+        expect(message).not.toContain('/different/audit/SKILL.md');
+        expect((message.match(/\(skill: audit\)/g) ?? []).length).toBe(1);
+      } finally {
+        rmSync(tmpRoot, { recursive: true, force: true });
+      }
     });
 
     it('should track abort calls', async () => {

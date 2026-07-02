@@ -13,9 +13,6 @@
  * Provider-specific behavior (chat, abort, capabilities) is implemented in subclasses.
  */
 
-import { existsSync } from 'node:fs';
-import { join } from 'node:path';
-
 import type { AgentEvent } from '@craft-agent/core/types';
 import type { FileAttachment } from '../utils/files.ts';
 import { expandPath } from '../utils/paths.ts';
@@ -64,8 +61,8 @@ import { getMiniAgentSystemPrompt } from '../prompts/system.ts';
 import { buildTitlePrompt, buildRegenerateTitlePrompt, validateTitle } from '../utils/title-generator.ts';
 
 // Skill extraction for Codex/Copilot backends (Claude uses native SDK Skill tool)
-import { parseMentions, resolveSkillMentions, resolveSourceMentions, resolveFileMentions } from '../mentions/index.ts';
-import { loadAllSkills } from '../skills/storage.ts';
+import { WS_ID_CHARS, resolveSkillMentions, resolveSourceMentions, resolveFileMentions } from '../mentions/index.ts';
+import { loadSkillSummaryBySlug, resolveSkillFilePathBySlug } from '../skills/storage.ts';
 
 // ============================================================
 // Mini Agent Configuration
@@ -915,6 +912,23 @@ ${formattedMessages}
   // ============================================================
 
   /**
+   * Cheaply extract distinct skill slugs from raw bracket mentions without loading
+   * any skill directories. Used to keep normal turns free of SKILL.md reads.
+   */
+  protected extractMentionedSkillSlugs(message: string): string[] {
+    const pattern = new RegExp(`\\[skill:(?:${WS_ID_CHARS}+:)?([\\w-]+)\\]`, 'g');
+    const slugs: string[] = [];
+    let match: RegExpExecArray | null;
+    while ((match = pattern.exec(message)) !== null) {
+      const slug = match[1];
+      if (slug && !slugs.includes(slug)) {
+        slugs.push(slug);
+      }
+    }
+    return slugs;
+  }
+
+  /**
    * Extract skill mentions from a message and resolve their SKILL.md paths.
    *
    * Parses [skill:slug] or [skill:workspaceId:slug] mentions, resolves the
@@ -934,39 +948,44 @@ ${formattedMessages}
   } {
     const workspaceRoot = this.config.workspace?.rootPath ?? this.workingDirectory;
     const projectRoot = this.config.session?.workingDirectory;
-    const skills = loadAllSkills(workspaceRoot, projectRoot);
-    const skillSlugs = skills.map(s => s.slug);
+    const workDir = this.config.session?.workingDirectory ?? this.workingDirectory;
+    const mentionedSkillSlugs = this.extractMentionedSkillSlugs(message);
 
-    this.debug(`[extractSkillPaths] Available skills: ${skillSlugs.join(', ')}`);
-
-    const parsed = parseMentions(message, skillSlugs, []);
-    this.debug(`[extractSkillPaths] Parsed skills: ${JSON.stringify(parsed.skills)}`);
-    if (parsed.invalidSkills && parsed.invalidSkills.length > 0) {
-      this.debug(`[extractSkillPaths] Invalid skills: ${JSON.stringify(parsed.invalidSkills)}`);
+    // Fast path: normal turns with no explicit [skill:] mention must not load or
+    // read SKILL.md files. Still resolve source/file mentions as before.
+    if (mentionedSkillSlugs.length === 0) {
+      const withSources = resolveSourceMentions(message);
+      const cleanMessage = resolveFileMentions(withSources, workDir).trim();
+      return {
+        skillPaths: new Map(),
+        cleanMessage,
+        missingSkills: [],
+      };
     }
 
-    // Resolve SKILL.md paths for matched skills
+    this.debug(`[extractSkillPaths] Mentioned skills: ${mentionedSkillSlugs.join(', ')}`);
+
     const skillPaths = new Map<string, string>();
-    for (const slug of parsed.skills) {
-      const skill = skills.find(s => s.slug === slug);
-      if (skill) {
-        const skillMdPath = join(skill.path, 'SKILL.md');
-        if (existsSync(skillMdPath)) {
-          skillPaths.set(slug, skillMdPath);
-          this.debug(`[extractSkillPaths] Resolved skill ${slug} → ${skillMdPath}`);
-        } else {
-          this.debug(`[extractSkillPaths] SKILL.md not found: ${skillMdPath}`);
-        }
+    const skillNames = new Map<string, string>();
+    const missingSkills: string[] = [];
+
+    for (const slug of mentionedSkillSlugs) {
+      const summary = loadSkillSummaryBySlug(workspaceRoot, slug, projectRoot);
+      const skillMdPath = resolveSkillFilePathBySlug(workspaceRoot, slug, projectRoot);
+      if (!summary || !skillMdPath) {
+        missingSkills.push(slug);
+        continue;
       }
+      skillNames.set(slug, summary.metadata.name);
+      skillPaths.set(slug, skillMdPath);
+      this.debug(`[extractSkillPaths] Resolved skill ${slug} → ${skillMdPath}`);
     }
 
     // Resolve mentions to semantic markers (like file mentions) instead of stripping them.
     // This preserves sentence structure: "find the bug in [skill:datadog-api]"
     // becomes "find the bug in [Mentioned skill: Datadog API (slug: datadog-api)]"
-    const skillNames = new Map(skills.map(s => [s.slug, s.metadata.name]));
     const withSkills = resolveSkillMentions(message, skillNames);
     const withSources = resolveSourceMentions(withSkills);
-    const workDir = this.config.session?.workingDirectory ?? this.workingDirectory;
     const resolved = resolveFileMentions(withSources, workDir).trim();
 
     // If user sent only skill mentions with no other text, add a directive
@@ -979,7 +998,7 @@ ${formattedMessages}
     return {
       skillPaths,
       cleanMessage,
-      missingSkills: parsed.invalidSkills || []
+      missingSkills,
     };
   }
 
@@ -993,6 +1012,27 @@ ${formattedMessages}
       .map(([slug, path]) => `- ${path} (skill: ${slug})`)
       .join('\n');
     return `Before proceeding with the user's request, you MUST read the following skill instruction files using the Read tool or \`cat\` via Bash:\n${pathList}\n\nDo not take any other action until you have read these files.`;
+  }
+
+  protected composeProviderMessage(
+    cleanMessage: string,
+    contextParts: Array<string | null | undefined>,
+  ): string {
+    const parts = contextParts.filter((part): part is string => !!part);
+    if (cleanMessage.startsWith('/compact')) {
+      // Slash commands are parsed from the first bytes by provider backends.
+      // Keep /compact at byte 0 and append hidden/context guidance afterward.
+      return [cleanMessage, ...parts].filter(Boolean).join('\n\n');
+    }
+    return [...parts, cleanMessage].filter(Boolean).join('\n\n');
+  }
+
+  protected stripInternalChatOptions(options?: ChatOptions): ChatOptions | undefined {
+    if (!options?.internal) return options;
+    const stripped: ChatOptions = {};
+    if (options.isRetry !== undefined) stripped.isRetry = options.isRetry;
+    if (options.thinkingOverride !== undefined) stripped.thinkingOverride = options.thinkingOverride;
+    return Object.keys(stripped).length > 0 ? stripped : undefined;
   }
 
   // ============================================================
@@ -1017,9 +1057,26 @@ ${formattedMessages}
       return;
     }
 
+    const labelSkillBootstrap = options?.internal?.labelSkillBootstrap;
+    const bootstrapEntries = (labelSkillBootstrap?.entries ?? [])
+      .filter(entry => !!entry.skillSlug && !!entry.skillPath);
+    const mergedSkillPaths = new Map(skillPaths);
+    const bootstrappedBindingIds: string[] = [];
+    const bootstrappedSkillSlugs: string[] = [];
+    for (const entry of bootstrapEntries) {
+      // Explicit [skill:...] mentions win. If the same skill was explicit, the
+      // explicit path/directive remains and the label-bound bootstrap is deduped.
+      if (mergedSkillPaths.has(entry.skillSlug)) continue;
+      mergedSkillPaths.set(entry.skillSlug, entry.skillPath);
+      bootstrappedBindingIds.push(entry.bindingId);
+      if (!bootstrappedSkillSlugs.includes(entry.skillSlug)) {
+        bootstrappedSkillSlugs.push(entry.skillSlug);
+      }
+    }
+
     // Register skill prerequisites — blocks all tools until SKILL.md files are read.
-    if (skillPaths.size > 0) {
-      this.prerequisiteManager.registerSkillPrerequisites([...skillPaths.values()]);
+    if (mergedSkillPaths.size > 0) {
+      this.prerequisiteManager.registerSkillPrerequisites([...mergedSkillPaths.values()]);
     }
 
     // Prepend branch seed context (for seeded branch sessions) and transferred-session summary.
@@ -1036,17 +1093,45 @@ ${formattedMessages}
       this.config.markTransferredSessionSummaryApplied?.();
     }
 
-    // Prepend read directive to the message so the model reads SKILL.md first.
-    const directive = this.formatSkillDirective(skillPaths);
-    const messageParts = [branchSeedContext, transferredSessionContext, directive, cleanMessage].filter(Boolean);
-    const effectiveMessage = messageParts.join('\n\n');
+    // Prepend hidden context and skill read directives to the provider message.
+    // Label-skill anchors are compact, metadata-derived guidance. First-turn
+    // label-bound bootstrap entries reuse the same read-directive/prerequisite
+    // path as explicit [skill:...] mentions without inlining SKILL.md bodies.
+    const directive = this.formatSkillDirective(mergedSkillPaths);
+    const labelSkillAnchorBlock = options?.internal?.labelSkillAnchors?.block;
+    const labelSkillBootstrapOverflowNote = (labelSkillBootstrap?.overflowBindingIds?.length ?? 0) > 0
+      ? `<label-skill-bootstrap-note>First-turn SKILL.md bootstrap was capped after ${bootstrappedSkillSlugs.length} unique label-bound skill(s) after explicit-skill dedupe. Overflow bindings remain active through compact label-skill anchors only: ${labelSkillBootstrap!.overflowBindingIds!.join(', ')}.</label-skill-bootstrap-note>`
+      : null;
+    const effectiveMessage = this.composeProviderMessage(cleanMessage, [
+      branchSeedContext,
+      transferredSessionContext,
+      directive,
+      labelSkillAnchorBlock,
+      labelSkillBootstrapOverflowNote,
+    ]);
+    const providerOptions = this.stripInternalChatOptions(options);
 
     // Capture the raw user message for source-activation auto-retry. `cleanMessage`
     // has skill paths stripped but otherwise matches what the user typed — exactly
     // what we want to resend when an activation forces a turn restart.
     this.setCurrentTurnUserMessage(cleanMessage);
+    let bootstrapRegistered = false;
+    const acknowledgeBootstrapRegistered = () => {
+      if (bootstrapRegistered || bootstrappedBindingIds.length === 0) return;
+      bootstrapRegistered = true;
+      labelSkillBootstrap?.onRegistered?.({
+        bindingIds: bootstrappedBindingIds,
+        skillSlugs: bootstrappedSkillSlugs,
+        configHash: labelSkillBootstrap.configHash,
+        registeredAt: new Date().toISOString(),
+      });
+    };
     try {
-      yield* this.chatImpl(effectiveMessage, attachments, options);
+      for await (const event of this.chatImpl(effectiveMessage, attachments, providerOptions)) {
+        acknowledgeBootstrapRegistered();
+        yield event;
+      }
+      acknowledgeBootstrapRegistered();
     } finally {
       this.setCurrentTurnUserMessage(null);
     }

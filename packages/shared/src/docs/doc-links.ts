@@ -14,6 +14,7 @@ export type DocFeature =
   | 'statuses'
   | 'permissions'
   | 'labels'
+  | 'label-skill-bindings'
   | 'workspaces'
   | 'themes'
   | 'app-settings'
@@ -78,6 +79,12 @@ export const DOCS: Record<DocFeature, DocInfo> = {
     title: 'Labels',
     summary:
       'Tag sessions with colored labels for organization and filtering. Labels support hierarchical nesting, typed values, and auto-apply rules that extract data from messages using regex patterns.',
+  },
+  'label-skill-bindings': {
+    path: '/labels/overview',
+    title: 'Label → Skill Bindings',
+    summary:
+      'Attach compact skill guidance to workspace labels so sessions automatically receive focused instructions when matching labels are active.',
   },
   workspaces: {
     path: '/go-further/workspaces',

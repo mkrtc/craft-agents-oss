@@ -73,10 +73,13 @@ files:
 extraMetadata:
   main: dist/main.cjs
 
-# Auto-update: electron-updater fetches from this URL for update manifests (.yml files)
+# Auto-update: electron-updater fetches update manifests (.yml files)
+# and artifacts from GitHub Releases for this repository.
 publish:
-  provider: generic
-  url: https://agents.craft.do/electron/latest
+  provider: github
+  owner: mkrtc
+  repo: craft-agents-oss
+  releaseType: release
 
 # Disable ASAR to avoid decompression overhead and click delays
 asar: false

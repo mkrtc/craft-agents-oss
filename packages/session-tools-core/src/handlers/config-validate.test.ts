@@ -32,7 +32,7 @@ function createCtx(workspacePath: string) {
   } as const;
 }
 
-describe('config-validate automations target', () => {
+describe('config-validate workspace config targets', () => {
   let tempDir: string;
 
   beforeEach(() => {
@@ -53,5 +53,24 @@ describe('config-validate automations target', () => {
   it('returns no-config message when automations.json does not exist', async () => {
     const result = await handleConfigValidate(createCtx(tempDir), { target: 'automations' });
     expect(result.content[0]?.text).toContain('No automations.json');
+  });
+
+  it('validates label-skill-bindings.json when present', async () => {
+    writeFileSync(join(tempDir, 'label-skill-bindings.json'), JSON.stringify({ version: 1, bindings: [] }));
+
+    const result = await handleConfigValidate(createCtx(tempDir), { target: 'label-skill-bindings' });
+    expect(result.content[0]?.text).toContain('Validation passed');
+  });
+
+  it('returns no-config message when label-skill-bindings.json does not exist', async () => {
+    const result = await handleConfigValidate(createCtx(tempDir), { target: 'label-skill-bindings' });
+    expect(result.content[0]?.text).toContain('No label-skill-bindings.json');
+  });
+
+  it('includes label-skill-bindings.json in fallback all validation when present', async () => {
+    writeFileSync(join(tempDir, 'label-skill-bindings.json'), JSON.stringify({ version: 1 }));
+
+    const result = await handleConfigValidate(createCtx(tempDir), { target: 'all' });
+    expect(result.content[0]?.text).toContain('Missing required field: bindings');
   });
 });

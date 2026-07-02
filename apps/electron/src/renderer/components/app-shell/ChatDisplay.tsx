@@ -515,6 +515,7 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
   const [visibleTurnCount, setVisibleTurnCount] = React.useState(TURNS_PER_PAGE)
   // Sticky-bottom: When true, auto-scroll on content changes. Toggled by user scroll behavior.
   const isStickToBottomRef = React.useRef(true)
+  const [isAtScrollBottom, setIsAtScrollBottom] = React.useState(true)
   // Mirror isFocusedPanel into a ref so the ResizeObserver closure reads the latest value
   const isFocusedPanelRef = React.useRef(isFocusedPanel)
   isFocusedPanelRef.current = isFocusedPanel
@@ -1147,7 +1148,9 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
     const { scrollTop, scrollHeight, clientHeight } = viewport
     const distanceFromBottom = scrollHeight - scrollTop - clientHeight
     // 20px threshold for "at bottom" detection
-    isStickToBottomRef.current = distanceFromBottom < 20
+    const atBottom = distanceFromBottom < 20
+    isStickToBottomRef.current = atBottom
+    setIsAtScrollBottom(prev => prev === atBottom ? prev : atBottom)
 
     // Load more turns when scrolling near top (within 100px)
     if (scrollTop < 100) {
@@ -1190,6 +1193,7 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
     // On session switch: reset UI state (scroll handled by ScrollOnMount)
     if (isSessionSwitch) {
       isStickToBottomRef.current = true
+      setIsAtScrollBottom(true)
       setVisibleTurnCount(TURNS_PER_PAGE)
     }
 
@@ -1255,6 +1259,7 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
 
     // Sending a message should always re-stick to bottom.
     isStickToBottomRef.current = true
+    setIsAtScrollBottom(true)
 
     requestAnimationFrame(() => {
       messagesEndRef.current?.scrollIntoView({
@@ -1277,6 +1282,7 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
 
     // Force stick-to-bottom when user sends a message
     isStickToBottomRef.current = true
+    setIsAtScrollBottom(true)
     onSendMessage(normalizedMessage, attachments, skillSlugs)
 
     // Persist sent marker on follow-up annotations so TurnCard can distinguish
@@ -1522,6 +1528,28 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
   }) => {
     scrollToFollowUpTurn(item)
   }, [scrollToFollowUpTurn])
+
+  const handleScrollToBottomClick = React.useCallback(() => {
+    isStickToBottomRef.current = true
+    setIsAtScrollBottom(true)
+
+    const viewport = scrollViewportRef.current
+    if (!viewport) {
+      messagesEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' })
+      return
+    }
+
+    viewport.scrollTo({ top: viewport.scrollHeight, behavior: 'smooth' })
+
+    // Smooth scroll can settle a few pixels above the clamp point in Chromium,
+    // which keeps the "scroll to bottom" button visible. Snap once after the
+    // animation window so the viewport is truly at the bottom.
+    window.setTimeout(() => {
+      viewport.scrollTop = viewport.scrollHeight
+      isStickToBottomRef.current = true
+      setIsAtScrollBottom(true)
+    }, 350)
+  }, [])
 
   // Compute if we should skip scroll-to-bottom (when search is active on session switch)
   // At render time, prevSessionIdForScrollRef still has the OLD session ID, so we can detect the switch
@@ -2003,6 +2031,26 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
             sessionStatuses={sessionStatuses}
             currentSessionStatus={session.sessionStatus || 'todo'}
             onSessionStatusChange={onSessionStatusChange}
+            rightAccessory={(
+              <AnimatePresence initial={false}>
+                {!compactMode && !isAtScrollBottom && !messagesLoading && !messagesLoadError && (
+                  <motion.button
+                    key="scroll-to-bottom"
+                    type="button"
+                    initial={{ opacity: 0, x: 6, scale: 0.96 }}
+                    animate={{ opacity: 1, x: 0, scale: 1 }}
+                    exit={{ opacity: 0, x: 6, scale: 0.96 }}
+                    transition={{ duration: 0.12, ease: 'easeOut' }}
+                    onClick={handleScrollToBottomClick}
+                    className="inline-flex h-[30px] w-[30px] shrink-0 items-center justify-center rounded-[8px] border border-border/60 bg-[color-mix(in_srgb,var(--background)_97%,var(--foreground)_3%)] text-foreground/80 shadow-minimal transition-colors hover:bg-foreground/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+                    aria-label="Scroll to bottom"
+                    title="Scroll to bottom"
+                  >
+                    <ChevronDown className="h-3.5 w-3.5" />
+                  </motion.button>
+                )}
+              </AnimatePresence>
+            )}
             inputProps={{
               placeholder,
               disabled: isInputDisabled,

@@ -17,6 +17,7 @@ import {
   Tag,
   ToggleRight,
   UserCircle,
+  Workflow,
 } from 'lucide-react'
 import type { SettingsSubpage } from '../../../shared/types'
 
@@ -29,6 +30,7 @@ export const InputIcon = ({ className }: IconProps) => <Keyboard className={clas
 export const WorkspaceIcon = ({ className }: IconProps) => <Building2 className={className} />
 export const PermissionsIcon = ({ className }: IconProps) => <ShieldCheck className={className} />
 export const LabelsIcon = ({ className }: IconProps) => <Tag className={className} />
+export const SkillBindingsIcon = ({ className }: IconProps) => <Workflow className={className} />
 export const MessagingSettingsIcon = ({ className }: IconProps) => <MessageSquare className={className} />
 export const ServerSettingsIcon = ({ className }: IconProps) => <Server className={className} />
 export const ShortcutsIcon = ({ className }: IconProps) => <Keyboard className={className} />
@@ -46,6 +48,7 @@ export const SETTINGS_ICONS: Record<SettingsSubpage, React.ComponentType<IconPro
   workspace: WorkspaceIcon,
   permissions: PermissionsIcon,
   labels: LabelsIcon,
+  'skill-bindings': SkillBindingsIcon,
   messaging: MessagingSettingsIcon,
   server: ServerSettingsIcon,
   shortcuts: ShortcutsIcon,

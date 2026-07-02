@@ -2,7 +2,10 @@
 
 set -e
 
-VERSIONS_URL="https://agents.craft.do/electron"
+# Default to GitHub Releases for this fork. Override for staging/custom feeds with:
+#   CRAFT_AGENTS_DOWNLOAD_BASE_URL=https://example.com/path/to/latest/download
+DOWNLOAD_BASE_URL="${CRAFT_AGENTS_DOWNLOAD_BASE_URL:-https://github.com/mkrtc/craft-agents-oss/releases/latest/download}"
+DOWNLOAD_BASE_URL="${DOWNLOAD_BASE_URL%/}"
 DOWNLOAD_DIR="$HOME/.craft-agent/downloads"
 
 # Colors for output
@@ -74,25 +77,27 @@ download_file() {
     fi
 }
 
-# Extract sha512 from YAML for a specific architecture
-# YAML format: files array with url, sha512, arch fields
+# Extract sha512 from YAML for a specific architecture.
+# Supports both manifests with per-file `arch:` fields and standard
+# electron-builder manifests that only contain a single files[] entry.
 get_sha512_from_yaml() {
     local yaml="$1"
     local target_arch="$2"
 
-    # Find the line with the target arch and extract sha512 from preceding lines
-    local in_target_block=false
     local sha512=""
+    local first_sha512=""
 
     while IFS= read -r line; do
         # Check if we're entering a new file entry
         if [[ $line =~ ^[[:space:]]*-[[:space:]]*url: ]]; then
-            in_target_block=false
             sha512=""
         fi
         # Extract sha512
         if [[ $line =~ sha512:[[:space:]]*(.+) ]]; then
             sha512="${BASH_REMATCH[1]}"
+            if [ -z "$first_sha512" ]; then
+                first_sha512="$sha512"
+            fi
         fi
         # Check arch
         if [[ $line =~ arch:[[:space:]]*(.+) ]]; then
@@ -104,20 +109,30 @@ get_sha512_from_yaml() {
         fi
     done <<< "$yaml"
 
+    if [ -n "$first_sha512" ]; then
+        echo "$first_sha512"
+        return 0
+    fi
+
     return 1
 }
 
-# Extract filename from YAML for a specific architecture
+# Extract filename from YAML for a specific architecture.
+# Falls back to the first files[].url/path for single-arch manifests.
 get_filename_from_yaml() {
     local yaml="$1"
     local target_arch="$2"
 
     local url=""
+    local first_url=""
 
     while IFS= read -r line; do
         # Check if we're entering a new file entry
         if [[ $line =~ ^[[:space:]]*-[[:space:]]*url:[[:space:]]*(.+) ]]; then
             url="${BASH_REMATCH[1]}"
+            if [ -z "$first_url" ]; then
+                first_url="$url"
+            fi
         fi
         # Check arch
         if [[ $line =~ arch:[[:space:]]*(.+) ]]; then
@@ -128,6 +143,11 @@ get_filename_from_yaml() {
             fi
         fi
     done <<< "$yaml"
+
+    if [ -n "$first_url" ]; then
+        echo "$first_url"
+        return 0
+    fi
 
     return 1
 }
@@ -164,9 +184,9 @@ info "Detected platform: $platform"
 mkdir -p "$DOWNLOAD_DIR"
 mkdir -p "$INSTALL_DIR"
 
-# Fetch YAML manifest directly from /electron/latest/ (no version endpoint needed)
+# Fetch YAML manifest directly from the latest release assets.
 info "Fetching release info..."
-manifest_yaml=$(download_file "$VERSIONS_URL/latest/$yml_file")
+manifest_yaml=$(download_file "$DOWNLOAD_BASE_URL/$yml_file")
 
 if [ -z "$manifest_yaml" ]; then
     error "Failed to fetch release info from $yml_file"
@@ -187,8 +207,14 @@ info "Latest version: $version"
 
 # Extract sha512 and filename for our architecture
 if [ "$HAS_YQ" = true ]; then
-    checksum=$(echo "$manifest_yaml" | yq -r ".files[] | select(.arch == \"$arch\") | .sha512")
-    filename=$(echo "$manifest_yaml" | yq -r ".files[] | select(.arch == \"$arch\") | .url")
+    checksum=$(echo "$manifest_yaml" | yq -r ".files[] | select(.arch == \"$arch\") | .sha512" | head -1)
+    filename=$(echo "$manifest_yaml" | yq -r ".files[] | select(.arch == \"$arch\") | .url" | head -1)
+    if [ -z "$checksum" ] || [ "$checksum" = "null" ]; then
+        checksum=$(echo "$manifest_yaml" | yq -r ".files[0].sha512 // .sha512 // empty")
+    fi
+    if [ -z "$filename" ] || [ "$filename" = "null" ]; then
+        filename=$(echo "$manifest_yaml" | yq -r ".files[0].url // .path // empty")
+    fi
 else
     checksum=$(get_sha512_from_yaml "$manifest_yaml" "$arch")
     filename=$(get_filename_from_yaml "$manifest_yaml" "$arch")
@@ -196,7 +222,7 @@ fi
 
 # Validate checksum format (SHA512 base64 = 88 characters)
 if [ -z "$checksum" ] || [ ${#checksum} -lt 80 ]; then
-    error "Architecture $arch not found in $yml_file"
+    error "No valid checksum found in $yml_file for architecture $arch"
 fi
 
 # Use default filename if not found
@@ -207,7 +233,7 @@ fi
 info "Expected sha512: ${checksum:0:20}..."
 
 # Download installer
-installer_url="$VERSIONS_URL/latest/$filename"
+installer_url="$DOWNLOAD_BASE_URL/$filename"
 installer_path="$DOWNLOAD_DIR/$filename"
 
 info "Downloading $filename..."

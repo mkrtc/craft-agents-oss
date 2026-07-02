@@ -7,6 +7,7 @@ export type {
   SourceBundleEntry,
   SkillBundleEntry,
   AutomationBundleEntry,
+  LabelSkillBindingsBundleEntry,
   ResourceImportMode,
   ExportResourcesOptions,
   ExportResult,

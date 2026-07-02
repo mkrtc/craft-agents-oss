@@ -381,6 +381,13 @@ export const REMOTE_ELIGIBLE_CHANNELS = new Set<string>([
   RPC_CHANNELS.labels.DELETE,
   RPC_CHANNELS.labels.CHANGED,
 
+  // label-skill bindings — workspace metadata/runtime config
+  RPC_CHANNELS.labelSkillBindings.GET,
+  RPC_CHANNELS.labelSkillBindings.SAVE,
+  RPC_CHANNELS.labelSkillBindings.LIST_BINDABLE_SKILLS,
+  RPC_CHANNELS.labelSkillBindings.GENERATE_COMPACT_INSTRUCTION,
+  RPC_CHANNELS.labelSkillBindings.CHANGED,
+
   // views — workspace UI views
   RPC_CHANNELS.views.LIST,
   RPC_CHANNELS.views.SAVE,

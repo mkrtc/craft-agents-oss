@@ -50,7 +50,7 @@ export const SubmitPlanSchema = z.object({
 });
 
 export const ConfigValidateSchema = z.object({
-  target: z.enum(['config', 'sources', 'statuses', 'preferences', 'permissions', 'automations', 'tool-icons', 'all'])
+  target: z.enum(['config', 'sources', 'statuses', 'preferences', 'permissions', 'automations', 'label-skill-bindings', 'tool-icons', 'all'])
     .describe('Which config file(s) to validate'),
   sourceSlug: z.string().optional().describe('Validate a specific source by slug'),
 });
@@ -248,6 +248,7 @@ Returns structured validation results with errors, warnings, and suggestions.
 - \`preferences\`: Validates preferences.json
 - \`permissions\`: Validates permissions.json files
 - \`automations\`: Validates automations.json configuration
+- \`label-skill-bindings\`: Validates label-skill-bindings.json
 - \`tool-icons\`: Validates tool-icons.json
 - \`all\`: Validates all configuration files`,
 

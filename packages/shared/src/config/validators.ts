@@ -9,6 +9,7 @@
  * - preferences.json: User preferences
  * - sources/{slug}/config.json: Workspace-scoped source configs
  * - permissions.json: Permission rules for Explore mode
+ * - label-skill-bindings.json: Label → Skill binding rules
  * - tool-icons/tool-icons.json: CLI tool icon mappings
  */
 
@@ -331,29 +332,27 @@ export function validatePreferences(): ValidationResult {
 }
 
 /**
- * Validate all config files
- * @param workspaceId - Optional workspace ID for source validation
- * @param workspaceRoot - Optional workspace root path for skill and status validation
+ * Validate all config files.
+ * @param workspaceId - Backward-compatible workspace root/path argument.
+ * @param workspaceRoot - Optional explicit workspace root path.
  */
 export function validateAll(workspaceId?: string, workspaceRoot?: string): ValidationResult {
+  const effectiveWorkspaceRoot = workspaceRoot ?? workspaceId;
   const results: ValidationResult[] = [
     validateConfig(),
     validatePreferences(),
     validateToolIcons(),
   ];
 
-  // Include workspace-scoped validations if workspaceId is provided
-  if (workspaceId) {
-    results.push(validateAllSources(workspaceId));
-  }
-
-  // Include skill, status, label, automations, and permissions validation if workspaceRoot is provided
-  if (workspaceRoot) {
-    results.push(validateAllSkills(workspaceRoot));
-    results.push(validateStatuses(workspaceRoot));
-    results.push(validateLabels(workspaceRoot));
-    results.push(validateAutomations(workspaceRoot));
-    results.push(validateAllPermissions(workspaceRoot));
+  // Include workspace-scoped validations if a workspace root/path is provided.
+  if (effectiveWorkspaceRoot) {
+    results.push(validateAllSources(effectiveWorkspaceRoot));
+    results.push(validateAllSkills(effectiveWorkspaceRoot));
+    results.push(validateStatuses(effectiveWorkspaceRoot));
+    results.push(validateLabels(effectiveWorkspaceRoot));
+    results.push(validateLabelSkillBindings(effectiveWorkspaceRoot));
+    results.push(validateAutomations(effectiveWorkspaceRoot));
+    results.push(validateAllPermissions(effectiveWorkspaceRoot));
   }
 
   const allErrors = results.flatMap(r => r.errors);
@@ -1343,6 +1342,169 @@ export function validateLabelsContent(jsonString: string): ValidationResult {
 }
 
 // ============================================================
+// Label → Skill Binding Validators
+// ============================================================
+
+import {
+  LABEL_SKILL_BINDINGS_FILE,
+  validateLabelSkillBindingsConfig,
+  type LabelSkillBinding,
+  type LabelSkillBindingDiagnostic,
+  type LabelSkillBindingsConfig,
+  type LabelSkillBindingsContext,
+} from '../label-skill-bindings/index.ts';
+import { listLabelsFlat } from '../labels/storage.ts';
+import { listSkillSummaries } from '../skills/storage.ts';
+import { loadWorkspaceSources } from '../sources/storage.ts';
+import type { SkillSummary } from '../skills/types.ts';
+
+function labelSkillBindingDiagnosticToIssue(file: string, diagnostic: LabelSkillBindingDiagnostic): ValidationIssue {
+  return {
+    file,
+    path: diagnostic.bindingId ? `bindings[id=${diagnostic.bindingId}]` : '',
+    message: diagnostic.message,
+    severity: diagnostic.severity,
+  };
+}
+
+function buildLabelSkillBindingsValidationContext(workspaceRoot: string): { context: LabelSkillBindingsContext; skills: SkillSummary[] } {
+  let labels: Array<{ id: string }> = [];
+  let skills: SkillSummary[] = [];
+  try {
+    labels = listLabelsFlat(workspaceRoot).map(label => ({ id: label.id }));
+  } catch {
+    labels = [];
+  }
+  try {
+    skills = listSkillSummaries(workspaceRoot) as SkillSummary[];
+  } catch {
+    skills = [];
+  }
+  return {
+    context: {
+      labels,
+      skills,
+      workspaceSlug: basename(workspaceRoot),
+    },
+    skills,
+  };
+}
+
+function collectRequiredSourceSlugs(binding: LabelSkillBinding, skill?: SkillSummary): string[] {
+  const slugs = new Set<string>();
+  for (const slug of skill?.requiredSources ?? []) slugs.add(slug);
+  for (const slug of binding.generatedFrom?.requiredSources ?? []) slugs.add(slug);
+  for (const source of binding.requiredSourcesSnapshot ?? []) {
+    if (source.slug) slugs.add(source.slug);
+  }
+  return Array.from(slugs).sort();
+}
+
+function appendLabelSkillBindingSourceWarnings(
+  workspaceRoot: string,
+  config: LabelSkillBindingsConfig,
+  skills: SkillSummary[],
+  warnings: ValidationIssue[],
+): void {
+  let sourceSlugs: Set<string>;
+  try {
+    sourceSlugs = new Set(loadWorkspaceSources(workspaceRoot).map(source => source.config.slug));
+  } catch {
+    return;
+  }
+  const skillsBySlug = new Map(skills.map(skill => [skill.slug, skill] as const));
+  for (const binding of config.bindings) {
+    for (const slug of collectRequiredSourceSlugs(binding, skillsBySlug.get(binding.skillSlug))) {
+      if (!sourceSlugs.has(slug)) {
+        warnings.push({
+          file: LABEL_SKILL_BINDINGS_FILE,
+          path: `bindings[id=${binding.id}].requiredSources`,
+          message: `Required source "${slug}" does not exist in this workspace`,
+          severity: 'warning',
+          suggestion: 'Import or create the required source, or update the skill/binding metadata.',
+        });
+      }
+    }
+  }
+}
+
+/**
+ * Validate label-skill-bindings.json from disk.
+ */
+export function validateLabelSkillBindings(workspaceRoot: string): ValidationResult {
+  const configPath = join(workspaceRoot, LABEL_SKILL_BINDINGS_FILE);
+
+  if (!existsSync(configPath)) {
+    return {
+      valid: true,
+      errors: [],
+      warnings: [{
+        file: LABEL_SKILL_BINDINGS_FILE,
+        path: '',
+        message: 'label-skill-bindings.json does not exist (no label-skill bindings configured)',
+        severity: 'warning',
+      }],
+    };
+  }
+
+  let content: unknown;
+  try {
+    content = safeJsonParse(readFileSync(configPath, 'utf-8'));
+  } catch (e) {
+    return {
+      valid: false,
+      errors: [{
+        file: LABEL_SKILL_BINDINGS_FILE,
+        path: '',
+        message: `Invalid JSON: ${e instanceof Error ? e.message : 'Unknown error'}`,
+        severity: 'error',
+      }],
+      warnings: [],
+    };
+  }
+
+  const { context, skills } = buildLabelSkillBindingsValidationContext(workspaceRoot);
+  const validation = validateLabelSkillBindingsConfig(content, context);
+  const errors = validation.errors.map(diagnostic => labelSkillBindingDiagnosticToIssue(LABEL_SKILL_BINDINGS_FILE, diagnostic));
+  const warnings = validation.warnings.map(diagnostic => labelSkillBindingDiagnosticToIssue(LABEL_SKILL_BINDINGS_FILE, diagnostic));
+  appendLabelSkillBindingSourceWarnings(workspaceRoot, validation.config, skills, warnings);
+
+  return {
+    valid: errors.length === 0,
+    errors,
+    warnings,
+  };
+}
+
+/**
+ * Validate label-skill-bindings.json content before writing.
+ */
+export function validateLabelSkillBindingsContent(jsonString: string): ValidationResult {
+  let content: unknown;
+  try {
+    content = safeJsonParse(jsonString);
+  } catch (e) {
+    return {
+      valid: false,
+      errors: [{
+        file: LABEL_SKILL_BINDINGS_FILE,
+        path: '',
+        message: `Invalid JSON: ${e instanceof Error ? e.message : 'Unknown error'}`,
+        severity: 'error',
+      }],
+      warnings: [],
+    };
+  }
+
+  const validation = validateLabelSkillBindingsConfig(content);
+  return {
+    valid: validation.valid,
+    errors: validation.errors.map(diagnostic => labelSkillBindingDiagnosticToIssue(LABEL_SKILL_BINDINGS_FILE, diagnostic)),
+    warnings: validation.warnings.map(diagnostic => labelSkillBindingDiagnosticToIssue(LABEL_SKILL_BINDINGS_FILE, diagnostic)),
+  };
+}
+
+// ============================================================
 // Permissions Validators
 // ============================================================
 
@@ -1962,7 +2124,7 @@ export function formatValidationResult(result: ValidationResult): string {
  * Result of detecting what type of config file a path corresponds to.
  */
 export interface ConfigFileDetection {
-  type: 'source' | 'skill' | 'statuses' | 'labels' | 'permissions' | 'tool-icons' | 'automations';
+  type: 'source' | 'skill' | 'statuses' | 'labels' | 'label-skill-bindings' | 'permissions' | 'tool-icons' | 'automations';
   /** Slug of the source or skill (if applicable) */
   slug?: string;
   /** Display file path for error messages */
@@ -1978,6 +2140,7 @@ export interface ConfigFileDetection {
  * - .../skills/{slug}/SKILL.md → skill definition
  * - .../statuses/config.json → status workflow config
  * - .../labels/config.json → label config
+ * - .../label-skill-bindings.json → label-skill binding config
  * - .../permissions.json (workspace or source-level) → permission rules
  */
 export function detectConfigFileType(filePath: string, workspaceRootPath: string): ConfigFileDetection | null {
@@ -2014,6 +2177,11 @@ export function detectConfigFileType(filePath: string, workspaceRootPath: string
   // Match: labels/config.json
   if (relativePath === 'labels/config.json') {
     return { type: 'labels', displayFile: 'labels/config.json' };
+  }
+
+  // Match: label-skill binding config file
+  if (relativePath === LABEL_SKILL_BINDINGS_FILE) {
+    return { type: 'label-skill-bindings', displayFile: LABEL_SKILL_BINDINGS_FILE };
   }
 
   // Match: automations config file
@@ -2080,6 +2248,8 @@ export function validateConfigFileContent(
       return validateStatusesContent(content);
     case 'labels':
       return validateLabelsContent(content);
+    case 'label-skill-bindings':
+      return validateLabelSkillBindingsContent(content);
     case 'automations':
       return validateAutomationsContent(content, detection.displayFile);
     case 'permissions':

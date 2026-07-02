@@ -10,6 +10,7 @@
 import type { BundleFile } from '../utils/bundle-files.ts'
 import type { FolderSourceConfig } from '../sources/types.ts'
 import type { AutomationMatcher } from '../automations/types.ts'
+import type { LabelSkillBindingsConfig } from '../label-skill-bindings/types.ts'
 
 // ============================================================
 // Bundle Format
@@ -32,6 +33,8 @@ export interface ResourceBundle {
     skills?: SkillBundleEntry[]
     /** Per-automation entries (sanitized — webhook auth stripped) */
     automations?: AutomationBundleEntry[]
+    /** Workspace-level label → skill bindings config */
+    labelSkillBindings?: LabelSkillBindingsBundleEntry
   }
 }
 
@@ -76,6 +79,13 @@ export interface AutomationBundleEntry {
   matcher: AutomationMatcher
 }
 
+/**
+ * Workspace-level label → skill binding config in the bundle.
+ */
+export interface LabelSkillBindingsBundleEntry {
+  config: LabelSkillBindingsConfig
+}
+
 // ============================================================
 // Import/Export Options & Results
 // ============================================================
@@ -97,6 +107,8 @@ export interface ExportResourcesOptions {
   skills?: string[] | 'all'
   /** Automation IDs/names to export, 'all' for every automation, or true (= 'all') */
   automations?: boolean | string[] | 'all'
+  /** Export workspace label → skill bindings config */
+  labelSkillBindings?: boolean
 }
 
 /**
@@ -129,6 +141,7 @@ export interface ResourceImportResult {
   sources: ImportBucketResult
   skills: ImportBucketResult
   automations: ImportBucketResult
+  labelSkillBindings: ImportBucketResult
 }
 
 // ============================================================

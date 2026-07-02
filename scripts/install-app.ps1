@@ -4,7 +4,13 @@
 & {
 $ErrorActionPreference = "Stop"
 
-$VERSIONS_URL = "https://agents.craft.do/electron"
+# Default to GitHub Releases for this fork. Override for staging/custom feeds with:
+#   $env:CRAFT_AGENTS_DOWNLOAD_BASE_URL = "https://example.com/path/to/latest/download"
+if ($env:CRAFT_AGENTS_DOWNLOAD_BASE_URL) {
+    $DOWNLOAD_BASE_URL = $env:CRAFT_AGENTS_DOWNLOAD_BASE_URL.TrimEnd('/')
+} else {
+    $DOWNLOAD_BASE_URL = "https://github.com/mkrtc/craft-agents-oss/releases/latest/download"
+}
 $DOWNLOAD_DIR = "$env:TEMP\craft-agent-install"
 $APP_NAME = "Craft Agents"
 
@@ -29,11 +35,11 @@ Write-Info "Detected platform: $platform (arch: $arch)"
 # Create download directory
 New-Item -ItemType Directory -Force -Path $DOWNLOAD_DIR | Out-Null
 
-# Fetch YAML manifest directly from /electron/latest/ (no version endpoint needed)
+# Fetch YAML manifest directly from the latest release assets.
 Write-Info "Fetching release info..."
 $yamlPath = Join-Path $DOWNLOAD_DIR "latest.yml"
 try {
-    Invoke-WebRequest -Uri "$VERSIONS_URL/latest/latest.yml" -OutFile $yamlPath -UseBasicParsing
+    Invoke-WebRequest -Uri "$DOWNLOAD_BASE_URL/latest.yml" -OutFile $yamlPath -UseBasicParsing
 } catch {
     Write-Err "Failed to fetch release info: $_"
 }
@@ -55,19 +61,16 @@ if (-not $version) {
 
 Write-Info "Latest version: $version"
 
-# Parse YAML to extract sha512, url (filename), and size for our architecture
-# YAML format:
-#   files:
-#     - url: Craft-Agents-x64.exe
-#       sha512: <base64>
-#       size: 123456789
-#       arch: x64
+# Parse YAML to extract sha512, url (filename), and size for our architecture.
+# Supports both manifests with per-file `arch:` fields and standard
+# electron-builder manifests that only contain a single files[] entry.
 function Get-YamlEntryForArch {
     param([string]$yaml, [string]$targetArch)
     $lines = $yaml -split "`n"
     $currentUrl = $null
     $currentSha512 = $null
     $currentSize = $null
+    $firstEntry = $null
 
     foreach ($line in $lines) {
         if ($line -match '^\s*-\s*url:\s*(.+)') {
@@ -77,9 +80,15 @@ function Get-YamlEntryForArch {
         }
         if ($line -match '^\s*sha512:\s*(.+)') {
             $currentSha512 = $Matches[1].Trim()
+            if (-not $firstEntry -and $currentUrl) {
+                $firstEntry = @{ url = $currentUrl; sha512 = $currentSha512; size = $currentSize }
+            }
         }
         if ($line -match '^\s*size:\s*(\d+)') {
             $currentSize = [long]$Matches[1]
+            if ($firstEntry -and $firstEntry.url -eq $currentUrl) {
+                $firstEntry.size = $currentSize
+            }
         }
         if ($line -match '^\s*arch:\s*(.+)') {
             $entryArch = $Matches[1].Trim()
@@ -88,13 +97,13 @@ function Get-YamlEntryForArch {
             }
         }
     }
-    return $null
+    return $firstEntry
 }
 
 $entry = Get-YamlEntryForArch -yaml $yamlContent -targetArch $arch
 
 if (-not $entry) {
-    Write-Err "Architecture $arch not found in latest.yml"
+    Write-Err "No valid artifact entry found in latest.yml for architecture $arch"
 }
 
 $checksum = $entry.sha512
@@ -111,7 +120,7 @@ if (-not $filename) {
     $filename = "Craft-Agents-$arch.exe"
 }
 
-$installerUrl = "$VERSIONS_URL/latest/$filename"
+$installerUrl = "$DOWNLOAD_BASE_URL/$filename"
 
 Write-Info "Expected sha512: $($checksum.Substring(0, 20))..."
 

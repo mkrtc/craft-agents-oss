@@ -75,6 +75,8 @@ export interface ActiveOptionBadgesProps {
   currentSessionStatus?: string
   /** Callback when state changes */
   onSessionStatusChange?: (stateId: string) => void
+  /** Optional control rendered to the right of the Info button */
+  rightAccessory?: React.ReactNode
   /** Additional CSS classes */
   className?: string
 }
@@ -103,6 +105,7 @@ export function ActiveOptionBadges({
   sessionStatuses = [],
   currentSessionStatus,
   onSessionStatusChange,
+  rightAccessory,
   className,
 }: ActiveOptionBadgesProps) {
   // Resolve session label entries to their config objects + parsed values.
@@ -219,9 +222,10 @@ export function ActiveOptionBadges({
 
       </div>
 
-      {/* Right side: Files popover button */}
-      <div className="shrink-0">
+      {/* Right side: Info button, then optional right-edge accessory */}
+      <div className="shrink-0 flex items-center gap-2">
         <FilesPopoverButton sessionId={sessionId} sessionFolderPath={sessionFolderPath} />
+        {rightAccessory}
       </div>
     </div>
   )

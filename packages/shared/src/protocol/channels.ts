@@ -275,6 +275,13 @@ export const RPC_CHANNELS = {
     DELETE: 'labels:delete',
     CHANGED: 'labels:changed',
   },
+  labelSkillBindings: {
+    GET: 'labelSkillBindings:get',
+    SAVE: 'labelSkillBindings:save',
+    LIST_BINDABLE_SKILLS: 'labelSkillBindings:listBindableSkills',
+    GENERATE_COMPACT_INSTRUCTION: 'labelSkillBindings:generateCompactInstruction',
+    CHANGED: 'labelSkillBindings:changed',
+  },
   views: {
     LIST: 'views:list',
     SAVE: 'views:save',

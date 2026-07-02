@@ -218,6 +218,14 @@ APPIMAGE_PATH="$ELECTRON_DIR/release/$APPIMAGE_NAME"
 mv "$BUILT_APPIMAGE_PATH" "$APPIMAGE_PATH"
 echo "Renamed $BUILT_APPIMAGE_NAME -> $APPIMAGE_NAME"
 
+# electron-builder writes latest-linux.yml before the rename, so keep the
+# updater manifest in sync with the artifact we publish to GitHub Releases.
+LATEST_LINUX_YML="$ELECTRON_DIR/release/latest-linux.yml"
+if [ -f "$LATEST_LINUX_YML" ]; then
+    sed -i "s/$BUILT_APPIMAGE_NAME/$APPIMAGE_NAME/g" "$LATEST_LINUX_YML"
+    echo "Updated latest-linux.yml artifact path to $APPIMAGE_NAME"
+fi
+
 echo ""
 echo "=== Build Complete ==="
 echo "AppImage: $ELECTRON_DIR/release/${APPIMAGE_NAME}"
