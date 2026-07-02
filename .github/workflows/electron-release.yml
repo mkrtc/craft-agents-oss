@@ -190,7 +190,7 @@ jobs:
         shell: pwsh
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: powershell -ExecutionPolicy Bypass -File apps/electron/scripts/build-win.ps1
+        run: pwsh -NoProfile -ExecutionPolicy Bypass -File apps/electron/scripts/build-win.ps1
 
       - name: Upload Windows release assets
         shell: pwsh
