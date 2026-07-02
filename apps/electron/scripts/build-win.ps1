@@ -174,8 +174,8 @@ $SdkBinPkg = "claude-agent-sdk-win32-x64"
 $SdkBinSource = "$RootDir\node_modules\@anthropic-ai\$SdkBinPkg"
 if (-not (Test-Path $SdkBinSource)) {
     Write-Host "Cross-arch build: $SdkBinPkg not in node_modules — fetching from npm..."
-    $PackageJsonPath = (Join-Path $RootDir "package.json").Replace('\\', '/')
-    $SdkVersion = (node -p "require('$PackageJsonPath').dependencies['@anthropic-ai/claude-agent-sdk']").Trim('"')
+    $RootPackageJson = Get-Content (Join-Path $RootDir "package.json") -Raw | ConvertFrom-Json
+    $SdkVersion = $RootPackageJson.dependencies.'@anthropic-ai/claude-agent-sdk'
     $PkgTmp = New-Item -ItemType Directory -Path ([System.IO.Path]::Combine($env:TEMP, [System.Guid]::NewGuid().ToString()))
     try {
         Push-Location $PkgTmp
