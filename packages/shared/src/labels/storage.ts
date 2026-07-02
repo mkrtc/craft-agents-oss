@@ -25,6 +25,7 @@ const LABEL_CONFIG_FILE = 'labels/config.json';
  * Provides a starter set of labels organized into two complementary color families:
  * - Development (blue family): Code, Bug, Automation
  * - Content (purple family): Writing, Research, Design
+ * - Workflow (green family): Orchestrator, Subagent, Status, Git, Worktree
  * Plus flat valued labels: Priority (number), Project (string)
  *
  * Children use hue-shifted shades of their parent color to show visual hierarchy.
@@ -74,6 +75,41 @@ export function getDefaultLabelConfig(): WorkspaceLabelConfig {
             id: 'design',
             name: 'Design',
             color: { light: '#D946EF', dark: '#E879F9' }, // fuchsia shift
+          },
+        ],
+      },
+      {
+        id: 'workflow',
+        name: 'Workflow',
+        color: { light: '#10B981', dark: '#34D399' },
+        children: [
+          {
+            id: 'orchestrator',
+            name: 'Orchestrator',
+            color: { light: '#059669', dark: '#6EE7B7' },
+          },
+          {
+            id: 'subagent',
+            name: 'Subagent',
+            color: { light: '#14B8A6', dark: '#5EEAD4' },
+          },
+          {
+            id: 'status',
+            name: 'Status',
+            color: { light: '#22C55E', dark: '#86EFAC' },
+            valueType: 'string',
+          },
+          {
+            id: 'git',
+            name: 'Git',
+            color: { light: '#84CC16', dark: '#BEF264' },
+            valueType: 'string',
+          },
+          {
+            id: 'worktree',
+            name: 'Worktree',
+            color: { light: '#65A30D', dark: '#A3E635' },
+            valueType: 'string',
           },
         ],
       },
