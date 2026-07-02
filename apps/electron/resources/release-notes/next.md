@@ -9,6 +9,7 @@ This file accumulates release notes for the next unreleased version. PRs that ad
 
 ## Improvements
 
+- **GitHub Actions release builds for the fork** — The fork now includes an Electron release workflow that can build and upload Linux x64, macOS arm64, and Windows x64 desktop assets to GitHub Releases from version tags.
 - **Workflow labels in new workspaces** — New workspaces now include a default Workflow label group with Orchestrator, Subagent, Status, Git, and Worktree labels, so users can adopt label-driven workflows without manually creating the common label vocabulary.
 - **Stronger label-to-skill role activation** — Label-bound skills now announce themselves as active runtime roles, can bootstrap an empty chat's first model call through the standard skill-read prerequisite flow, revoke only prior label-bound role context when labels stop matching, and offer aligned searchable Label/Skill selectors in Settings.
 - **More control over chat response density** — Appearance settings now let users auto-show model activity details only while a turn is running, and choose whether AI responses stay compact or allow the latest response to use full height. User-collapsed active activity details stay collapsed even as the final response message appears.
