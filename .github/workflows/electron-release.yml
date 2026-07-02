@@ -94,6 +94,8 @@ jobs:
 
       - name: Build AppImage
         shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: bash apps/electron/scripts/build-linux.sh x64
 
       - name: Upload Linux release assets
@@ -136,6 +138,8 @@ jobs:
 
       - name: Build DMG and updater ZIP
         shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: bash apps/electron/scripts/build-dmg.sh arm64
 
       - name: Upload macOS release assets
@@ -184,6 +188,8 @@ jobs:
 
       - name: Build NSIS installer
         shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: powershell -ExecutionPolicy Bypass -File apps/electron/scripts/build-win.ps1
 
       - name: Upload Windows release assets
