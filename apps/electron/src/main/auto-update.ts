@@ -70,13 +70,13 @@ let __isUpdating = false
 // Hook fired immediately before quitAndInstall, while BrowserWindows still exist.
 // electron-updater destroys windows between quitAndInstall and before-quit firing,
 // so the regular before-quit save site would see an empty array.
-let beforeUpdateQuitHook: (() => void) | null = null
+let beforeUpdateQuitHook: (() => void | Promise<void>) | null = null
 
 /**
  * Register a callback to run inside installUpdate() before quitAndInstall.
  * Used by index.ts to snapshot multi-window state while windows are still alive.
  */
-export function setBeforeUpdateQuitHook(fn: () => void): void {
+export function setBeforeUpdateQuitHook(fn: () => void | Promise<void>): void {
   beforeUpdateQuitHook = fn
 }
 
@@ -391,10 +391,8 @@ export async function installUpdate(): Promise<void> {
   updateInfo = { ...updateInfo, downloadState: 'installing' }
   broadcastUpdateInfo()
 
-  // Clear dismissed version since user is explicitly updating
-  clearDismissedUpdateVersion()
-
-  // Set flag to prevent force exit from breaking electron-updater's shutdown sequence
+  // Set flag before pre-update cleanup so a concurrent app quit during the
+  // handoff does not run the normal async quit path and interfere with updater.
   __isUpdating = true
 
   // Diagnostic correlation with before-quit's [update-flow] log. If these
@@ -404,16 +402,40 @@ export async function installUpdate(): Promise<void> {
     electronWindowCount: BrowserWindow.getAllWindows().length,
     downloadState: updateInfo.downloadState,
     latestVersion: updateInfo.latestVersion,
+    hasBeforeUpdateQuitHook: !!beforeUpdateQuitHook,
   })
 
-  // Snapshot window state BEFORE quitAndInstall — electron-updater destroys
+  if (!beforeUpdateQuitHook) {
+    const message = 'Pre-update cleanup hook is not registered; aborting update install to avoid unsafe shutdown'
+    __isUpdating = false
+    autoUpdateLog.error(message)
+    updateInfo = { ...updateInfo, downloadState: 'error', error: message }
+    broadcastUpdateInfo()
+    throw new Error(message)
+  }
+
+  // Snapshot and flush BEFORE quitAndInstall. electron-updater destroys
   // BrowserWindows between this call and before-quit firing, so the regular
   // before-quit save would clobber window-state.json with an empty array.
   try {
-    beforeUpdateQuitHook?.()
+    autoUpdateLog.info('Running pre-update cleanup hook before quitAndInstall')
+    await beforeUpdateQuitHook()
+    autoUpdateLog.info('Pre-update cleanup hook completed; invoking quitAndInstall')
   } catch (err) {
-    autoUpdateLog.error('beforeUpdateQuit hook failed', err)
+    const message = err instanceof Error ? err.message : String(err)
+    __isUpdating = false
+    autoUpdateLog.error('Pre-update cleanup hook failed; aborting update install', err)
+    updateInfo = {
+      ...updateInfo,
+      downloadState: 'error',
+      error: `Pre-update cleanup failed: ${message}`,
+    }
+    broadcastUpdateInfo()
+    throw err instanceof Error ? err : new Error(message)
   }
+
+  // Clear dismissed version only after critical pre-update cleanup succeeds.
+  clearDismissedUpdateVersion()
 
   try {
     // isSilent=false shows the installer UI on Windows if needed (fallback)
@@ -421,8 +443,9 @@ export async function installUpdate(): Promise<void> {
     autoUpdater.quitAndInstall(false, true)
   } catch (error) {
     __isUpdating = false
+    const message = error instanceof Error ? error.message : String(error)
     autoUpdateLog.error('quitAndInstall failed', error)
-    updateInfo = { ...updateInfo, downloadState: 'error' }
+    updateInfo = { ...updateInfo, downloadState: 'error', error: message }
     broadcastUpdateInfo()
     throw error
   }

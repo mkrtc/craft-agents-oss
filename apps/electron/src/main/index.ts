@@ -118,6 +118,7 @@ import { registerPiModelResolver } from '@craft-agent/shared/config'
 import { getPiModelsForAuthProvider, getAllPiModels } from '@craft-agent/shared/config'
 import { initNotificationService, initBadgeIcon, initInstanceBadge, updateBadgeCount } from './notifications'
 import { checkForUpdatesOnLaunch, setAutoUpdateEventSink, isUpdating, setBeforeUpdateQuitHook } from './auto-update'
+import { createQuitLifecycle } from './quit-lifecycle'
 import type { EventSink } from '@craft-agent/server-core/transport'
 import { validateGitBashPath, checkVCRedistInstalled } from '@craft-agent/server-core/services'
 
@@ -1097,7 +1098,9 @@ app.whenReady().then(async () => {
     // (Squirrel.Mac) destroys BrowserWindows between quitAndInstall and
     // before-quit firing; saving from before-quit alone would overwrite
     // window-state.json with an empty array.
-    setBeforeUpdateQuitHook(() => captureAndSaveWindowState('pre-update'))
+    setBeforeUpdateQuitHook(async () => {
+      await runPreUpdateQuitCleanup()
+    })
     if (app.isPackaged) {
       checkForUpdatesOnLaunch().catch(err => {
         mainLog.error('[auto-update] Launch check failed:', err)
@@ -1150,9 +1153,6 @@ app.on('window-all-closed', () => {
   }
 })
 
-// Track if we're in the process of quitting (to avoid re-entry)
-let isQuitting = false
-
 /**
  * Capture the current multi-window state and persist it to disk.
  * Called from two sites:
@@ -1175,97 +1175,124 @@ function captureAndSaveWindowState(reason: 'before-quit' | 'pre-update'): number
   return windows.length
 }
 
-// Save window state and clean up resources before quitting
-app.on('before-quit', async (event) => {
-  // Avoid re-entry when we call app.exit()
-  if (isQuitting) return
-  isQuitting = true
+function captureBeforeQuitWindowState(isUpdateQuit: boolean): void {
+  if (!windowManager) return
 
-  // Ensure Cmd+Q/app quit bypasses layered window close interception (Cmd+W behavior).
+  const windows = windowManager.getWindowStates()
+  // Empty-snapshot guard: during update-quit, electron-updater may have already
+  // destroyed all BrowserWindows by the time before-quit fires. The pre-update
+  // hook already saved the real state — don't let this late save overwrite it.
+  if (windows.length === 0 && isUpdateQuit) {
+    mainLog.warn('[window-state] skip save: empty snapshot during update-quit (pre-update snapshot wins)')
+  } else {
+    captureAndSaveWindowState('before-quit')
+  }
+
+  // Diagnostic correlation with installUpdate's pre-quit log. During an
+  // update-quit, record it to the dedicated always-on auto-update log (#891)
+  // so the install/quit handoff is diagnosable in production; normal quits
+  // stay on the debug-only main log.
+  const beforeQuitSave = {
+    windowCount: windows.length,
+    electronWindowCount: BrowserWindow.getAllWindows().length,
+    isUpdating: isUpdateQuit,
+    reason: isUpdateQuit ? 'update-quit' : 'user-quit',
+  }
+  if (isUpdateQuit) {
+    autoUpdateLog.info('before-quit save', beforeQuitSave)
+  } else {
+    mainLog.info('[update-flow] before-quit save', beforeQuitSave)
+  }
+}
+
+async function flushPendingSessions(reason: 'before-quit' | 'pre-update', throwOnError: boolean): Promise<void> {
+  if (!sessionManager) return
+
+  try {
+    await sessionManager.flushAllSessions()
+    mainLog.info('Flushed all pending session writes', { reason })
+  } catch (error) {
+    mainLog.error('Failed to flush sessions:', error)
+    if (throwOnError) {
+      throw error
+    }
+  }
+}
+
+async function disposeMessagingGateways(): Promise<void> {
+  if (!messagingHandle) return
+
+  try {
+    await messagingHandle.dispose()
+  } catch (err) {
+    mainLog.error('[messaging] dispose failed:', err)
+  }
+}
+
+async function cleanupPowerManager(): Promise<void> {
+  try {
+    const { cleanup } = await import('./power-manager')
+    cleanup()
+  } catch (err) {
+    mainLog.error('[power] cleanup failed:', err)
+  }
+}
+
+async function runQuitCleanup(
+  reason: 'before-quit' | 'pre-update',
+  options: { throwOnFlushError: boolean },
+): Promise<void> {
+  await flushPendingSessions(reason, options.throwOnFlushError)
+
+  // Clean up SessionManager resources (file watchers, timers, etc.).
+  sessionManager?.cleanup()
+
+  // Clean up browser pane instances.
+  browserPaneManager?.destroyAll()
+
+  // Clean up OAuth flow store (stop periodic cleanup timer).
+  oauthFlowStore?.dispose()
+
+  // Stop all model refresh timers.
+  getModelRefreshService().stopAll()
+
+  // Stop messaging gateways so the WhatsApp worker subprocess exits cleanly.
+  await disposeMessagingGateways()
+
+  // Clean up power manager (release power blocker).
+  await cleanupPowerManager()
+
+  // Release the server lock file so the next launch doesn't see a stale PID.
+  releaseServerLock()
+}
+
+async function runPreUpdateQuitCleanup(): Promise<void> {
+  // Ensure updater-initiated app quit bypasses layered window close interception
+  // (Cmd+W behavior) once quitAndInstall starts closing windows.
   windowManager?.setAppQuitting(true)
 
-  if (windowManager) {
-    const windows = windowManager.getWindowStates()
-    // Empty-snapshot guard: during update-quit, electron-updater has already
-    // destroyed all BrowserWindows by the time before-quit fires. The pre-update
-    // hook already saved the real state — don't let this late save overwrite it.
-    if (windows.length === 0 && isUpdating()) {
-      mainLog.warn('[window-state] skip save: empty snapshot during update-quit (pre-update snapshot wins)')
-    } else {
-      captureAndSaveWindowState('before-quit')
-    }
-    // Diagnostic correlation with installUpdate's [update-flow] log. During an
-    // update-quit, record it to the dedicated always-on auto-update log (#891)
-    // so the install/quit handoff is diagnosable in production; normal quits
-    // stay on the debug-only main log.
-    const isUpdateQuit = isUpdating()
-    const beforeQuitSave = {
-      windowCount: windows.length,
-      electronWindowCount: BrowserWindow.getAllWindows().length,
-      isUpdating: isUpdateQuit,
-      reason: isUpdateQuit ? 'update-quit' : 'user-quit',
-    }
-    if (isUpdateQuit) {
-      autoUpdateLog.info('before-quit save', beforeQuitSave)
-    } else {
-      mainLog.info('[update-flow] before-quit save', beforeQuitSave)
-    }
-  }
+  // Snapshot first while BrowserWindows still exist. This is the critical state
+  // save that must not be overwritten by an empty before-quit snapshot later.
+  captureAndSaveWindowState('pre-update')
 
-  // Flush all pending session writes before quitting
-  if (sessionManager) {
-    // Prevent quit until sessions are flushed
-    event.preventDefault()
-    try {
-      await sessionManager.flushAllSessions()
-      mainLog.info('Flushed all pending session writes')
-    } catch (error) {
-      mainLog.error('Failed to flush sessions:', error)
-    }
-    // Clean up SessionManager resources (file watchers, timers, etc.)
-    sessionManager.cleanup()
+  // A failed session flush is data-critical: abort install rather than silently
+  // skipping pending writes before electron-updater takes over process shutdown.
+  await runQuitCleanup('pre-update', { throwOnFlushError: true })
+}
 
-    // Clean up browser pane instances
-    if (browserPaneManager) {
-      browserPaneManager.destroyAll()
-    }
+const quitLifecycle = createQuitLifecycle({
+  isUpdating,
+  setAppQuitting: () => windowManager?.setAppQuitting(true),
+  captureBeforeQuitWindowState,
+  runNormalQuitCleanup: () => runQuitCleanup('before-quit', { throwOnFlushError: false }),
+  appQuit: () => app.quit(),
+  mainLog,
+  autoUpdateLog,
+})
 
-    // Clean up OAuth flow store (stop periodic cleanup timer)
-    if (oauthFlowStore) {
-      oauthFlowStore.dispose()
-    }
-
-    // Stop all model refresh timers
-    getModelRefreshService().stopAll()
-
-    // Stop messaging gateways so the WhatsApp worker subprocess exits cleanly.
-    if (messagingHandle) {
-      try {
-        await messagingHandle.dispose()
-      } catch (err) {
-        mainLog.error('[messaging] dispose failed:', err)
-      }
-    }
-
-    // Clean up power manager (release power blocker)
-    const { cleanup: cleanupPowerManager } = await import('./power-manager')
-    cleanupPowerManager()
-
-    // Release the server lock file so the next launch doesn't see a stale PID.
-    // This must happen regardless of the exit path (normal quit or update quit).
-    releaseServerLock()
-
-    // If update is in progress, let electron-updater handle the quit flow
-    // Force exit breaks the NSIS installer on Windows
-    if (isUpdating()) {
-      mainLog.info('Update in progress, letting electron-updater handle quit')
-      app.quit()
-      return
-    }
-
-    // Now actually quit
-    app.exit(0)
-  }
+// Save window state and clean up resources before quitting
+app.on('before-quit', (event) => {
+  void quitLifecycle.handleBeforeQuit(event)
 })
 
 // Handle uncaught exceptions — forward to Sentry explicitly since registering
