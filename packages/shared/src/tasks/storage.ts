@@ -14,7 +14,15 @@ import { join } from 'path';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 import { atomicWriteFileSync, stripBom } from '../utils/files.ts';
 import { validateTaskInput } from './validate.ts';
-import { TaskSpecSchema, type TaskSpec } from './schema.ts';
+import {
+  TaskSpecSchema,
+  assertTaskNodeOutputId,
+  assertTaskRunId,
+  assertTaskSlug,
+  isTaskRunId,
+  isTaskSlug,
+  type TaskSpec,
+} from './schema.ts';
 import type { NodeOutput } from './refs.ts';
 import type { ValidationResult } from '../config/validators.ts';
 
@@ -50,13 +58,13 @@ export function tasksRoot(workspaceRoot: string): string {
   return join(workspaceRoot, TASKS_DIR);
 }
 export function taskDir(workspaceRoot: string, slug: string): string {
-  return join(workspaceRoot, TASKS_DIR, slug);
+  return join(workspaceRoot, TASKS_DIR, assertTaskSlug(slug));
 }
 export function taskYamlPath(workspaceRoot: string, slug: string): string {
   return join(taskDir(workspaceRoot, slug), TASK_FILE);
 }
 export function runDir(workspaceRoot: string, slug: string, runId: string): string {
-  return join(taskDir(workspaceRoot, slug), RUNS_DIR, runId);
+  return join(taskDir(workspaceRoot, slug), RUNS_DIR, assertTaskRunId(runId));
 }
 
 function ensureDir(dir: string): void {
@@ -112,7 +120,7 @@ export function listTaskSlugs(workspaceRoot: string): string[] {
   const root = tasksRoot(workspaceRoot);
   if (!existsSync(root)) return [];
   return readdirSync(root, { withFileTypes: true })
-    .filter((d) => d.isDirectory() && existsSync(join(root, d.name, TASK_FILE)))
+    .filter((d) => d.isDirectory() && isTaskSlug(d.name) && existsSync(join(root, d.name, TASK_FILE)))
     .map((d) => d.name)
     .sort();
 }
@@ -150,7 +158,7 @@ export function listRunIds(workspaceRoot: string, slug: string): string[] {
   const runs = join(taskDir(workspaceRoot, slug), RUNS_DIR);
   if (!existsSync(runs)) return [];
   return readdirSync(runs, { withFileTypes: true })
-    .filter((d) => d.isDirectory())
+    .filter((d) => d.isDirectory() && isTaskRunId(d.name))
     .map((d) => d.name)
     .sort();
 }
@@ -194,9 +202,10 @@ export function writeNodeOutput(
   nodeId: string,
   output: NodeOutput,
 ): void {
+  const safeNodeId = assertTaskNodeOutputId(nodeId);
   const dir = join(runDir(workspaceRoot, slug, runId), NODES_DIR);
   ensureDir(dir);
-  atomicWriteFileSync(join(dir, `${nodeId}.json`), JSON.stringify(output, null, 2));
+  atomicWriteFileSync(join(dir, `${safeNodeId}.json`), JSON.stringify(output, null, 2));
 }
 
 export function readNodeOutput(
@@ -205,7 +214,8 @@ export function readNodeOutput(
   runId: string,
   nodeId: string,
 ): NodeOutput | null {
-  const path = join(runDir(workspaceRoot, slug, runId), NODES_DIR, `${nodeId}.json`);
+  const safeNodeId = assertTaskNodeOutputId(nodeId);
+  const path = join(runDir(workspaceRoot, slug, runId), NODES_DIR, `${safeNodeId}.json`);
   if (!existsSync(path)) return null;
   try {
     return JSON.parse(readFileSync(path, 'utf-8')) as NodeOutput;

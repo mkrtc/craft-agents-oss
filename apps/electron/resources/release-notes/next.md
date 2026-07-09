@@ -4,6 +4,8 @@ This file accumulates release notes for the next unreleased version. PRs that ad
 
 ## Features
 
+- **Kanban task tools for agents** — Agents can now validate, create, run, inspect, list, and collect results from Kanban task specs, with per-node skills and current-session callback integration keeping board-launched work tied to the right orchestrator.
+
 ## Improvements
 
 ## Bug Fixes

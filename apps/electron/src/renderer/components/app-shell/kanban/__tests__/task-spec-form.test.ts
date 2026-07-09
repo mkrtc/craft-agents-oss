@@ -59,6 +59,25 @@ describe('task-spec-form round-trip', () => {
     expect('skills' in empty).toBe(false)
   })
 
+  it('round-trips node-level skills from loaded/generated specs without requiring a local catalog match', () => {
+    const generated: SpecNode[] = [
+      { id: 'research', title: 'Research', prompt: 'p', skills: ['frontend-developer', 'private-skill'] },
+      { id: 'implement', title: 'Implement', prompt: 'q', skills: [], depends_on: ['research'] },
+      { id: 'review', title: 'Review', prompt: 'r' },
+    ]
+
+    const subtasks = specToSubtasks(generated, 'm')
+    expect(subtasks.find((s) => s.nodeId === 'research')!.skillSlugs).toEqual(['frontend-developer', 'private-skill'])
+    expect(subtasks.find((s) => s.nodeId === 'implement')!.skillSlugs).toEqual([])
+    expect('skillSlugs' in subtasks.find((s) => s.nodeId === 'review')!).toBe(false)
+
+    const spec = buildSpec({ title: 'T', goal: 'g', projectId: '', orchModel: '', subtasks }, noConn)
+    const nodes = spec.nodes as Array<{ id: string; skills?: string[] }>
+    expect(nodes.find((n) => n.id === 'research')!.skills).toEqual(['frontend-developer', 'private-skill'])
+    expect(nodes.find((n) => n.id === 'implement')!.skills).toEqual([])
+    expect('skills' in nodes.find((n) => n.id === 'review')!).toBe(false)
+  })
+
   it('preserves multi-dependency (fan-in) edges that the single-dependency editor would otherwise drop', () => {
     const generated: SpecNode[] = [
       { id: 'a', title: 'A', prompt: 'pa' },

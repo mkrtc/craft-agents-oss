@@ -25,7 +25,6 @@ import type {
   TaskResultsDto,
   TaskResultNodeDto,
 } from '@craft-agent/shared/protocol'
-import { getWorkspaceByNameOrId } from '@craft-agent/shared/config'
 import {
   parseTaskYaml,
   saveTaskSpec,
@@ -44,7 +43,7 @@ import {
 import { createLogger } from '@craft-agent/shared/utils'
 import { pushTyped, type RpcServer } from '@craft-agent/server-core/transport'
 import type { HandlerDeps } from '../handler-deps'
-import { TaskRunner } from '../../tasks'
+import { getOrCreateTaskConductorService } from '../../tasks'
 
 const tasksLog = createLogger('tasks-generate')
 
@@ -91,23 +90,21 @@ function extractYaml(text: string): string {
 }
 
 export function registerTasksHandlers(server: RpcServer, deps: HandlerDeps): void {
-  // One Conductor per workspace, created on demand. Holds active runs in memory.
-  const runners = new Map<string, TaskRunner>()
+  // Shared Conductor service owns per-workspace active runner maps. Use an injected instance when
+  // the composition root has one; otherwise prefer the SessionManager-owned service before falling
+  // back to a singleton keyed by the SessionManager host. If SessionManager exposes a setter, write
+  // the resolved service back so renderer RPC and agent-facing task callbacks share one active map.
+  const sessionTaskHost = deps.sessionManager as typeof deps.sessionManager & {
+    getTaskConductorService?: () => ReturnType<typeof getOrCreateTaskConductorService>
+    setTaskConductorService?: (service: ReturnType<typeof getOrCreateTaskConductorService>) => void
+  }
+  const taskConductor = deps.taskConductor
+    ?? sessionTaskHost.getTaskConductorService?.()
+    ?? getOrCreateTaskConductorService({ host: deps.sessionManager })
+  sessionTaskHost.setTaskConductorService?.(taskConductor)
 
   function workspaceOrThrow(workspaceId: string) {
-    const ws = getWorkspaceByNameOrId(workspaceId)
-    if (!ws) throw new Error(`Workspace ${workspaceId} not found`)
-    return ws
-  }
-
-  function runnerFor(workspaceId: string): TaskRunner {
-    let runner = runners.get(workspaceId)
-    if (!runner) {
-      const ws = workspaceOrThrow(workspaceId)
-      runner = new TaskRunner({ host: deps.sessionManager, workspaceId: ws.id, workspaceRoot: ws.rootPath })
-      runners.set(workspaceId, runner)
-    }
-    return runner
+    return taskConductor.workspaceOrThrow(workspaceId)
   }
 
   // tasks:validate — lint/dry-run; no side effects.
@@ -333,7 +330,7 @@ export function registerTasksHandlers(server: RpcServer, deps: HandlerDeps): voi
 
   // tasks:run — start a run.
   server.handle(RPC_CHANNELS.tasks.RUN, async (_ctx, workspaceId: string, req: TaskRunRequest) => {
-    return runnerFor(workspaceId).run(req.slug, {
+    return taskConductor.run(workspaceId, req.slug, {
       runId: req.runId,
       orchestratorSessionId: req.orchestratorSessionId,
       params: req.params,
@@ -341,15 +338,15 @@ export function registerTasksHandlers(server: RpcServer, deps: HandlerDeps): voi
   })
 
   server.handle(RPC_CHANNELS.tasks.PAUSE, async (_ctx, workspaceId: string, slug: string, runId: string) => {
-    runnerFor(workspaceId).pause(slug, runId)
+    taskConductor.pause(workspaceId, slug, runId)
   })
 
   server.handle(RPC_CHANNELS.tasks.RESUME, async (_ctx, workspaceId: string, slug: string, runId: string) => {
-    runnerFor(workspaceId).resume(slug, runId)
+    taskConductor.resume(workspaceId, slug, runId)
   })
 
   server.handle(RPC_CHANNELS.tasks.STOP, async (_ctx, workspaceId: string, slug: string, runId: string) => {
-    await runnerFor(workspaceId).stop(slug, runId)
+    await taskConductor.stop(workspaceId, slug, runId)
   })
 
   // tasks:get — spec + (optional) active run-state.
@@ -363,7 +360,7 @@ export function registerTasksHandlers(server: RpcServer, deps: HandlerDeps): voi
         run: null,
       }
     }
-    const run = runId ? runnerFor(workspaceId).getRunState(slug, runId) : null
+    const run = runId ? taskConductor.getRunState(workspaceId, slug, runId) : null
     return { slug, validation: toValidationDto(loaded), spec: loaded.spec, run }
   })
 

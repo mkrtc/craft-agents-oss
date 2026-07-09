@@ -66,8 +66,132 @@ export const MAX_REPAIR_ATTEMPTS_CAP = 10;
 
 /** Lowercase slug — used for task ids, node ids, and the on-disk folder name. */
 export const SLUG_RE = /^[a-z0-9][a-z0-9-]*$/;
+export const TASK_SLUG_MESSAGE = 'must be a lowercase slug (a-z, 0-9, hyphens; no leading hyphen)';
 const slug = (label: string) =>
-  z.string().regex(SLUG_RE, `${label} must be a lowercase slug (a-z, 0-9, hyphens; no leading hyphen)`);
+  z.string().regex(SLUG_RE, `${label} ${TASK_SLUG_MESSAGE}`);
+
+/**
+ * Run IDs are folder names under tasks/<slug>/runs/<runId>.
+ * Generated IDs are `run-<timestamp>` today; caller-provided IDs may use
+ * UUID-like alphanumeric + hyphen characters, but never path separators.
+ */
+export const TASK_RUN_ID_RE = /^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?$/;
+export const TASK_RUN_ID_MESSAGE =
+  'must use letters, digits, and hyphens only, with no leading or trailing hyphen';
+
+/** Internal node-output pseudo-id used for verifier transcripts. */
+export const INTERNAL_VERDICT_NODE_ID = '__verdict__';
+/** Node output file stems: task node ids plus the single internal verifier sentinel. */
+export const TASK_NODE_OUTPUT_ID_RE = /^(?:[a-z0-9][a-z0-9-]*|__verdict__)$/;
+export const TASK_NODE_OUTPUT_ID_MESSAGE =
+  `must be a task node slug or ${INTERNAL_VERDICT_NODE_ID}; no path separators are allowed`;
+
+const TASK_PATH_SEPARATOR_RE = /[\\/]/;
+const TASK_ENCODED_PATH_SEPARATOR_RE = /%(?:2f|5c)/i;
+const TASK_PATH_COMPONENT_MESSAGE =
+  'must be a single non-empty path component (not "." or ".." and no "/", "\\", or encoded separator forms)';
+
+function printableTaskPathValue(value: unknown): string {
+  return typeof value === 'string' ? JSON.stringify(value) : String(value);
+}
+
+/** True when a value is safe to pass as exactly one filesystem path component. */
+export function isSafeTaskPathComponent(value: unknown): value is string {
+  return (
+    typeof value === 'string' &&
+    value.length > 0 &&
+    value !== '.' &&
+    value !== '..' &&
+    !TASK_PATH_SEPARATOR_RE.test(value) &&
+    !TASK_ENCODED_PATH_SEPARATOR_RE.test(value)
+  );
+}
+
+/**
+ * Assert that a caller-controlled task storage component cannot be interpreted
+ * as traversal or multiple path components. This deliberately rejects instead
+ * of normalizing (`a/../b`, `%2F`, absolute paths, etc.).
+ */
+export function assertSafeTaskPathComponent(value: unknown, label = 'task path component'): string {
+  if (!isSafeTaskPathComponent(value)) {
+    throw new Error(`Invalid ${label} ${printableTaskPathValue(value)}: ${TASK_PATH_COMPONENT_MESSAGE}.`);
+  }
+  return value;
+}
+
+function assertTaskComponentPattern(value: unknown, label: string, pattern: RegExp, message: string): string {
+  const component = assertSafeTaskPathComponent(value, label);
+  if (!pattern.test(component)) {
+    throw new Error(`Invalid ${label} ${JSON.stringify(component)}: ${message}.`);
+  }
+  return component;
+}
+
+export function isTaskSlug(value: unknown): value is string {
+  return isSafeTaskPathComponent(value) && SLUG_RE.test(value);
+}
+
+export function assertTaskSlug(value: unknown): string {
+  return assertTaskComponentPattern(value, 'task slug', SLUG_RE, TASK_SLUG_MESSAGE);
+}
+
+export function isTaskRunId(value: unknown): value is string {
+  return isSafeTaskPathComponent(value) && TASK_RUN_ID_RE.test(value);
+}
+
+export function assertTaskRunId(value: unknown): string {
+  return assertTaskComponentPattern(value, 'task run ID', TASK_RUN_ID_RE, TASK_RUN_ID_MESSAGE);
+}
+
+export function isTaskNodeOutputId(value: unknown): value is string {
+  return isSafeTaskPathComponent(value) && TASK_NODE_OUTPUT_ID_RE.test(value);
+}
+
+export function assertTaskNodeOutputId(value: unknown): string {
+  return assertTaskComponentPattern(value, 'task node output id', TASK_NODE_OUTPUT_ID_RE, TASK_NODE_OUTPUT_ID_MESSAGE);
+}
+
+/**
+ * Safe skill slug accepted in task.yaml `skills` arrays.
+ *
+ * These values are later expanded into literal `[skill:slug]` mentions. Keep the
+ * grammar narrower than general task/node ids so a hand-authored spec cannot
+ * smuggle whitespace, brackets, prose, or a trailing hyphen into the prompt
+ * preamble.
+ */
+export const SKILL_SLUG_RE = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/;
+const SKILL_SLUG_MESSAGE =
+  'skill slug must use lowercase letters, digits, and hyphens only, with no leading or trailing hyphen';
+export const SkillSlugSchema = z.string().regex(SKILL_SLUG_RE, SKILL_SLUG_MESSAGE);
+
+export function isSkillSlug(value: string): boolean {
+  return SKILL_SLUG_RE.test(value);
+}
+
+export function assertSkillSlugs(skills: readonly string[] | undefined, path = 'skills'): string[] {
+  if (!skills?.length) return [];
+  const invalid = skills.filter((skill) => !isSkillSlug(skill));
+  if (invalid.length) {
+    throw new Error(
+      `Invalid ${path}: ${invalid.map((skill) => JSON.stringify(skill)).join(', ')}. ${SKILL_SLUG_MESSAGE}.`,
+    );
+  }
+  return [...skills];
+}
+
+export function effectiveSkills(
+  taskSkills: readonly string[] | undefined,
+  nodeSkills: readonly string[] | undefined,
+): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const skill of [...assertSkillSlugs(taskSkills, 'task skills'), ...assertSkillSlugs(nodeSkills, 'node skills')]) {
+    if (seen.has(skill)) continue;
+    seen.add(skill);
+    out.push(skill);
+  }
+  return out;
+}
 
 /** Identifier — used for param / output names (allows underscores + caps). */
 const IDENT_RE = /^[a-zA-Z_][a-zA-Z0-9_]*$/;
@@ -147,6 +271,8 @@ const TaskNodeObject = z.object({
   permissionMode: z.enum(PERMISSION_MODES).optional(),
   labels: z.array(z.string()).optional(),
   status: z.string().optional(),
+  /** Skill slugs applied only to this node. Effective child prompt order is task-level skills, then node-level skills. */
+  skills: z.array(SkillSlugSchema).optional(),
 
   // Edges + data flow.
   depends_on: z.array(slug('depends_on entry')).optional(),
@@ -204,7 +330,7 @@ export const TaskSpecSchema = z
     sources: z.array(z.string().min(1)).optional(),
     /** Skill slugs applied as context: dispatched child prompts carry [skill:slug] mentions, so the
      *  agent pipeline resolves each SKILL.md and blocks tools until it is read. */
-    skills: z.array(z.string().min(1)).optional(),
+    skills: z.array(SkillSlugSchema).optional(),
     defaults: TaskDefaultsSchema.optional(),
     params: z.array(TaskParamSchema).optional(),
     /** Total (input+output) token budget across all node sessions; USD is a derived display only. */

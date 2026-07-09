@@ -79,6 +79,9 @@ export interface EditorSubtask {
   // Explicit connection serving `model`, preserved from the loaded spec. UNDEFINED = derive from an
   // explicit `model` (or inherit). Preserves a node whose authored connection ≠ the model's default.
   llmConnection?: string
+  // Node-level skill slugs, preserved independently from task-level skills. UNDEFINED = no authored
+  // node override; [] is an explicit empty selection from a loaded/generated spec or UI edit.
+  skillSlugs?: string[]
   // All dependency edges of this node, as local uids (not node ids). Multi-dependency so a fan-in
   // node (depends_on: [A, B]) keeps every edge visible and editable. uids that no longer resolve to
   // a row (upstream deleted) are dropped by buildSpec, never emitted as a dangling ref.
@@ -125,6 +128,8 @@ export interface SpecNode {
   model?: string
   /** Connection serving `model`; read back into the row so an explicit connection round-trips. */
   llmConnection?: string
+  /** Skill slugs applied only to this node; may include valid slugs absent from the local catalog. */
+  skills?: string[]
   depends_on?: string[]
 }
 
@@ -168,6 +173,7 @@ export function buildSpec(form: SpecForm, modelToConnection: Map<string, string>
       ...(st.model ? { model: st.model } : {}),
       // Pin the connection that serves the model so non-default (pi/*) models resolve a backend.
       ...(conn ? { llmConnection: conn } : {}),
+      ...(st.skillSlugs ? { skills: st.skillSlugs } : {}),
       ...(depends_on.length ? { depends_on } : {}),
       prompt: st.prompt,
     }
@@ -217,6 +223,7 @@ export function specToSubtasks(nodes: SpecNode[], _fallbackModel?: string): Edit
     // computes an effective display model separately. `_fallbackModel` is kept for call-site compat.
     ...(n.model ? { model: n.model } : {}),
     ...(n.llmConnection ? { llmConnection: n.llmConnection } : {}),
+    ...(n.skills ? { skillSlugs: n.skills } : {}),
     // Every edge mapped to a local uid. Edges pointing at ids absent from this spec are dangling
     // (the backend would reject them) so they're dropped rather than carried as raw ids.
     dependsOn: (n.depends_on ?? [])

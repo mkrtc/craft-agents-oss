@@ -139,6 +139,133 @@ export interface ValidatorInterface {
 }
 
 // ============================================================
+// Task Tool Callback Interfaces
+// ============================================================
+
+/** Invocation metadata passed to task callbacks by agent-facing handlers. */
+export interface SessionTaskInvocationContext {
+  /** The session that invoked the tool. Used as the default orchestrator/verifier binding. */
+  callerSessionId: string;
+  /** Workspace root path for the current session. */
+  workspacePath: string;
+  /** Current working directory selected for the caller session, if any. */
+  workingDirectory?: string;
+}
+
+export interface TaskValidationIssue {
+  path: string;
+  message: string;
+  severity: 'error' | 'warning';
+  suggestion?: string;
+}
+
+export interface TaskValidationResult {
+  valid: boolean;
+  errors: TaskValidationIssue[];
+  warnings: TaskValidationIssue[];
+  estimate?: { nodeCount: number; sessionNodeCount: number };
+}
+
+export interface TaskCreateResult {
+  slug: string;
+  orchestratorSessionId: string;
+  validation: TaskValidationResult;
+  taskLabelId?: string;
+}
+
+export interface TaskNodeRunState {
+  id: string;
+  state: string;
+  sessionId?: string;
+  attempt: number;
+}
+
+export interface TaskRunSnapshot {
+  slug: string;
+  runId: string;
+  taskId: string;
+  status: string;
+  orchestratorSessionId?: string;
+  nodes: TaskNodeRunState[];
+  tokensUsed: number;
+}
+
+export interface TaskGetResult {
+  slug: string;
+  validation: TaskValidationResult;
+  spec?: unknown;
+  run?: TaskRunSnapshot | null;
+}
+
+export interface TaskResultNode {
+  id: string;
+  title: string;
+  state: string;
+  sessionId?: string;
+  output?: string;
+}
+
+export interface TaskResultVerdict {
+  result: 'pass' | 'fail' | 'unparsed';
+  reason?: string;
+  nodes?: string[];
+}
+
+export interface TaskResultsResult {
+  slug: string;
+  runId: string | null;
+  runIds: string[];
+  verdict?: TaskResultVerdict;
+  verdicts?: TaskResultVerdict[];
+  repair?: { used: number; max: number };
+  runStatus?: string;
+  acceptanceCriteria?: string;
+  nodes: TaskResultNode[];
+}
+
+export interface TaskValidateInput {
+  yaml: string;
+}
+
+export interface TaskCreateInput {
+  yaml: string;
+}
+
+export interface TaskRunInput {
+  slug: string;
+  runId?: string;
+  params?: Record<string, unknown>;
+}
+
+export interface TaskGetInput {
+  slug: string;
+  runId?: string;
+}
+
+export type TaskListInput = Record<string, never>;
+
+export interface TaskGetResultsInput {
+  slug: string;
+  runId?: string;
+}
+
+export type SessionTaskCallbackResult<T> = T | Promise<T>;
+
+/**
+ * Optional task tool callbacks injected by the host application.
+ * session-tools-core owns only schemas/handlers and must not import task
+ * implementation packages; real validation/storage/running is bound here.
+ */
+export interface SessionTaskToolCallbacks {
+  validate?(input: TaskValidateInput, context: SessionTaskInvocationContext): SessionTaskCallbackResult<TaskValidationResult>;
+  create?(input: TaskCreateInput, context: SessionTaskInvocationContext): SessionTaskCallbackResult<TaskCreateResult>;
+  run?(input: TaskRunInput, context: SessionTaskInvocationContext): SessionTaskCallbackResult<TaskRunSnapshot>;
+  get?(input: TaskGetInput, context: SessionTaskInvocationContext): SessionTaskCallbackResult<TaskGetResult>;
+  list?(input: TaskListInput, context: SessionTaskInvocationContext): SessionTaskCallbackResult<string[]>;
+  getResults?(input: TaskGetResultsInput, context: SessionTaskInvocationContext): SessionTaskCallbackResult<TaskResultsResult>;
+}
+
+// ============================================================
 // Session Tool Context
 // ============================================================
 
@@ -336,6 +463,13 @@ export interface SessionToolContext {
 
   /** Resolve a status display name to its ID against configured statuses. Injected by backend. */
   resolveStatus?(status: string): ResolvedStatusResult;
+
+  // ============================================================
+  // Task Tools
+  // ============================================================
+
+  /** Agent-facing task tool callbacks. Injected by server/session integration when available. */
+  taskTools?: SessionTaskToolCallbacks;
 
   // ============================================================
   // Inter-Session Messaging

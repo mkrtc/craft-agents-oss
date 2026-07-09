@@ -6,6 +6,7 @@
  * SessionManager completion/output seams.
  */
 export { TaskRunner } from './TaskRunner';
+export { TaskConductorService, getOrCreateTaskConductorService } from './TaskConductorService';
 export type {
   ConductorSessionHost,
   TaskRunnerDeps,
@@ -14,3 +15,4 @@ export type {
   RunStatus,
   NodeRunStatus,
 } from './TaskRunner';
+export type { TaskConductorServiceDeps } from './TaskConductorService';

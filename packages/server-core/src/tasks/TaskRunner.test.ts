@@ -2,10 +2,11 @@ import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
 import { mkdtempSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
-import type { TokenUsage } from '@craft-agent/core/types';
+import type { TokenUsage, Workspace } from '@craft-agent/core/types';
 import type { CreateSessionOptions } from '@craft-agent/shared/protocol';
 import { parseTaskSpec, saveTaskSpec, readRunLog, readNodeOutput, type TaskSpec } from '@craft-agent/shared/tasks';
 import type { SessionCompletionEvent } from '../sessions/SessionManager';
+import { TaskConductorService, getOrCreateTaskConductorService } from './TaskConductorService';
 import { TaskRunner, type ConductorSessionHost } from './TaskRunner';
 
 // Flush pending microtasks so the runner's async dispatch (create → column → send) settles.
@@ -159,6 +160,33 @@ describe('TaskRunner (Conductor)', () => {
     expect(log[0]).toMatchObject({ kind: 'run-started' });
     expect(log.some((e) => e.kind === 'run-completed')).toBe(true);
     expect(readNodeOutput(root, 'demo', 'r1', 'audit')).toEqual({ text: 'AUDIT' });
+  });
+
+  it('prepends ordered de-duped task and node skills while preserving explicit prompt mentions', async () => {
+    saveTaskSpec(
+      root,
+      specOf({
+        id: 'skills',
+        title: 'Skills',
+        goal: 'g',
+        skills: ['backend-developer', 'security-review'],
+        nodes: [
+          {
+            id: 'a',
+            prompt: 'Do the work with explicit [skill:manual-check].',
+            skills: ['security-review', 'api-design'],
+          },
+        ],
+      }),
+    );
+    const runner = makeRunner();
+    runner.run('skills', { runId: 'r1' });
+    await tick();
+
+    expect(host.promptFor('a')).toBe(
+      'Apply these skills: [skill:backend-developer] [skill:security-review] [skill:api-design]\n\n' +
+        'Do the work with explicit [skill:manual-check].',
+    );
   });
 
   it('passes llmConnection (node value, else the task default) to createSession', async () => {
@@ -841,5 +869,52 @@ describe('TaskRunner (Conductor)', () => {
     await tick();
 
     expect(host.nodeCounts).toContainEqual({ sessionId: 'orch', count: 3 });
+  });
+});
+
+describe('TaskConductorService', () => {
+  let root: string;
+  let host: MockHost;
+
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), 'conductor-service-test-'));
+    host = new MockHost();
+  });
+
+  afterEach(() => {
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  function workspaceResolver(workspaceId: string): Workspace {
+    return { id: workspaceId, name: 'Test workspace', slug: workspaceId, rootPath: root, createdAt: 0 };
+  }
+
+  it('shares one TaskRunner per workspace and exposes run controls', async () => {
+    saveTaskSpec(root, specOf({ id: 'svc', title: 'Svc', goal: 'g', nodes: [{ id: 'a', prompt: 'a' }] }));
+    const service = new TaskConductorService({
+      host,
+      workspaceResolver,
+      now: () => '2026-06-07T00:00:00.000Z',
+    });
+
+    const runner = service.runnerFor('ws');
+    expect(service.runnerFor('ws')).toBe(runner);
+
+    service.run('ws', 'svc', { runId: 'r1' });
+    await tick();
+    expect(host.promptFor('a')).toBe('a');
+    expect(service.getRunState('ws', 'svc', 'r1')?.status).toBe('running');
+
+    service.pause('ws', 'svc', 'r1');
+    expect(service.getRunState('ws', 'svc', 'r1')?.status).toBe('paused');
+
+    service.resume('ws', 'svc', 'r1');
+    expect(service.getRunState('ws', 'svc', 'r1')?.status).toBe('running');
+  });
+
+  it('fallback singleton returns the same service for the same host', () => {
+    const a = getOrCreateTaskConductorService({ host, workspaceResolver });
+    const b = getOrCreateTaskConductorService({ host, workspaceResolver });
+    expect(b).toBe(a);
   });
 });

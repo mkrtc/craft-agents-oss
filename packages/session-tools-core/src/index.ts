@@ -134,6 +134,25 @@ export type {
   SendAgentMessageResult,
   ResolvedLabelsResult,
   ResolvedStatusResult,
+  // Task tool callback types
+  SessionTaskInvocationContext,
+  SessionTaskCallbackResult,
+  SessionTaskToolCallbacks,
+  TaskValidationIssue,
+  TaskValidationResult,
+  TaskCreateResult,
+  TaskNodeRunState,
+  TaskRunSnapshot,
+  TaskGetResult,
+  TaskResultNode,
+  TaskResultVerdict,
+  TaskResultsResult,
+  TaskValidateInput,
+  TaskCreateInput,
+  TaskRunInput,
+  TaskGetInput,
+  TaskListInput,
+  TaskGetResultsInput,
 } from './context.ts';
 
 export { createNodeFileSystem } from './context.ts';
@@ -167,6 +186,13 @@ export {
   handleRenderTemplate,
   // Send Developer Feedback
   handleSendDeveloperFeedback,
+  // Task Tools
+  handleTaskValidate,
+  handleTaskCreate,
+  handleTaskRun,
+  handleTaskGet,
+  handleTaskList,
+  handleTaskGetResults,
 } from './handlers/index.ts';
 
 export type {
@@ -185,6 +211,12 @@ export type {
   ScriptSandboxArgs,
   RenderTemplateArgs,
   SendDeveloperFeedbackArgs,
+  TaskValidateArgs,
+  TaskCreateArgs,
+  TaskRunArgs,
+  TaskGetArgs,
+  TaskListArgs,
+  TaskGetResultsArgs,
 } from './handlers/index.ts';
 
 // Tool definitions — single source of truth
@@ -202,6 +234,13 @@ export {
   TransformDataSchema,
   ScriptSandboxSchema,
   RenderTemplateSchema,
+  // Task tool schemas
+  TaskValidateSchema,
+  TaskCreateSchema,
+  TaskRunSchema,
+  TaskGetSchema,
+  TaskListSchema,
+  TaskGetResultsSchema,
   // Browser tool schema
   BrowserToolSchema,
   // Developer feedback schema

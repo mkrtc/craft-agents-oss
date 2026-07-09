@@ -72,6 +72,7 @@ export {
 // Local imports for use within this file's factory function
 import { getSessionScopedToolCallbacks } from './session-scoped-tool-callback-registry.ts';
 import { attachSessionSelfManagementBindings } from './session-self-management-bindings.ts';
+import { attachSessionTaskToolBindings } from './session-task-bindings.ts';
 
 /** Backend-executed session tools currently supported by the Claude adapter layer. */
 export const CLAUDE_BACKEND_SESSION_TOOL_NAMES = new Set<string>([
@@ -241,8 +242,9 @@ export function getSessionScopedTools(
       },
     });
 
-    // Attach session self-management bindings (lazy getters from callback registry)
+    // Attach lazy callback-backed bindings from the session registry.
     attachSessionSelfManagementBindings(ctx, sessionId);
+    attachSessionTaskToolBindings(ctx, sessionId);
 
     // Helper to create a tool from the canonical registry.
     // The `as any` on schema bridges a Zod generic-variance issue when .shape

@@ -3,7 +3,20 @@ import { mkdtempSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 
-import { parseTaskSpec, nodeDeps, nodeTitle, type TaskSpec } from './schema.ts';
+import {
+  assertSafeTaskPathComponent,
+  assertTaskNodeOutputId,
+  assertTaskRunId,
+  assertTaskSlug,
+  isSafeTaskPathComponent,
+  isTaskNodeOutputId,
+  isTaskRunId,
+  isTaskSlug,
+  parseTaskSpec,
+  nodeDeps,
+  nodeTitle,
+  type TaskSpec,
+} from './schema.ts';
 import { extractRefs, interpolateRefs } from './refs.ts';
 import { validateTaskSpec, validateTaskInput, TASK_CAPS } from './validate.ts';
 import { buildGeneratorPrompt, buildRepairPrompt } from './generator-prompt.ts';
@@ -17,6 +30,8 @@ import {
   writeNodeOutput,
   readNodeOutput,
   listTaskSlugs,
+  taskDir,
+  runDir,
   type RunLogEntry,
 } from './storage.ts';
 
@@ -85,13 +100,27 @@ describe('schema', () => {
     expect(parseTaskSpec({ ...CHAIN, max_iterations: 11 }).success).toBe(false);
   });
 
-  it('accepts optional task-level sources and skills, rejecting empty slugs', () => {
-    const r = parseTaskSpec({ ...CHAIN, sources: ['github', 'linear'], skills: ['commit'] });
+  it('accepts optional task-level and node-level skills with safe slugs', () => {
+    const r = parseTaskSpec({
+      ...CHAIN,
+      sources: ['github', 'linear'],
+      skills: ['backend-developer'],
+      nodes: [{ id: 'audit', prompt: 'Audit the code', skills: ['security-review'] }],
+    });
     expect(r.success).toBe(true);
     if (!r.success) return;
     expect(r.data.sources).toEqual(['github', 'linear']);
-    expect(r.data.skills).toEqual(['commit']);
+    expect(r.data.skills).toEqual(['backend-developer']);
+    expect(r.data.nodes[0]!.skills).toEqual(['security-review']);
     expect(parseTaskSpec({ ...CHAIN, sources: [''] }).success).toBe(false);
+  });
+
+  it('rejects unsafe task-level and node-level skill values', () => {
+    const badSkills = ['Backend', 'bad slug', 'bad-', 'good] [skill:evil', 'multi\nline'];
+    for (const skill of badSkills) {
+      expect(parseTaskSpec({ ...CHAIN, skills: [skill] }).success).toBe(false);
+      expect(parseTaskSpec({ ...CHAIN, nodes: [{ id: 'audit', prompt: 'Audit', skills: [skill] }] }).success).toBe(false);
+    }
   });
 
   it('rejects duplicate node ids', () => {
@@ -110,6 +139,27 @@ describe('schema', () => {
   it('rejects an invalid slug id', () => {
     const r = parseTaskSpec({ id: 'Bad Id', title: 'X', goal: 'g', nodes: [{ id: 'a', prompt: 'p' }] });
     expect(r.success).toBe(false);
+  });
+
+  it('validates safe task storage path components without normalizing traversal', () => {
+    expect(assertSafeTaskPathComponent('component')).toBe('component');
+    expect(assertTaskSlug('demo-task')).toBe('demo-task');
+    expect(assertTaskRunId('run-20260709')).toBe('run-20260709');
+    expect(assertTaskRunId('550e8400-e29b-41d4-a716-446655440000')).toBe('550e8400-e29b-41d4-a716-446655440000');
+    expect(assertTaskNodeOutputId('audit')).toBe('audit');
+    expect(assertTaskNodeOutputId('__verdict__')).toBe('__verdict__');
+
+    const unsafe = ['../x', 'a/../b', '/tmp/x', '..', '.', '', 'a%2Fb', 'a\\b'];
+    for (const value of unsafe) {
+      expect(isSafeTaskPathComponent(value)).toBe(false);
+      expect(isTaskSlug(value)).toBe(false);
+      expect(isTaskRunId(value)).toBe(false);
+      expect(isTaskNodeOutputId(value)).toBe(false);
+      expect(() => assertSafeTaskPathComponent(value)).toThrow(/Invalid task path component/);
+      expect(() => assertTaskSlug(value)).toThrow(/Invalid task slug/);
+      expect(() => assertTaskRunId(value)).toThrow(/Invalid task run ID/);
+      expect(() => assertTaskNodeOutputId(value)).toThrow(/Invalid task node output id/);
+    }
   });
 });
 
@@ -277,11 +327,16 @@ describe('storage', () => {
     expect(nodeDeps(loaded!.spec!.nodes[1]!)).toEqual(['audit']);
   });
 
-  it('serializes to parseable yaml', () => {
-    const yaml = serializeTaskYaml(parsed());
+  it('serializes node skills to parseable yaml', () => {
+    const spec = parsed();
+    spec.skills = ['backend-developer'];
+    spec.nodes[0]!.skills = ['security-review'];
+    const yaml = serializeTaskYaml(spec);
     const reparsed = parseTaskYaml(yaml);
     expect(reparsed.valid).toBe(true);
     expect(reparsed.spec?.title).toBe('Demo chain');
+    expect(reparsed.spec?.skills).toEqual(['backend-developer']);
+    expect(reparsed.spec?.nodes[0]?.skills).toEqual(['security-review']);
   });
 
   it('reports invalid yaml without throwing', () => {
@@ -306,6 +361,18 @@ describe('storage', () => {
     expect(readNodeOutput(root, 'demo', 'r1', 'audit')).toEqual({ text: 'findings', params: { count: 3 } });
     expect(readNodeOutput(root, 'demo', 'r1', 'missing')).toBeNull();
   });
+
+  it('rejects unsafe task storage path components before joining paths', () => {
+    const unsafe = ['../x', 'a/../b', '/tmp/x', '..', '.', '', 'a%2Fb', 'a\\b'];
+    for (const value of unsafe) {
+      expect(() => taskDir(root, value)).toThrow(/Invalid task slug/);
+      expect(() => runDir(root, 'demo', value)).toThrow(/Invalid task run ID/);
+      expect(() => loadTaskSpec(root, value)).toThrow(/Invalid task slug/);
+      expect(() => appendRunLog(root, 'demo', value, { t: '2026-06-07T00:00:00.000Z', kind: 'run-started', taskId: 'demo', runId: 'r1' })).toThrow(/Invalid task run ID/);
+      expect(() => writeNodeOutput(root, 'demo', 'r1', value, { text: 'bad' })).toThrow(/Invalid task node output id/);
+      expect(() => readNodeOutput(root, 'demo', 'r1', value)).toThrow(/Invalid task node output id/);
+    }
+  });
 });
 
 describe('generator-prompt', () => {
@@ -314,6 +381,28 @@ describe('generator-prompt', () => {
     expect(prompt).toContain('${nodes.<id>.output} reference MUST point to an `id` that you actually declare');
     expect(prompt).toContain('Goal: Decompose the goal');
     expect(prompt).toContain('Working title: My task');
+    expect(prompt).toContain('Optional `skills` arrays may appear at the task level or on individual nodes');
+    expect(prompt).toContain('Do not tell child workers to set their own session to closed statuses');
+  });
+
+  it('guides dynamic model and connection selection without hardcoded concrete recommendations', () => {
+    const prompt = buildGeneratorPrompt('Decompose the goal');
+    expect(prompt).toContain('Use reliable available model and connection metadata from the Craft tool surface when provided');
+    expect(prompt).toContain('defaults.model');
+    expect(prompt).toContain('defaults.llmConnection');
+    expect(prompt).toContain('node.model');
+    expect(prompt).toContain('node.llmConnection');
+    expect(prompt).toContain('omit `model` and `llmConnection` fields and use runtime defaults');
+    expect(prompt).toContain('Artificial Analysis Coding Agent Index (https://artificialanalysis.ai/agents/coding-agents)');
+    expect(prompt).toContain('optional references, not hard dependencies');
+    expect(prompt).toContain('fastest/cheapest sufficiently capable');
+    expect(prompt).toContain('strongest/specialized available option');
+    expect(prompt).toContain('matching connection');
+
+    const lowerPrompt = prompt.toLowerCase();
+    for (const forbidden of ['gpt-', 'claude-', 'gemini', 'codex', 'sonnet', 'opus', 'haiku', 'fable']) {
+      expect(lowerPrompt).not.toContain(forbidden);
+    }
   });
 
   it('repair prompt lists each validation error and re-asserts the YAML-only contract', () => {

@@ -74,3 +74,21 @@ export { handleListSessions } from './list-sessions.ts';
 export type { ListSessionsArgs } from './list-sessions.ts';
 export { handleListBackgroundTasks } from './list-background-tasks.ts';
 export type { ListBackgroundTasksArgs } from './list-background-tasks.ts';
+
+// Task Tools
+export {
+  handleTaskValidate,
+  handleTaskCreate,
+  handleTaskRun,
+  handleTaskGet,
+  handleTaskList,
+  handleTaskGetResults,
+} from './tasks.ts';
+export type {
+  TaskValidateArgs,
+  TaskCreateArgs,
+  TaskRunArgs,
+  TaskGetArgs,
+  TaskListArgs,
+  TaskGetResultsArgs,
+} from './tasks.ts';

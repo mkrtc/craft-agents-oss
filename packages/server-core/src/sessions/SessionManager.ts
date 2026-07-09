@@ -8,7 +8,7 @@ import { basename, dirname, join } from 'path'
 import { existsSync } from 'fs'
 import { readFile, writeFile, mkdir } from 'fs/promises'
 import { randomUUID } from 'node:crypto'
-import { type AgentEvent, setPermissionMode, hydratePreviousPermissionMode, getPermissionModeDiagnostics, type PermissionMode, unregisterSessionScopedToolCallbacks, mergeSessionScopedToolCallbacks, AbortReason, type AuthRequest, type AuthResult, type CredentialAuthRequest, type BrowserPaneFns, generateConversationSummary, resolveKeepBackgroundTasksAlive } from '@craft-agent/shared/agent'
+import { type AgentEvent, setPermissionMode, hydratePreviousPermissionMode, getPermissionModeDiagnostics, type PermissionMode, unregisterSessionScopedToolCallbacks, mergeSessionScopedToolCallbacks, AbortReason, type AuthRequest, type AuthResult, type CredentialAuthRequest, type BrowserPaneFns, type SessionScopedToolCallbacks, generateConversationSummary, resolveKeepBackgroundTasksAlive } from '@craft-agent/shared/agent'
 import {
   resolveSessionConnection,
   createBackendFromConnection,
@@ -98,6 +98,22 @@ import { listLabels, listLabelsFlat, loadLabelConfig } from '@craft-agent/shared
 import { extractLabelId, resolveSessionLabels, findTaskItemLabelId } from '@craft-agent/shared/labels'
 import { ensureLabelsExist, ensureTaskItemLabel } from '@craft-agent/shared/labels/crud'
 import { loadStatusConfig } from '@craft-agent/shared/statuses/storage'
+import {
+  parseTaskYaml,
+  saveTaskSpec,
+  loadTaskSpec,
+  listTaskSlugs,
+  listRunIds,
+  readRunLog,
+  readNodeOutput,
+  readRunSpecSnapshot,
+  nodeTitle,
+  assertTaskRunId,
+  assertTaskSlug,
+  DEFAULT_REPAIR_ATTEMPTS,
+  MAX_REPAIR_ATTEMPTS_CAP,
+} from '@craft-agent/shared/tasks'
+import { getOrCreateTaskConductorService, type TaskConductorService } from '../tasks'
 import { AutomationSystem, createPromptHistoryEntry, appendAutomationHistoryEntry, type AutomationSystemMetadataSnapshot } from '@craft-agent/shared/automations'
 import { buildBackendRuntimeSignature, buildRestartRequiredSignature, filterAttachmentsForModelInput } from './runtime-config'
 
@@ -1202,6 +1218,100 @@ export interface SessionCompletionEvent {
   tokenUsage?: TokenUsage
 }
 
+type SessionTaskTools = NonNullable<SessionScopedToolCallbacks['taskTools']>
+type SessionTaskInvocation = Parameters<NonNullable<SessionTaskTools['validate']>>[1]
+
+/** Map shared task validation issues onto the session-tool callback DTO shape. */
+function toTaskToolValidationDto(result: ReturnType<typeof parseTaskYaml>) {
+  const issue = (i: { path: string; message: string; severity: 'error' | 'warning'; suggestion?: string }) => ({
+    path: i.path,
+    message: i.message,
+    severity: i.severity,
+    ...(i.suggestion ? { suggestion: i.suggestion } : {}),
+  })
+  const sessionNodeCount = result.spec?.nodes.filter((n) => n.kind === 'session').length ?? 0
+  return {
+    valid: result.valid,
+    errors: result.errors.map(issue),
+    warnings: result.warnings.map(issue),
+    estimate: result.spec ? { nodeCount: result.spec.nodes.length, sessionNodeCount } : undefined,
+  }
+}
+
+/** Storage-backed task run results, shared by agent callbacks with the renderer RPC shape. */
+function readTaskToolResults(workspaceRoot: string, slug: string, runId?: string) {
+  const safeSlug = assertTaskSlug(slug)
+  const requestedRunId = runId === undefined ? undefined : assertTaskRunId(runId)
+  const runIds = listRunIds(workspaceRoot, safeSlug)
+  const chosen = requestedRunId ?? runIds.at(-1) ?? null
+  if (!chosen) return { slug: safeSlug, runId: null, runIds, nodes: [] }
+
+  const log = readRunLog(workspaceRoot, safeSlug, chosen)
+  const snapshot = readRunSpecSnapshot(workspaceRoot, safeSlug, chosen)
+  const titleById = new Map<string, string>()
+  if (snapshot) for (const n of snapshot.nodes) titleById.set(n.id, nodeTitle(n))
+
+  const byId = new Map<string, { id: string; state: string; sessionId?: string }>()
+  const ensure = (id: string) => {
+    let e = byId.get(id)
+    if (!e) { e = { id, state: 'pending' }; byId.set(id, e) }
+    return e
+  }
+
+  const verdicts: Array<{ result: 'pass' | 'fail' | 'unparsed'; reason?: string; nodes?: string[] }> = []
+  let runStatus: string | undefined
+  for (const entry of log) {
+    if (entry.kind === 'node-scheduled' || entry.kind === 'node-spawned') {
+      const e = ensure(entry.nodeId)
+      if (entry.kind === 'node-spawned') e.sessionId = entry.sessionId
+    } else if (entry.kind === 'node-finished') {
+      const e = ensure(entry.nodeId)
+      e.state = entry.state
+      if (entry.sessionId) e.sessionId = entry.sessionId
+    } else if (entry.kind === 'verdict') {
+      verdicts.push({
+        result: entry.result,
+        ...(entry.reason ? { reason: entry.reason } : {}),
+        ...(entry.nodes?.length ? { nodes: entry.nodes } : {}),
+      })
+    } else if (entry.kind === 'run-completed') {
+      runStatus = 'completed'
+    } else if (entry.kind === 'run-failed') {
+      runStatus = 'failed'
+    } else if (entry.kind === 'run-stopped') {
+      runStatus = 'stopped'
+    } else if (entry.kind === 'run-verifying') {
+      runStatus = 'verifying'
+    }
+  }
+
+  const nodes = [...byId.values()].map((e) => {
+    const out = readNodeOutput(workspaceRoot, safeSlug, chosen, e.id)
+    return {
+      id: e.id,
+      title: titleById.get(e.id) ?? e.id,
+      state: e.state,
+      ...(e.sessionId ? { sessionId: e.sessionId } : {}),
+      ...(out?.text ? { output: out.text } : {}),
+    }
+  })
+
+  const repairUsed = verdicts.filter((v) => v.result === 'fail').length
+  const repairMax = Math.min(snapshot?.max_iterations ?? DEFAULT_REPAIR_ATTEMPTS, MAX_REPAIR_ATTEMPTS_CAP)
+
+  return {
+    slug: safeSlug,
+    runId: chosen,
+    runIds,
+    verdict: verdicts.at(-1),
+    verdicts,
+    repair: { used: repairUsed, max: repairMax },
+    ...(runStatus ? { runStatus } : {}),
+    ...(snapshot?.acceptance_criteria ? { acceptanceCriteria: snapshot.acceptance_criteria } : {}),
+    nodes,
+  }
+}
+
 export class SessionManager implements ISessionManager {
   private sessions: Map<string, ManagedSession> = new Map()
   // Delta batching for performance - reduces IPC events from 50+/sec to ~20/sec
@@ -1305,6 +1415,145 @@ export class SessionManager implements ISessionManager {
     fn: (input: { workspaceId: string; sessionId: string; topicName: string }) => Promise<void>,
   ): void {
     this.automationBinder = fn
+  }
+
+  private taskConductor?: TaskConductorService
+
+  /** Inject the shared task conductor selected by a composition root/RPC handler. */
+  setTaskConductorService(service: TaskConductorService): void {
+    if (this.taskConductor && this.taskConductor !== service) {
+      sessionLog.warn('Replacing SessionManager TaskConductorService; active task runs may be split')
+    }
+    this.taskConductor = service
+  }
+
+  /** Shared task conductor used by both renderer RPC handlers and agent-facing task callbacks. */
+  getTaskConductorService(): TaskConductorService {
+    if (!this.taskConductor) {
+      this.taskConductor = getOrCreateTaskConductorService({ host: this })
+    }
+    return this.taskConductor
+  }
+
+  private assertSessionTaskCaller(managed: ManagedSession, context: SessionTaskInvocation): void {
+    if (context.callerSessionId !== managed.id) {
+      throw new Error(`Task tool caller mismatch: expected ${managed.id}, got ${context.callerSessionId}`)
+    }
+    if (context.workspacePath !== managed.workspace.rootPath) {
+      throw new Error('Task tool workspace mismatch: caller context does not match the managed session workspace')
+    }
+  }
+
+  private createSessionTaskToolCallbacks(managed: ManagedSession): SessionTaskTools {
+    const reconcileFromSpec = (spec: NonNullable<ReturnType<typeof parseTaskYaml>['spec']>) => ({
+      name: spec.title,
+      projectId: spec.project,
+      ...(spec.cwd ? { workingDirectory: spec.cwd } : {}),
+      ...(spec.defaults?.model ? { model: spec.defaults.model } : {}),
+      ...(spec.defaults?.llmConnection ? { llmConnection: spec.defaults.llmConnection } : {}),
+      ...(spec.defaults?.permissionMode ? { permissionMode: spec.defaults.permissionMode } : {}),
+    })
+
+    const finishCreate = async (
+      callerSessionId: string,
+      spec: NonNullable<ReturnType<typeof parseTaskYaml>['spec']>,
+      validation: ReturnType<typeof toTaskToolValidationDto>,
+    ) => {
+      const applied = await this.applyTaskLabel(callerSessionId).catch((err: unknown) => {
+        sessionLog.warn('task_create callback: applyTaskLabel failed for caller orchestrator', {
+          sessionId: callerSessionId,
+          err,
+        })
+        return undefined
+      })
+
+      if (spec.sources?.length) {
+        await Promise.resolve(this.setSessionSources(callerSessionId, spec.sources)).catch((err: unknown) => {
+          sessionLog.warn('task_create callback: setSessionSources failed for caller orchestrator', {
+            sessionId: callerSessionId,
+            err,
+          })
+        })
+      }
+
+      return {
+        slug: spec.id,
+        orchestratorSessionId: callerSessionId,
+        validation,
+        ...(applied?.labelId ? { taskLabelId: applied.labelId } : {}),
+      }
+    }
+
+    return {
+      validate: (input, context) => {
+        this.assertSessionTaskCaller(managed, context)
+        return toTaskToolValidationDto(parseTaskYaml(input.yaml))
+      },
+      create: async (input, context) => {
+        this.assertSessionTaskCaller(managed, context)
+        const parsed = parseTaskYaml(input.yaml)
+        const validation = toTaskToolValidationDto(parsed)
+        if (!parsed.valid || !parsed.spec) {
+          return { slug: '', orchestratorSessionId: context.callerSessionId, validation }
+        }
+
+        const spec = parsed.spec
+
+        // The agent-facing MVP deliberately binds/adopts the current caller only. It does not
+        // expose raw orchestratorSessionId / attachToExistingSession passthroughs.
+        const reconcile = reconcileFromSpec(spec)
+        const adopted = await this.adoptGeneratedTaskOrchestrator(context.callerSessionId, spec.id, reconcile)
+        if (!adopted) {
+          const bound = await this.bindExistingSessionToTask(context.callerSessionId, spec.id, reconcile)
+          if (!bound) {
+            throw new Error(
+              `Cannot bind task "${spec.id}" to current session ${context.callerSessionId}: ` +
+              'session is missing or already bound to a different task.',
+            )
+          }
+        }
+
+        saveTaskSpec(managed.workspace.rootPath, spec)
+        return finishCreate(context.callerSessionId, spec, validation)
+      },
+      run: (input, context) => {
+        this.assertSessionTaskCaller(managed, context)
+        const slug = assertTaskSlug(input.slug)
+        const runId = input.runId === undefined ? undefined : assertTaskRunId(input.runId)
+        return this.getTaskConductorService().run(managed.workspace.id, slug, {
+          ...(runId !== undefined ? { runId } : {}),
+          orchestratorSessionId: context.callerSessionId,
+          ...(input.params ? { params: input.params } : {}),
+        })
+      },
+      get: (input, context) => {
+        this.assertSessionTaskCaller(managed, context)
+        const slug = assertTaskSlug(input.slug)
+        const runId = input.runId === undefined ? undefined : assertTaskRunId(input.runId)
+        const loaded = loadTaskSpec(managed.workspace.rootPath, slug)
+        if (!loaded) {
+          return {
+            slug,
+            validation: {
+              valid: false,
+              errors: [{ path: 'root', message: `Task "${slug}" not found`, severity: 'error' }],
+              warnings: [],
+            },
+            run: null,
+          }
+        }
+        const run = runId ? this.getTaskConductorService().getRunState(managed.workspace.id, slug, runId) : null
+        return { slug, validation: toTaskToolValidationDto(loaded), spec: loaded.spec, run }
+      },
+      list: (_input, context) => {
+        this.assertSessionTaskCaller(managed, context)
+        return listTaskSlugs(managed.workspace.rootPath)
+      },
+      getResults: (input, context) => {
+        this.assertSessionTaskCaller(managed, context)
+        return readTaskToolResults(managed.workspace.rootPath, input.slug, input.runId)
+      },
+    }
   }
 
   private browserPaneManager: IBrowserPaneManager | null = null
@@ -4554,8 +4803,10 @@ export class SessionManager implements ISessionManager {
         }
       }
 
-      // Wire up session self-management tools (set_session_labels, set_session_status, etc.)
+      // Wire up session self-management and task tools. These are merged (not replaced) so
+      // agent-owned callbacks and browser-pane callbacks stay registered across turns/restarts.
       mergeSessionScopedToolCallbacks(managed.id, {
+        taskTools: this.createSessionTaskToolCallbacks(managed),
         setSessionLabelsFn: async (sessionId: string | undefined, labels: string[]) => {
           await this.setSessionLabels(sessionId ?? managed.id, labels)
         },

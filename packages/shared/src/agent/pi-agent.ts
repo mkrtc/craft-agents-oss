@@ -64,6 +64,7 @@ import {
   getSessionScopedToolCallbacks,
 } from './session-scoped-tools.ts';
 import { attachSessionSelfManagementBindings } from './session-self-management-bindings.ts';
+import { attachSessionTaskToolBindings } from './session-task-bindings.ts';
 
 // Session tool proxy definitions (for registering with subprocess)
 import { getSessionToolProxyDefs, SESSION_TOOL_NAMES } from './backend/pi/session-tool-defs.ts';
@@ -1496,8 +1497,9 @@ export class PiAgent extends BaseAgent {
       },
     });
 
-    // Attach session self-management bindings (lazy getters from callback registry)
+    // Attach lazy callback-backed bindings from the session registry.
     attachSessionSelfManagementBindings(this._sessionToolContext, sessionId);
+    attachSessionTaskToolBindings(this._sessionToolContext, sessionId);
 
     return this._sessionToolContext;
   }

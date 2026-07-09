@@ -37,6 +37,10 @@ import {
   writeRunSpecSnapshot,
   DEFAULT_REPAIR_ATTEMPTS,
   MAX_REPAIR_ATTEMPTS_CAP,
+  effectiveSkills,
+  assertSkillSlugs,
+  assertTaskRunId,
+  assertTaskSlug,
 } from '@craft-agent/shared/tasks';
 
 // ---------------------------------------------------------------------------
@@ -345,9 +349,11 @@ class ActiveRun {
 
   private async dispatch(node: TaskNode): Promise<void> {
     try {
-      // Task-level skills ride as [skill:slug] mentions on every child prompt — the agent
+      // Task/node skills ride as [skill:slug] mentions on every child prompt — the agent
       // pipeline resolves each SKILL.md and blocks tools until it is read (skills-as-context).
-      const prompt = skillsPreamble(this.spec.skills) + (await this.buildPrompt(node));
+      // Validate immediately before expansion so unsafe text can never become a prompt preamble,
+      // even if a programmatic caller bypassed task.yaml parsing.
+      const prompt = skillsPreamble(effectiveSkills(this.spec.skills, node.skills)) + (await this.buildPrompt(node));
       // Children run where the parent runs: inherit the orchestrator's resolved working directory,
       // falling back to the spec's declared `cwd`. Without this they default to the workspace cwd
       // rather than the parent session's (project) directory.
@@ -769,14 +775,15 @@ class ActiveRun {
 // ---------------------------------------------------------------------------
 
 /**
- * Prefix for dispatched child prompts carrying the task's skill list as [skill:slug]
- * mentions. The agent pipeline (base-agent) parses these from any message, resolves each
- * skill's SKILL.md, and blocks tool use until the files are read — so task-level skills
- * act as mandatory context for every subtask. Empty/absent skills → empty prefix.
+ * Prefix for dispatched child prompts carrying the effective task+node skill list as
+ * [skill:slug] mentions. The agent pipeline (base-agent) parses these from any message,
+ * resolves each SKILL.md, and blocks tool use until the files are read — so task/node
+ * skills act as mandatory context for their subtasks. Empty/absent skills → empty prefix.
  */
 function skillsPreamble(skills: string[] | undefined): string {
-  if (!skills?.length) return '';
-  return `Apply these skills: ${skills.map((s) => `[skill:${s}]`).join(' ')}\n\n`;
+  const safeSkills = assertSkillSlugs(skills, 'effective skills');
+  if (!safeSkills.length) return '';
+  return `Apply these skills: ${safeSkills.map((s) => `[skill:${s}]`).join(' ')}\n\n`;
 }
 
 /**
@@ -834,15 +841,17 @@ export class TaskRunner {
   constructor(private readonly deps: TaskRunnerDeps) {}
 
   private key(slug: string, runId: string): string {
-    return `${slug}:${runId}`;
+    return `${assertTaskSlug(slug)}:${assertTaskRunId(runId)}`;
   }
 
   /** Load + validate a task's yaml and start a run. Throws if the task is missing or invalid. */
   run(slug: string, opts: RunOptions = {}): RunSnapshot {
-    const loaded = loadTaskSpec(this.deps.workspaceRoot, slug);
-    if (!loaded?.spec) throw new Error(`Task "${slug}" not found or has no valid task.yaml`);
+    const safeSlug = assertTaskSlug(slug);
+    const requestedRunId = opts.runId === undefined ? undefined : assertTaskRunId(opts.runId);
+    const loaded = loadTaskSpec(this.deps.workspaceRoot, safeSlug);
+    if (!loaded?.spec) throw new Error(`Task "${safeSlug}" not found or has no valid task.yaml`);
     if (!loaded.valid) {
-      throw new Error(`Refusing to run invalid task "${slug}": ${loaded.errors.map((e) => e.message).join('; ')}`);
+      throw new Error(`Refusing to run invalid task "${safeSlug}": ${loaded.errors.map((e) => e.message).join('; ')}`);
     }
     // One active run per orchestrator: a second concurrent run would race the same parent session's
     // verdict listener (two runs attaching onSessionComplete on the same orchestrator would cross
@@ -854,20 +863,20 @@ export class TaskRunner {
         const snap = existing.snapshot();
         if (snap.orchestratorSessionId === orchestrator && !isTerminalRunStatus(snap.status)) {
           throw new Error(
-            `Task "${slug}" already has an active run (${snap.runId}) on this orchestrator; stop it before starting another.`,
+            `Task "${safeSlug}" already has an active run (${snap.runId}) on this orchestrator; stop it before starting another.`,
           );
         }
       }
     }
-    const runId = opts.runId ?? (this.deps.genRunId ? this.deps.genRunId() : `run-${Date.now()}`);
+    const runId = requestedRunId ?? assertTaskRunId(this.deps.genRunId ? this.deps.genRunId() : `run-${Date.now()}`);
     const run = new ActiveRun(
       loaded.spec,
-      slug,
+      safeSlug,
       runId,
-      { ...opts, params: resolveParams(loaded.spec, opts.params), verifyOnComplete: opts.verifyOnComplete ?? true },
+      { ...opts, runId, params: resolveParams(loaded.spec, opts.params), verifyOnComplete: opts.verifyOnComplete ?? true },
       this.deps,
     );
-    this.runs.set(this.key(slug, runId), run);
+    this.runs.set(this.key(safeSlug, runId), run);
     run.start();
     return run.snapshot();
   }
@@ -877,34 +886,38 @@ export class TaskRunner {
   }
 
   resume(slug: string, runId: string): void {
-    const existing = this.runs.get(this.key(slug, runId));
+    const safeSlug = assertTaskSlug(slug);
+    const safeRunId = assertTaskRunId(runId);
+    const existing = this.runs.get(this.key(safeSlug, safeRunId));
     if (existing) {
       existing.resume();
       return;
     }
     // Not in memory (e.g. after an app restart): reconstruct from the persisted run-log.
-    this.rehydrate(slug, runId);
+    this.rehydrate(safeSlug, safeRunId);
   }
 
   /** Reconstruct an in-memory run from its persisted run-log + node outputs, then resume it. */
   private rehydrate(slug: string, runId: string): RunSnapshot {
-    const loaded = loadTaskSpec(this.deps.workspaceRoot, slug);
+    const safeSlug = assertTaskSlug(slug);
+    const safeRunId = assertTaskRunId(runId);
+    const loaded = loadTaskSpec(this.deps.workspaceRoot, safeSlug);
     if (!loaded?.spec || !loaded.valid) {
-      throw new Error(`Cannot resume "${slug}:${runId}": task.yaml is missing or invalid`);
+      throw new Error(`Cannot resume "${safeSlug}:${safeRunId}": task.yaml is missing or invalid`);
     }
-    const log = readRunLog(this.deps.workspaceRoot, slug, runId);
-    if (log.length === 0) throw new Error(`Cannot resume "${slug}:${runId}": no run-log found`);
+    const log = readRunLog(this.deps.workspaceRoot, safeSlug, safeRunId);
+    if (log.length === 0) throw new Error(`Cannot resume "${safeSlug}:${safeRunId}": no run-log found`);
     const started = log.find((e) => e.kind === 'run-started');
     const orchestratorSessionId = started && started.kind === 'run-started' ? started.orchestratorSessionId : undefined;
     const run = new ActiveRun(
       loaded.spec,
-      slug,
-      runId,
+      safeSlug,
+      safeRunId,
       { orchestratorSessionId, params: resolveParams(loaded.spec), verifyOnComplete: true },
       this.deps,
     );
-    run.hydrate(log, (nodeId) => readNodeOutput(this.deps.workspaceRoot, slug, runId, nodeId));
-    this.runs.set(this.key(slug, runId), run);
+    run.hydrate(log, (nodeId) => readNodeOutput(this.deps.workspaceRoot, safeSlug, safeRunId, nodeId));
+    this.runs.set(this.key(safeSlug, safeRunId), run);
     run.resumeFromHydrated();
     return run.snapshot();
   }
@@ -919,8 +932,10 @@ export class TaskRunner {
 
   /** Await a run reaching a terminal state (completed/failed/stopped). */
   waitUntilSettled(slug: string, runId: string): Promise<RunSnapshot> {
-    const run = this.runs.get(this.key(slug, runId));
-    if (!run) return Promise.reject(new Error(`No active run ${slug}:${runId}`));
+    const safeSlug = assertTaskSlug(slug);
+    const safeRunId = assertTaskRunId(runId);
+    const run = this.runs.get(this.key(safeSlug, safeRunId));
+    if (!run) return Promise.reject(new Error(`No active run ${safeSlug}:${safeRunId}`));
     return run.waitUntilSettled();
   }
 }

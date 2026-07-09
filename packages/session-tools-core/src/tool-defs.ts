@@ -15,6 +15,7 @@ import { z } from 'zod';
 import { zodToJsonSchema } from 'zod-to-json-schema';
 import type { SessionToolContext } from './context.ts';
 import type { ToolResult } from './types.ts';
+import { TaskToolRunIdSchema, TaskToolSlugSchema } from './task-path-validation.ts';
 
 // Handlers
 import { handleSubmitPlan } from './handlers/submit-plan.ts';
@@ -41,6 +42,14 @@ import { handleListSessions } from './handlers/list-sessions.ts';
 import { handleListBackgroundTasks } from './handlers/list-background-tasks.ts';
 import { handleSendAgentMessage } from './handlers/send-agent-message.ts';
 import { handleListMessagingChannels, handleUnbindMessagingChannel } from './handlers/messaging.ts';
+import {
+  handleTaskValidate,
+  handleTaskCreate,
+  handleTaskRun,
+  handleTaskGet,
+  handleTaskList,
+  handleTaskGetResults,
+} from './handlers/tasks.ts';
 
 // ============================================================
 // Canonical Zod Schemas
@@ -205,6 +214,33 @@ export const ListSessionsSchema = z.object({
 
 export const ListBackgroundTasksSchema = z.object({
   sessionId: z.string().optional().describe('Session ID to query. Omit to list background tasks for the current session.'),
+});
+
+// Task tools (agent-facing MVP; task_generate intentionally omitted)
+export const TaskValidateSchema = z.object({
+  yaml: z.string().describe('task.yaml source text to validate. This is read-only and has no side effects.'),
+});
+
+export const TaskCreateSchema = z.object({
+  yaml: z.string().describe('task.yaml source text to create/save. The backend binds/adopts the current caller session as the task orchestrator by default.'),
+});
+
+export const TaskRunSchema = z.object({
+  slug: TaskToolSlugSchema.describe('Task slug to run.'),
+  runId: TaskToolRunIdSchema.optional().describe('Optional caller-chosen run ID. Omit to let the backend generate one.'),
+  params: z.record(z.string(), z.unknown()).optional().describe('Optional task parameter values for this run.'),
+});
+
+export const TaskGetSchema = z.object({
+  slug: TaskToolSlugSchema.describe('Task slug to inspect.'),
+  runId: TaskToolRunIdSchema.optional().describe('Optional active run ID whose in-memory state should be included when available.'),
+});
+
+export const TaskListSchema = z.object({});
+
+export const TaskGetResultsSchema = z.object({
+  slug: TaskToolSlugSchema.describe('Task slug whose persisted run results should be read.'),
+  runId: TaskToolRunIdSchema.optional().describe('Optional run ID. Omit to inspect the latest persisted run.'),
 });
 
 // Inter-session messaging
@@ -491,6 +527,30 @@ Status meanings:
 
 Never guess or claim "the app restarted" — report exactly what this tool returns. Omit sessionId for the current session.`,
 
+  task_validate: `Validate task.yaml source text without saving or running it.
+
+This is read-only: it reports schema/graph issues and pre-flight estimates when task callbacks are available.`,
+
+  task_create: `Create or update a task from task.yaml source text.
+
+**Side effects:** may write task.yaml, create/bind/adopt the current caller session as the task orchestrator, apply task labels, enable task sources, and update session/task metadata. The tool does not accept arbitrary orchestrator/attach session IDs; the backend uses the current caller session from context as the safe default.`,
+
+  task_run: `Start a task run for an existing task slug.
+
+**Side effects:** may spawn child sessions, send prompts, update run/task/session state, consume model/API quota, and write run artifacts. The verifier/orchestrator defaults to the current caller session from context; arbitrary target-session runs are not exposed by this MVP tool.`,
+
+  task_get: `Get a task spec and, optionally, an active run snapshot.
+
+This is read-only and returns the task validation state, parsed spec, and run state when available.`,
+
+  task_list: `List saved task slugs in the current workspace.
+
+This is read-only.`,
+
+  task_get_results: `Get persisted task run results.
+
+This is read-only and reads durable run artifacts such as verdicts, repair accounting, node session IDs, and node outputs.`,
+
   send_agent_message: `Send a message to another session. The message is delivered with your session ID so the target can reply back.
 
 Use this to coordinate with spawned sessions, send follow-up instructions, or relay information between sessions.
@@ -574,6 +634,13 @@ export const SESSION_TOOL_DEFS: SessionToolDef[] = [
   { name: 'get_session_info', description: TOOL_DESCRIPTIONS.get_session_info, inputSchema: GetSessionInfoSchema, executionMode: 'registry', safeMode: 'allow', readOnly: true, handler: handleGetSessionInfo },
   { name: 'list_sessions', description: TOOL_DESCRIPTIONS.list_sessions, inputSchema: ListSessionsSchema, executionMode: 'registry', safeMode: 'allow', readOnly: true, handler: handleListSessions },
   { name: 'list_background_tasks', description: TOOL_DESCRIPTIONS.list_background_tasks, inputSchema: ListBackgroundTasksSchema, executionMode: 'registry', safeMode: 'allow', readOnly: true, handler: handleListBackgroundTasks },
+  // Task tools (registry — use injected taskTools callbacks; task_generate intentionally omitted)
+  { name: 'task_validate', description: TOOL_DESCRIPTIONS.task_validate, inputSchema: TaskValidateSchema, executionMode: 'registry', safeMode: 'allow', readOnly: true, handler: handleTaskValidate },
+  { name: 'task_create', description: TOOL_DESCRIPTIONS.task_create, inputSchema: TaskCreateSchema, executionMode: 'registry', safeMode: 'block', handler: handleTaskCreate },
+  { name: 'task_run', description: TOOL_DESCRIPTIONS.task_run, inputSchema: TaskRunSchema, executionMode: 'registry', safeMode: 'block', handler: handleTaskRun },
+  { name: 'task_get', description: TOOL_DESCRIPTIONS.task_get, inputSchema: TaskGetSchema, executionMode: 'registry', safeMode: 'allow', readOnly: true, handler: handleTaskGet },
+  { name: 'task_list', description: TOOL_DESCRIPTIONS.task_list, inputSchema: TaskListSchema, executionMode: 'registry', safeMode: 'allow', readOnly: true, handler: handleTaskList },
+  { name: 'task_get_results', description: TOOL_DESCRIPTIONS.task_get_results, inputSchema: TaskGetResultsSchema, executionMode: 'registry', safeMode: 'allow', readOnly: true, handler: handleTaskGetResults },
   // Inter-session messaging
   { name: 'send_agent_message', description: TOOL_DESCRIPTIONS.send_agent_message, inputSchema: SendAgentMessageSchema, executionMode: 'registry', safeMode: 'block', handler: handleSendAgentMessage },
   // Messaging gateway tools

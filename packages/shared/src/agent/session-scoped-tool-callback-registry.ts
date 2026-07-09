@@ -81,6 +81,9 @@ export interface SessionScopedToolCallbacks {
   getMessagingBindingsFn?: (sessionId: string) => Array<{ platform: string; channelId: string; threadId?: number; channelName?: string; enabled: boolean }>;
   /** Unbind messaging channels from a session. Returns count of removed bindings. */
   unbindMessagingChannelFn?: (sessionId: string, platform?: string) => number;
+
+  /** Agent-facing task tool callbacks (validate/create/run/read/list/results). */
+  taskTools?: import('@craft-agent/session-tools-core').SessionTaskToolCallbacks;
 }
 
 // Registry of callbacks keyed by sessionId

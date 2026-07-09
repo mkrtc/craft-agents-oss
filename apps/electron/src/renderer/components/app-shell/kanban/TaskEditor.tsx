@@ -271,12 +271,16 @@ function SkillsField({
   onChange,
   workspaceId,
   title,
+  width = 168,
+  size = 'md',
 }: {
   skills: LoadedSkill[]
   values: string[]
   onChange: (next: string[]) => void
   workspaceId: string
   title?: string
+  width?: number
+  size?: 'sm' | 'md'
 }) {
   const { t } = useTranslation()
   const [open, setOpen] = React.useState(false)
@@ -293,7 +297,8 @@ function SkillsField({
     <>
       <SelectButton
         ref={anchorRef}
-        style={{ width: 168 }}
+        size={size}
+        style={{ width }}
         title={title}
         data-state={open ? 'open' : 'closed'}
         onClick={() => setOpen((prev) => !prev)}
@@ -362,6 +367,8 @@ function SubtaskCard({
   groups,
   fallbackModel,
   modelToConnection,
+  availableSkills,
+  workspaceId,
   onChange,
   onRemove,
 }: {
@@ -374,6 +381,9 @@ function SubtaskCard({
   fallbackModel: string
   /** model id → connection slug, so picking a model pins the connection that serves it. */
   modelToConnection: Map<string, string>
+  /** Workspace skill catalog for node-level skill selection; unknown preserved slugs remain in values. */
+  availableSkills: LoadedSkill[]
+  workspaceId: string
   onChange: (patch: Partial<EditorSubtask>) => void
   onRemove: () => void
 }) {
@@ -414,6 +424,17 @@ function SubtaskCard({
               width={128}
               size="sm"
             />
+            {(availableSkills.length > 0 || (subtask.skillSlugs?.length ?? 0) > 0) && (
+              <SkillsField
+                skills={availableSkills}
+                values={subtask.skillSlugs ?? []}
+                onChange={(next) => onChange({ skillSlugs: next })}
+                workspaceId={workspaceId}
+                title={t('tasks.skillsHint')}
+                width={144}
+                size="sm"
+              />
+            )}
             {subtask.dependsOn.map((depUid) => (
               <span
                 key={depUid}
@@ -606,7 +627,7 @@ export function TaskEditor({
         .then((res) => {
           if (cancelled) return
           const spec = res.spec as
-            | { title?: string; goal?: string; acceptance_criteria?: string; max_iterations?: number; project?: string; cwd?: string; sources?: string[]; skills?: string[]; defaults?: { model?: string; llmConnection?: string; permissionMode?: TaskPermissionMode }; nodes?: Array<{ id: string; title?: string; prompt?: string; model?: string; llmConnection?: string; depends_on?: string[] }> }
+            | { title?: string; goal?: string; acceptance_criteria?: string; max_iterations?: number; project?: string; cwd?: string; sources?: string[]; skills?: string[]; defaults?: { model?: string; llmConnection?: string; permissionMode?: TaskPermissionMode }; nodes?: Array<{ id: string; title?: string; prompt?: string; model?: string; llmConnection?: string; skills?: string[]; depends_on?: string[] }> }
             | undefined
           if (!spec) return
           if (spec.title) setTitle(spec.title)
@@ -721,7 +742,7 @@ export function TaskEditor({
         return
       }
       const spec = res.spec as
-        | { title?: string; goal?: string; acceptance_criteria?: string; max_iterations?: number; defaults?: { model?: string; llmConnection?: string; permissionMode?: TaskPermissionMode }; nodes?: Array<{ id: string; title?: string; prompt?: string; model?: string; llmConnection?: string; depends_on?: string[] }> }
+        | { title?: string; goal?: string; acceptance_criteria?: string; max_iterations?: number; defaults?: { model?: string; llmConnection?: string; permissionMode?: TaskPermissionMode }; nodes?: Array<{ id: string; title?: string; prompt?: string; model?: string; llmConnection?: string; skills?: string[]; depends_on?: string[] }> }
         | undefined
       if (!spec || !res.validation.valid) {
         discardDraft(res.orchestratorSessionId)
@@ -1153,6 +1174,8 @@ export function TaskEditor({
                     groups={groups}
                     fallbackModel={orchModel || fallbackModel}
                     modelToConnection={modelToConnection}
+                    availableSkills={workspaceSkills}
+                    workspaceId={workspaceId}
                     onChange={(patch) => updateSubtask(st.uid, patch)}
                     onRemove={() => removeSubtask(st.uid)}
                   />
