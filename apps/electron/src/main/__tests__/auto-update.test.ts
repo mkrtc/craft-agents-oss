@@ -14,6 +14,8 @@ let quitAndInstallImpl: (isSilent?: boolean, isForceRunAfter?: boolean) => void 
 const quitAndInstall = mock((isSilent?: boolean, isForceRunAfter?: boolean) => {
   quitAndInstallImpl(isSilent, isForceRunAfter)
 })
+let downloadUpdateImpl: () => Promise<unknown> = async () => []
+const downloadUpdate = mock(async () => downloadUpdateImpl())
 const clearDismissedUpdateVersion = mock(() => {})
 const getAllWindows = mock(() => [])
 
@@ -28,6 +30,7 @@ const autoUpdater: any = {
     listeners.set(event, existing)
   }),
   checkForUpdates: mock(async () => ({ updateInfo: { version: '0.11.4' } })),
+  downloadUpdate,
   quitAndInstall,
 }
 
@@ -86,9 +89,12 @@ async function markUpdateReady(version = '0.11.4'): Promise<void> {
 
 beforeEach(() => {
   quitAndInstall.mockClear()
+  downloadUpdate.mockClear()
   clearDismissedUpdateVersion.mockClear()
   getAllWindows.mockClear()
+  autoUpdater.downloadedUpdateHelper = null
   quitAndInstallImpl = () => {}
+  downloadUpdateImpl = async () => []
 })
 
 describe('installUpdate', () => {
@@ -110,6 +116,47 @@ describe('installUpdate', () => {
     expect(autoUpdate.getUpdateInfo()).toMatchObject({
       downloadState: 'error',
       error: 'Pre-update cleanup failed: flush failed',
+    })
+  })
+
+  it('re-drives download when UI is ready but electron-updater has no validated helper', async () => {
+    await emit('update-downloaded', { version: '0.11.5' })
+
+    const hook = mock(async () => {})
+    autoUpdate.setBeforeUpdateQuitHook(hook)
+    downloadUpdateImpl = async () => {
+      autoUpdater.downloadedUpdateHelper = {
+        cacheDir: '/tmp/craft-updater-cache',
+        versionInfo: { version: '0.11.5' },
+      }
+      return []
+    }
+
+    await autoUpdate.installUpdate()
+
+    expect(downloadUpdate).toHaveBeenCalledTimes(1)
+    expect(hook).toHaveBeenCalledTimes(1)
+    expect(quitAndInstall).toHaveBeenCalledWith(false, true)
+  })
+
+  it('reports an installable-state error instead of calling quitAndInstall when re-download fails', async () => {
+    await emit('update-downloaded', { version: '0.11.5' })
+
+    const hook = mock(async () => {})
+    autoUpdate.setBeforeUpdateQuitHook(hook)
+    downloadUpdateImpl = async () => {
+      throw new Error('network unavailable')
+    }
+
+    await expect(autoUpdate.installUpdate()).rejects.toThrow('re-download failed: network unavailable')
+
+    expect(downloadUpdate).toHaveBeenCalledTimes(1)
+    expect(hook).not.toHaveBeenCalled()
+    expect(quitAndInstall).not.toHaveBeenCalled()
+    expect(autoUpdate.isUpdating()).toBe(false)
+    expect(autoUpdate.getUpdateInfo()).toMatchObject({
+      downloadState: 'error',
+      error: 'Downloaded update is not ready to install and re-download failed: network unavailable',
     })
   })
 

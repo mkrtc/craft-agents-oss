@@ -169,6 +169,60 @@ jobs:
 
           gh release upload "$RELEASE_TAG" "${existing[@]}" --repo "$GITHUB_REPOSITORY" --clobber
 
+  build-macos-x64:
+    name: Build macOS x64 assets
+    runs-on: macos-latest
+    timeout-minutes: 120
+    needs: prepare-release
+
+    steps:
+      - name: Checkout release tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+
+      - name: Build DMG and updater ZIP
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: bash apps/electron/scripts/build-dmg.sh x64
+
+      - name: Upload macOS x64 release assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+
+          # Do not upload this job's latest-mac.yml: electron-updater reads a
+          # single latest-mac.yml per release, and clobbering the arm64 manifest
+          # would break Apple Silicon auto-update. The x64 DMG/ZIP are still
+          # published for manual Intel Mac installs while a dedicated multi-arch
+          # manifest strategy is implemented separately.
+          files=(
+            apps/electron/release/Craft-Agents-x64.dmg
+            apps/electron/release/Craft-Agents-x64.zip
+            apps/electron/release/Craft-Agents-x64.*.blockmap
+          )
+
+          existing=()
+          for file in "${files[@]}"; do
+            [[ -f "$file" ]] && existing+=("$file")
+          done
+
+          if [[ ${#existing[@]} -eq 0 ]]; then
+            echo "::error::No macOS x64 release assets found"
+            exit 1
+          fi
+
+          gh release upload "$RELEASE_TAG" "${existing[@]}" --repo "$GITHUB_REPOSITORY" --clobber
+
   build-windows-x64:
     name: Build Windows x64
     runs-on: windows-latest
@@ -223,6 +277,7 @@ jobs:
     needs:
       - build-linux-x64
       - build-macos-arm64
+      - build-macos-x64
       - build-windows-x64
 
     steps:

@@ -66,7 +66,11 @@ export async function rebuildMenu(): Promise<void> {
     ? {
         label: i18n.t("menu.installUpdateVersion", { version: updateInfo.latestVersion }),
         click: async () => {
-          await installUpdate()
+          try {
+            await installUpdate()
+          } catch (err) {
+            mainLog.error('[menu] Install update failed:', err)
+          }
         }
       }
     : {

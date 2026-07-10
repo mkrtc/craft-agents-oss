@@ -162,19 +162,14 @@ autoUpdater.on('update-available', (info) => {
     return
   }
 
-  // Fallback: check if file exists in cache directory
+  // Cache-file presence alone is not enough to install. electron-updater must
+  // validate the pending download and populate downloadedUpdateHelper before
+  // quitAndInstall() is reliable on macOS. Keep the UI in downloading state and
+  // let electron-updater emit update-downloaded (or installUpdate re-drive the
+  // download) instead of showing a premature Restart button.
   const existing = checkForExistingDownload()
   if (existing.exists) {
-    mainLog.info(`[auto-update] Update already downloaded (file check), setting state to ready`)
-    updateInfo = {
-      ...updateInfo,
-      available: true,
-      latestVersion: info.version,
-      downloadState: 'ready',
-      downloadProgress: 100,
-    }
-    broadcastUpdateInfo()
-    return
+    mainLog.info(`[auto-update] Found cached update files, waiting for electron-updater validation before marking ready`)
   }
 
   updateInfo = {
@@ -344,17 +339,13 @@ export async function checkForUpdates(options: CheckOptions = {}): Promise<Updat
       // Give electron-updater time to fire update-downloaded if file exists
       await new Promise(resolve => setTimeout(resolve, 500))
 
-      // Double-check: if we're still showing 'downloading' but file exists, update state
+      // Double-check cache files for diagnostics only. A cached file without
+      // electron-updater's validated downloadedUpdateHelper is not installable
+      // enough for quitAndInstall(), especially on macOS.
       if (updateInfo.downloadState === 'downloading') {
         const existing = checkForExistingDownload()
         if (existing.exists) {
-          mainLog.info('[auto-update] Update already downloaded, updating state to ready')
-          updateInfo = {
-            ...updateInfo,
-            downloadState: 'ready',
-            downloadProgress: 100,
-          }
-          broadcastUpdateInfo()
+          mainLog.info('[auto-update] Cached update files exist, but electron-updater has not emitted update-downloaded yet')
         }
       }
     }
@@ -381,9 +372,43 @@ export async function checkForUpdates(options: CheckOptions = {}): Promise<Updat
  * - Linux: Replaces AppImage file
  * Then relaunches the app automatically.
  */
+async function ensureUpdaterReadyForInstall(): Promise<void> {
+  const initialState = checkElectronUpdaterState()
+  if (initialState.ready) return
+
+  autoUpdateLog.warn('Update UI state is ready, but electron-updater has no validated downloaded update; re-driving download before install')
+
+  try {
+    const downloadUpdate = (autoUpdater as unknown as { downloadUpdate?: () => Promise<unknown> }).downloadUpdate
+    if (typeof downloadUpdate !== 'function') {
+      throw new Error('electron-updater downloadUpdate() is not available')
+    }
+    await downloadUpdate.call(autoUpdater)
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    throw new Error(`Downloaded update is not ready to install and re-download failed: ${message}`)
+  }
+
+  const finalState = checkElectronUpdaterState()
+  if (!finalState.ready) {
+    throw new Error('Downloaded update is not ready to install yet. Please try Check for updates again, or download the latest DMG manually from GitHub Releases.')
+  }
+}
+
 export async function installUpdate(): Promise<void> {
   if (updateInfo.downloadState !== 'ready') {
     throw new Error('No update ready to install')
+  }
+
+  try {
+    await ensureUpdaterReadyForInstall()
+  } catch (error) {
+    __isUpdating = false
+    const message = error instanceof Error ? error.message : String(error)
+    autoUpdateLog.error('Update is not installable', error)
+    updateInfo = { ...updateInfo, downloadState: 'error', error: message }
+    broadcastUpdateInfo()
+    throw error
   }
 
   autoUpdateLog.info('Installing update and restarting...')
