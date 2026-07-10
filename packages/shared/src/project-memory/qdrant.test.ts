@@ -30,7 +30,7 @@ describe('QdrantProjectMemoryStore', () => {
     expect(getDefaultProjectMemoryOptions().dimension).toBe(768);
   });
 
-  test('rejects empty search scopes before calling Qdrant', async () => {
+  test('rejects empty and malformed search scopes before calling Qdrant', async () => {
     let fetchCalled = false;
     globalThis.fetch = (async () => {
       fetchCalled = true;
@@ -38,7 +38,9 @@ describe('QdrantProjectMemoryStore', () => {
     }) as unknown as typeof fetch;
 
     const store = new QdrantProjectMemoryStore({ enabled: true });
-    await expect(store.search({ query: 'memory', scopes: [] })).rejects.toThrow('At least one project memory search scope is required');
+    await expect(store.search({ query: 'memory', scopes: [] })).rejects.toThrow('At least one effective project memory search scope is required');
+    await expect(store.search({ query: 'memory', scopes: [{ scope: 'workspace' }] })).rejects.toThrow('At least one effective project memory search scope is required');
+    await expect(store.search({ query: 'memory', scopes: [{ scope: 'project', workspaceId: 'ws' }] })).rejects.toThrow('At least one effective project memory search scope is required');
     expect(fetchCalled).toBe(false);
   });
 
@@ -57,6 +59,23 @@ describe('QdrantProjectMemoryStore', () => {
     const status = await store.status();
     expect(status.ok).toBe(false);
     expect(status.error).toContain('does not match expected 384');
+  });
+
+  test('reports existing collection distance mismatch', async () => {
+    globalThis.fetch = (async () => jsonResponse({
+      result: {
+        config: {
+          params: {
+            vectors: { size: 384, distance: 'Dot' },
+          },
+        },
+      },
+    })) as unknown as typeof fetch;
+
+    const store = new QdrantProjectMemoryStore({ enabled: true, dimension: 384 });
+    const status = await store.status();
+    expect(status.ok).toBe(false);
+    expect(status.error).toContain('does not match expected Cosine');
   });
 
   test('does not auto-create collection when reachable collection has incompatible config', async () => {

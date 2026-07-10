@@ -85,6 +85,18 @@ function validateCollectionConfig(info: QdrantCollectionInfo, expectedDimension:
   return null;
 }
 
+function getEffectiveSearchScopes(input: ProjectMemorySearchInput['scopes']): ProjectMemorySearchInput['scopes'] {
+  const effective = input.filter(scope => {
+    if (scope.scope === 'global') return true;
+    if (scope.scope === 'workspace') return Boolean(scope.workspaceId);
+    return Boolean(scope.workspaceId && scope.projectId);
+  });
+  if (effective.length === 0) {
+    throw new Error('At least one effective project memory search scope is required');
+  }
+  return effective;
+}
+
 export class QdrantProjectMemoryStore implements ProjectMemoryStore {
   private collectionReady = false;
 
@@ -224,11 +236,11 @@ export class QdrantProjectMemoryStore implements ProjectMemoryStore {
     const { enabled, collection, dimension } = this.resolved;
     if (!enabled) throw new Error('Project memory is disabled');
     if (!input.query.trim()) throw new Error('Project memory search query is empty');
-    if (!input.scopes.length) throw new Error('At least one project memory search scope is required');
+    const effectiveScopes = getEffectiveSearchScopes(input.scopes);
     await this.ensureCollection();
 
     const must: unknown[] = [];
-    const should: unknown[] = input.scopes.map(scope => ({
+    const should: unknown[] = effectiveScopes.map(scope => ({
       must: [
         { key: 'scope', match: { value: scope.scope } },
         ...(scope.workspaceId ? [{ key: 'workspaceId', match: { value: scope.workspaceId } }] : []),
