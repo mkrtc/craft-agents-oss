@@ -497,12 +497,16 @@ Use this to share anything that would help improve the product — issues you hi
 Use this to tag sessions for filtering or to trigger label-based automations (LabelAdd/LabelRemove events).
 Pass an empty array to clear all labels. Omit sessionId to target the current session.`,
 
-  set_session_status: `Set the status of the current session or a specific session by ID (e.g., "todo", "in_progress").
+  set_session_status: `Set the status of the current session or a specific session by ID (e.g., "todo", "in_progress", "done").
 
 Use this to reflect progress or trigger status-based automations (SessionStatusChange events).
 Omit sessionId to target the current session.
 
-IMPORTANT: never move a task into a closed status (such as "done" or "cancelled") yourself — closing a task is the user's decision, made on the board. You may prepare and hand off work by setting an open status like "needs-review"; the user reviews and closes it. Closed-status calls are rejected.`,
+**Policy:**
+- **Your own session:** you may set any configured status, including closed ones like "done" or "cancelled".
+- **Another session (sessionId differs from yours):** only an orchestrator (a session labeled "orchestrator") may change it. Non-orchestrators are rejected; if orchestrator status can't be verified, the call is refused.
+
+Unknown statuses are rejected, and display labels are resolved to their status ID.`,
 
   get_session_info: `Get metadata about the current session or a specific session by ID.
 

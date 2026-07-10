@@ -16,25 +16,40 @@ export async function handleSetSessionStatus(
   }
 
   try {
+    // A cross-session update targets a session other than the caller's own.
+    // Omitting sessionId (or passing the caller's own id) is a self-update.
+    const isCrossSession =
+      args.sessionId !== undefined && args.sessionId !== ctx.sessionId;
+
+    // Only orchestrators may drive another session's status. Self-updates are
+    // always permitted; cross-session updates require the caller's own session
+    // to carry the 'orchestrator' label. If labels are unavailable, be
+    // conservative and reject the cross-session change.
+    if (isCrossSession) {
+      const selfInfo = ctx.getSessionInfo?.(ctx.sessionId);
+      const labels = selfInfo?.labels;
+      if (!labels) {
+        return errorResponse(
+          `Cannot verify orchestrator permission (session labels unavailable), so refusing to set the status of another session (${args.sessionId}). Only an orchestrator may change another session's status.`
+        );
+      }
+      if (!labels.includes('orchestrator')) {
+        return errorResponse(
+          `Refusing to set the status of another session (${args.sessionId}): only an orchestrator (a session labeled "orchestrator") may change another session's status. To update your own status, omit sessionId.`
+        );
+      }
+    }
+
     let status = args.status;
 
-    // Resolve display name → ID, reject unknown statuses
+    // Resolve display name → ID, reject unknown statuses. Closed statuses
+    // (done/cancelled) are now permitted — the caller owns closure for its own
+    // session, and an orchestrator owns it for sessions it drives.
     if (ctx.resolveStatus) {
-      const { resolved, available, category } = ctx.resolveStatus(status);
+      const { resolved, available } = ctx.resolveStatus(status);
       if (!resolved) {
         return errorResponse(
           `Unknown status: "${status}". Available status IDs: ${available.join(', ')}`
-        );
-      }
-      // The human owns closure. The agent may prepare work and hand it off
-      // (e.g. set "needs-review"), but it must never move a card into a closed
-      // state on its own — that decision belongs to the user via the board.
-      // NOTE: this guards only the interactive tool path; the Tasks Conductor
-      // sets terminal statuses through SessionManager.setSessionStatus directly,
-      // so automated DAG runs are unaffected.
-      if (category === 'closed') {
-        return errorResponse(
-          `Refusing to set the closed status "${resolved}". Closing a task (done/cancelled) is the user's decision — leave it for them to do on the board. If the work is ready for review, set an open status such as "needs-review" instead.`
         );
       }
       status = resolved;

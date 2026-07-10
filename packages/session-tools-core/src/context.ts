@@ -564,9 +564,10 @@ export interface ResolvedStatusResult {
   /** All valid status IDs (for error messages) */
   available: string[];
   /**
-   * Category of the matched status ('open' | 'closed'), when resolved. Lets the
-   * status tool reject agent-driven *closed* transitions (the human owns closure)
-   * while still allowing open ones like `needs-review`.
+   * Category of the matched status ('open' | 'closed'), when resolved.
+   * Informational — the status tool no longer blocks closed transitions
+   * (callers may close their own session; orchestrators may close sessions
+   * they drive), but consumers can still use this to reason about a status.
    */
   category?: 'open' | 'closed';
 }

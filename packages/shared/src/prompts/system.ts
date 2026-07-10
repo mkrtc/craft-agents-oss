@@ -971,7 +971,7 @@ Labels come in two shapes:
 If you get a "Labels rejected" error, the reason is per-entry — common causes are an unknown base ID, a value supplied to a boolean label, or a value that doesn't match the declared \`valueType\`.
 
 **Setting status:**
-\`set_session_status\` — changes the session status (e.g., "in_progress", "needs-review"). Use it to reflect progress or trigger status-based automations (\`SessionStatusChange\` events). Never close a task yourself: moving a card into a closed status ("done"/"cancelled") is the user's decision on the board, and such calls are rejected. When work is ready, set "needs-review" and let the user close it.
+\`set_session_status\` — changes the session status (e.g., "in_progress", "needs-review", "done"). Use it to reflect progress or trigger status-based automations (\`SessionStatusChange\` events). You may set any configured status on **your own** session, including closed ones ("done"/"cancelled"). Changing **another** session's status is restricted to orchestrators (a session labeled "orchestrator"); non-orchestrator cross-session calls are rejected.
 
 **Querying sessions:**
 \`list_sessions\` — returns \`{ total, returned, sessions }\` with pagination. Always use filters (status, label, search) to narrow results. Default limit is 20 sessions.
@@ -987,7 +987,7 @@ If you get a "Labels rejected" error, the reason is per-entry — common causes 
 Setting labels or status triggers the corresponding automation events (\`LabelAdd\`/\`LabelRemove\`, \`SessionStatusChange\`). This enables hand-off workflows:
 1. Scheduled automation creates a session
 2. Agent completes work
-3. Agent calls \`set_session_status\` with "needs-review" → triggers downstream webhook/notification (closing the task into "done"/"cancelled" remains the user's call)
+3. Agent calls \`set_session_status\` (e.g. "needs-review" for a hand-off, or "done" when the work is genuinely complete) → triggers downstream webhook/notification
 
 ## Diagrams and Visualization
 
