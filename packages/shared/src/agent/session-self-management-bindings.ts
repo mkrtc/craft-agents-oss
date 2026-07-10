@@ -96,6 +96,30 @@ export function attachSessionSelfManagementBindings(
     enumerable: true,
   });
 
+  Object.defineProperty(context, 'projectMemoryAdd', {
+    get() {
+      return getSessionScopedToolCallbacks(sessionId)?.projectMemoryAddFn;
+    },
+    configurable: true,
+    enumerable: true,
+  });
+
+  Object.defineProperty(context, 'projectMemorySearch', {
+    get() {
+      return getSessionScopedToolCallbacks(sessionId)?.projectMemorySearchFn;
+    },
+    configurable: true,
+    enumerable: true,
+  });
+
+  Object.defineProperty(context, 'projectMemoryStatus', {
+    get() {
+      return getSessionScopedToolCallbacks(sessionId)?.projectMemoryStatusFn;
+    },
+    configurable: true,
+    enumerable: true,
+  });
+
   Object.defineProperty(context, 'activateSourceInSession', {
     get() {
       return getSessionScopedToolCallbacks(sessionId)?.activateSourceInSessionFn;

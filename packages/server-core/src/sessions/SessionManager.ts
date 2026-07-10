@@ -41,6 +41,7 @@ import {
 } from '@craft-agent/shared/config'
 import type { ActiveSessionInfo, SessionProcessingStatus } from '@craft-agent/core/types'
 import { loadWorkspaceConfig } from '@craft-agent/shared/workspaces'
+import { getProjectMemoryStore } from '@craft-agent/shared/project-memory'
 import {
   // Session persistence functions
   listSessions as listStoredSessions,
@@ -4915,6 +4916,9 @@ export class SessionManager implements ISessionManager {
 
           return { resolved: null, available }
         },
+        projectMemoryAddFn: async (input) => getProjectMemoryStore().add(input),
+        projectMemorySearchFn: async (input) => getProjectMemoryStore().search(input),
+        projectMemoryStatusFn: async () => getProjectMemoryStore().status(),
         sendAgentMessageFn: async (sessionId: string, message: string, attachments?: Array<{ path: string; name?: string }>) => {
           // Build FileAttachment[] from paths (same pattern as spawn_session)
           let fileAttachments: FileAttachment[] | undefined

@@ -134,6 +134,13 @@ export type {
   SendAgentMessageResult,
   ResolvedLabelsResult,
   ResolvedStatusResult,
+  ProjectMemoryScope,
+  ProjectMemoryKind,
+  ProjectMemoryPayload,
+  ProjectMemoryAddInput,
+  ProjectMemorySearchInput,
+  ProjectMemorySearchHit,
+  ProjectMemoryStatus,
   // Task tool callback types
   SessionTaskInvocationContext,
   SessionTaskCallbackResult,
@@ -193,6 +200,9 @@ export {
   handleTaskGet,
   handleTaskList,
   handleTaskGetResults,
+  handleProjectMemoryAdd,
+  handleProjectMemorySearch,
+  handleProjectMemoryStatus,
 } from './handlers/index.ts';
 
 export type {
@@ -217,6 +227,9 @@ export type {
   TaskGetArgs,
   TaskListArgs,
   TaskGetResultsArgs,
+  ProjectMemoryAddArgs,
+  ProjectMemorySearchArgs,
+  ProjectMemoryStatusArgs,
 } from './handlers/index.ts';
 
 // Tool definitions — single source of truth
@@ -241,6 +254,9 @@ export {
   TaskGetSchema,
   TaskListSchema,
   TaskGetResultsSchema,
+  ProjectMemoryAddSchema,
+  ProjectMemorySearchSchema,
+  ProjectMemoryStatusSchema,
   // Browser tool schema
   BrowserToolSchema,
   // Developer feedback schema

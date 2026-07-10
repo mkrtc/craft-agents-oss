@@ -50,6 +50,11 @@ import {
   handleTaskList,
   handleTaskGetResults,
 } from './handlers/tasks.ts';
+import {
+  handleProjectMemoryAdd,
+  handleProjectMemorySearch,
+  handleProjectMemoryStatus,
+} from './handlers/project-memory.ts';
 
 // ============================================================
 // Canonical Zod Schemas
@@ -242,6 +247,31 @@ export const TaskGetResultsSchema = z.object({
   slug: TaskToolSlugSchema.describe('Task slug whose persisted run results should be read.'),
   runId: TaskToolRunIdSchema.optional().describe('Optional run ID. Omit to inspect the latest persisted run.'),
 });
+
+const ProjectMemoryScopeSchema = z.enum(['global', 'workspace', 'project']);
+const ProjectMemoryKindSchema = z.enum(['file', 'session', 'task', 'decision', 'preference', 'manual-note']);
+
+export const ProjectMemoryAddSchema = z.object({
+  scope: ProjectMemoryScopeSchema.optional().describe('Memory scope. Defaults to project when the current session is project-bound, otherwise workspace.'),
+  projectId: z.string().optional().describe('Project ID for project-scoped memory. Defaults to the current session project when available.'),
+  source: ProjectMemoryKindSchema.describe('Type/source of memory being stored.'),
+  title: z.string().optional().describe('Short title for this memory item.'),
+  path: z.string().optional().describe('Related file path, if any.'),
+  taskSlug: z.string().optional().describe('Related task slug, if any.'),
+  content: z.string().describe('Memory content to store.'),
+  tags: z.array(z.string()).optional().describe('Optional tags for filtering and recall.'),
+});
+
+export const ProjectMemorySearchSchema = z.object({
+  query: z.string().describe('Semantic/keyword query to search project memory.'),
+  scopes: z.array(ProjectMemoryScopeSchema).optional().describe('Scopes to search. Defaults to global + workspace + current project when project-bound.'),
+  projectId: z.string().optional().describe('Project ID to use for project-scoped search. Defaults to current session project when available.'),
+  limit: z.number().min(1).max(50).optional().describe('Maximum results to return (default 8, max 50).'),
+  source: ProjectMemoryKindSchema.optional().describe('Optional memory source/type filter.'),
+  tags: z.array(z.string()).optional().describe('Optional tags that results must match.'),
+});
+
+export const ProjectMemoryStatusSchema = z.object({});
 
 // Inter-session messaging
 export const SendAgentMessageSchema = z.object({
@@ -555,6 +585,18 @@ This is read-only.`,
 
 This is read-only and reads durable run artifacts such as verdicts, repair accounting, node session IDs, and node outputs.`,
 
+  project_memory_add: `Add an item to scoped project memory.
+
+Use this to persist durable project knowledge: decisions, preferences, task/session summaries, file notes, and manual notes. Scopes are \`global\`, \`workspace\`, and \`project\`; project scope defaults to the current session's project when available. The MVP backend uses Qdrant-compatible storage configured by \`CRAFT_QDRANT_URL\` and falls back to a deterministic local embedding so no external embedding provider is required.`,
+
+  project_memory_search: `Search scoped project memory.
+
+Use this before planning or implementing to retrieve relevant global, workspace, and project knowledge. Project-bound sessions search global + workspace + current project by default. Results include source metadata, score, and stored content; treat retrieved memory as context with provenance, not absolute truth.`,
+
+  project_memory_status: `Get project memory backend status.
+
+Reports whether project memory is enabled, which Qdrant URL/collection/dimension are configured, and whether the backend is reachable.`,
+
   send_agent_message: `Send a message to another session. The message is delivered with your session ID so the target can reply back.
 
 Use this to coordinate with spawned sessions, send follow-up instructions, or relay information between sessions.
@@ -645,6 +687,10 @@ export const SESSION_TOOL_DEFS: SessionToolDef[] = [
   { name: 'task_get', description: TOOL_DESCRIPTIONS.task_get, inputSchema: TaskGetSchema, executionMode: 'registry', safeMode: 'allow', readOnly: true, handler: handleTaskGet },
   { name: 'task_list', description: TOOL_DESCRIPTIONS.task_list, inputSchema: TaskListSchema, executionMode: 'registry', safeMode: 'allow', readOnly: true, handler: handleTaskList },
   { name: 'task_get_results', description: TOOL_DESCRIPTIONS.task_get_results, inputSchema: TaskGetResultsSchema, executionMode: 'registry', safeMode: 'allow', readOnly: true, handler: handleTaskGetResults },
+  // Project memory tools
+  { name: 'project_memory_add', description: TOOL_DESCRIPTIONS.project_memory_add, inputSchema: ProjectMemoryAddSchema, executionMode: 'registry', safeMode: 'block', handler: handleProjectMemoryAdd },
+  { name: 'project_memory_search', description: TOOL_DESCRIPTIONS.project_memory_search, inputSchema: ProjectMemorySearchSchema, executionMode: 'registry', safeMode: 'allow', readOnly: true, handler: handleProjectMemorySearch },
+  { name: 'project_memory_status', description: TOOL_DESCRIPTIONS.project_memory_status, inputSchema: ProjectMemoryStatusSchema, executionMode: 'registry', safeMode: 'allow', readOnly: true, handler: handleProjectMemoryStatus },
   // Inter-session messaging
   { name: 'send_agent_message', description: TOOL_DESCRIPTIONS.send_agent_message, inputSchema: SendAgentMessageSchema, executionMode: 'registry', safeMode: 'block', handler: handleSendAgentMessage },
   // Messaging gateway tools

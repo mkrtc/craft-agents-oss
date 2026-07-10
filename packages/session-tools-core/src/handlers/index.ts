@@ -92,3 +92,15 @@ export type {
   TaskListArgs,
   TaskGetResultsArgs,
 } from './tasks.ts';
+
+// Project Memory Tools
+export {
+  handleProjectMemoryAdd,
+  handleProjectMemorySearch,
+  handleProjectMemoryStatus,
+} from './project-memory.ts';
+export type {
+  ProjectMemoryAddArgs,
+  ProjectMemorySearchArgs,
+  ProjectMemoryStatusArgs,
+} from './project-memory.ts';

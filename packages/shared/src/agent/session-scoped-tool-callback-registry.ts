@@ -67,6 +67,12 @@ export interface SessionScopedToolCallbacks {
   resolveStatusFn?: (status: string) => import('@craft-agent/session-tools-core').ResolvedStatusResult;
   /** Send a message to another session (inter-session messaging). Resolves with delivery status. */
   sendAgentMessageFn?: (sessionId: string, message: string, attachments?: Array<{ path: string; name?: string }>) => Promise<import('@craft-agent/session-tools-core').SendAgentMessageResult>;
+  /** Add a scoped project-memory item. */
+  projectMemoryAddFn?: (input: import('@craft-agent/session-tools-core').ProjectMemoryAddInput) => Promise<import('@craft-agent/session-tools-core').ProjectMemoryPayload>;
+  /** Search scoped project memory. */
+  projectMemorySearchFn?: (input: import('@craft-agent/session-tools-core').ProjectMemorySearchInput) => Promise<import('@craft-agent/session-tools-core').ProjectMemorySearchHit[]>;
+  /** Get project-memory backend status. */
+  projectMemoryStatusFn?: () => Promise<import('@craft-agent/session-tools-core').ProjectMemoryStatus>;
   /**
    * Activate a source in the running session (source_test auto-enable flow).
    * Wired by SessionManager to the per-session onSourceActivationRequest callback
