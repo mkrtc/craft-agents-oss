@@ -1082,7 +1082,7 @@ export class ClaudeAgent extends BaseAgent {
         session: getSessionScopedTools(
           sessionId,
           this.workspaceRootPath,
-          extractWorkspaceSlug(this.workspaceRootPath, this.config.workspace.id),
+          this.config.workspace.id,
         ),
         // Craft Agents documentation - always available for searching setup guides
         // This is a public Mintlify MCP server, no auth needed
