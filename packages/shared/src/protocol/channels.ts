@@ -409,6 +409,9 @@ export const RPC_CHANNELS = {
     LIST_ASSETS: 'projects:listAssets',
     UPLOAD_ASSET: 'projects:uploadAsset',
     DELETE_ASSET: 'projects:deleteAsset',
+    MEMORY_STATUS: 'projects:memoryStatus',
+    MEMORY_ADD: 'projects:memoryAdd',
+    MEMORY_SEARCH: 'projects:memorySearch',
     CHANGED: 'projects:changed',
   },
   messaging: {

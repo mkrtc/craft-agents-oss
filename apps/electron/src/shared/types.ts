@@ -227,6 +227,11 @@ import type {
   LabelSkillBindingsGenerateParams,
   LabelSkillBindingsGenerateResult,
   BindableSkillSummary,
+  ProjectMemoryUiAddRequest,
+  ProjectMemoryUiPayload,
+  ProjectMemoryUiSearchHit,
+  ProjectMemoryUiSearchRequest,
+  ProjectMemoryUiStatus,
 } from '@craft-agent/shared/protocol'
 
 export interface ElectronAPI {
@@ -681,6 +686,9 @@ export interface ElectronAPI {
   listProjectAssets(workspaceId: string, projectSlug: string): Promise<unknown>
   uploadProjectAsset(workspaceId: string, projectSlug: string, input: { filename: string; base64?: string; text?: string; sourcePath?: string }): Promise<import('@craft-agent/shared/projects/types').ProjectAsset>
   deleteProjectAsset(workspaceId: string, projectSlug: string, filename: string): Promise<void>
+  getProjectMemoryStatus(): Promise<ProjectMemoryUiStatus>
+  addProjectMemory(input: ProjectMemoryUiAddRequest): Promise<ProjectMemoryUiPayload>
+  searchProjectMemory(input: ProjectMemoryUiSearchRequest): Promise<ProjectMemoryUiSearchHit[]>
   onProjectsChanged(callback: (workspaceId: string, projects: unknown) => void): () => void
 
   // Automations

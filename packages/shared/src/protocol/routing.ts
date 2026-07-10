@@ -429,6 +429,9 @@ export const REMOTE_ELIGIBLE_CHANNELS = new Set<string>([
   RPC_CHANNELS.projects.LIST_ASSETS,
   RPC_CHANNELS.projects.UPLOAD_ASSET,
   RPC_CHANNELS.projects.DELETE_ASSET,
+  RPC_CHANNELS.projects.MEMORY_STATUS,
+  RPC_CHANNELS.projects.MEMORY_ADD,
+  RPC_CHANNELS.projects.MEMORY_SEARCH,
   RPC_CHANNELS.projects.CHANGED,
 
   // git — workspace filesystem

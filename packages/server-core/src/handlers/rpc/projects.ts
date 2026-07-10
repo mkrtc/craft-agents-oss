@@ -1,7 +1,20 @@
-import { RPC_CHANNELS } from '@craft-agent/shared/protocol'
-import { getWorkspaceByNameOrId } from '@craft-agent/shared/config'
-import { pushTyped, type RpcServer } from '@craft-agent/server-core/transport'
+import {
+  RPC_CHANNELS,
+  type ProjectMemoryUiAddRequest,
+  type ProjectMemoryUiPayload,
+  type ProjectMemoryUiSearchHit,
+  type ProjectMemoryUiSearchRequest,
+  type ProjectMemoryUiStatus,
+} from '@craft-agent/shared/protocol'
+import { getWorkspaceByNameOrId } from '@craft-agent/shared/config/storage'
+import { getProjectMemoryStore, type ProjectMemoryPayload, type ProjectMemoryStatus } from '@craft-agent/shared/project-memory'
+import { pushTyped, type RequestContext, type RpcServer } from '@craft-agent/server-core/transport'
 import type { HandlerDeps } from '../handler-deps'
+
+const MAX_MEMORY_CONTENT_LENGTH = 50_000
+const MAX_MEMORY_TITLE_LENGTH = 200
+const MAX_MEMORY_TAGS = 20
+const MAX_MEMORY_TAG_LENGTH = 64
 
 export const HANDLED_CHANNELS = [
   RPC_CHANNELS.projects.GET,
@@ -12,7 +25,129 @@ export const HANDLED_CHANNELS = [
   RPC_CHANNELS.projects.LIST_ASSETS,
   RPC_CHANNELS.projects.UPLOAD_ASSET,
   RPC_CHANNELS.projects.DELETE_ASSET,
+  RPC_CHANNELS.projects.MEMORY_STATUS,
+  RPC_CHANNELS.projects.MEMORY_ADD,
+  RPC_CHANNELS.projects.MEMORY_SEARCH,
 ] as const
+
+function normalizeProjectMemoryStatus(status: ProjectMemoryStatus): ProjectMemoryUiStatus {
+  if (!status.enabled) {
+    return { ...status, state: 'disabled', message: 'Project memory is disabled' }
+  }
+  if (status.ok) {
+    return { ...status, state: 'ready' }
+  }
+
+  const error = status.error ?? 'Project memory status check failed'
+  const lower = error.toLowerCase()
+  let state: ProjectMemoryUiStatus['state'] = 'error'
+  if (lower.includes('qdrant 404') || lower.includes('not found')) {
+    state = 'not-initialized'
+  } else if (
+    lower.includes('vector size')
+    || lower.includes('distance')
+    || lower.includes('vector configuration')
+    || lower.includes('expected cosine')
+  ) {
+    state = 'config-mismatch'
+  } else if (
+    lower.includes('failed to fetch')
+    || lower.includes('econnrefused')
+    || lower.includes('connection refused')
+    || lower.includes('network')
+    || lower.includes('timeout')
+  ) {
+    state = 'unreachable'
+  }
+  return { ...status, state, message: error, error }
+}
+
+function requireWorkspaceFromContext(ctx: RequestContext) {
+  const workspaceId = ctx.workspaceId
+  if (!workspaceId) throw new Error('Workspace context is required')
+  const workspace = getWorkspaceByNameOrId(workspaceId)
+  if (!workspace) throw new Error(`Workspace not found: ${workspaceId}`)
+  return { workspaceId: workspace.id, workspace }
+}
+
+async function resolveProjectForMemory(ctx: RequestContext, projectIdOrSlug: string) {
+  const trimmed = projectIdOrSlug?.trim()
+  if (!trimmed) throw new Error('projectIdOrSlug is required')
+  const { workspaceId, workspace } = requireWorkspaceFromContext(ctx)
+  const { loadProject, loadProjectById } = await import('@craft-agent/shared/projects')
+  const project = loadProject(workspace.rootPath, trimmed) ?? loadProjectById(workspace.rootPath, trimmed)
+  if (!project) throw new Error(`Project not found: ${trimmed}`)
+  return { workspaceId, projectId: project.config.id }
+}
+
+function normalizeTags(tags: unknown): string[] | undefined {
+  if (tags === undefined) return undefined
+  if (!Array.isArray(tags)) throw new Error('tags must be an array of strings')
+  if (tags.length > MAX_MEMORY_TAGS) throw new Error(`tags must contain at most ${MAX_MEMORY_TAGS} entries`)
+  const normalized = tags.map((tag) => {
+    if (typeof tag !== 'string') throw new Error('tags must be an array of strings')
+    const trimmed = tag.trim()
+    if (!trimmed) throw new Error('tags must not be empty')
+    if (trimmed.length > MAX_MEMORY_TAG_LENGTH) throw new Error(`tags must be at most ${MAX_MEMORY_TAG_LENGTH} characters`)
+    return trimmed
+  })
+  return normalized.length ? Array.from(new Set(normalized)) : undefined
+}
+
+function validateAddRequest(input: ProjectMemoryUiAddRequest): ProjectMemoryUiAddRequest & { tags?: string[] } {
+  if (!input || typeof input !== 'object') throw new Error('Project memory add input is required')
+  if (input.source !== 'manual-note' && input.source !== 'decision') {
+    throw new Error('source must be manual-note or decision')
+  }
+  const content = input.content?.trim()
+  if (!content) throw new Error('content is required')
+  if (content.length > MAX_MEMORY_CONTENT_LENGTH) {
+    throw new Error(`content must be at most ${MAX_MEMORY_CONTENT_LENGTH} characters`)
+  }
+  const title = input.title?.trim()
+  if (title && title.length > MAX_MEMORY_TITLE_LENGTH) {
+    throw new Error(`title must be at most ${MAX_MEMORY_TITLE_LENGTH} characters`)
+  }
+  return {
+    ...input,
+    projectIdOrSlug: input.projectIdOrSlug?.trim(),
+    title: title || undefined,
+    content,
+    tags: normalizeTags(input.tags),
+  }
+}
+
+function validateSearchRequest(input: ProjectMemoryUiSearchRequest): ProjectMemoryUiSearchRequest {
+  if (!input || typeof input !== 'object') throw new Error('Project memory search input is required')
+  const query = input.query?.trim()
+  if (!query) throw new Error('query is required')
+  const limit = input.limit === undefined ? undefined : Math.max(1, Math.min(Math.trunc(Number(input.limit)), 50))
+  if (input.limit !== undefined && !Number.isFinite(Number(input.limit))) throw new Error('limit must be a number')
+  return { projectIdOrSlug: input.projectIdOrSlug?.trim(), query, limit }
+}
+
+function toUiPayload(payload: ProjectMemoryPayload): ProjectMemoryUiPayload {
+  if (payload.source !== 'manual-note' && payload.source !== 'decision') {
+    throw new Error(`Unexpected project memory source in UI payload: ${payload.source}`)
+  }
+  if (!payload.projectId) throw new Error('Project memory payload is missing projectId')
+  return {
+    id: payload.id,
+    source: payload.source,
+    title: payload.title,
+    content: payload.content,
+    createdAt: payload.createdAt,
+    updatedAt: payload.updatedAt,
+    tags: payload.tags,
+    projectId: payload.projectId,
+  }
+}
+
+export const __testProjectMemory = {
+  normalizeProjectMemoryStatus,
+  validateAddRequest,
+  validateSearchRequest,
+}
 
 export function registerProjectsHandlers(server: RpcServer, deps: HandlerDeps): void {
   const log = deps.platform.logger
@@ -130,5 +265,38 @@ export function registerProjectsHandlers(server: RpcServer, deps: HandlerDeps): 
     const { deleteProjectAsset } = await import('@craft-agent/shared/projects')
     deleteProjectAsset(workspace.rootPath, projectSlug, filename)
     await broadcastChanged(workspaceId, workspace.rootPath)
+  })
+
+  // Project memory backend status for UI. Uses request workspace context; no renderer scopes.
+  server.handle(RPC_CHANNELS.projects.MEMORY_STATUS, async () => {
+    return normalizeProjectMemoryStatus(await getProjectMemoryStore().status())
+  })
+
+  // UI-safe manual memory add. Forces canonical workspace/project and project scope.
+  server.handle(RPC_CHANNELS.projects.MEMORY_ADD, async (ctx, input: ProjectMemoryUiAddRequest) => {
+    const validated = validateAddRequest(input)
+    const { workspaceId, projectId } = await resolveProjectForMemory(ctx, validated.projectIdOrSlug)
+    const payload = await getProjectMemoryStore().add({
+      scope: 'project',
+      workspaceId,
+      projectId,
+      source: validated.source,
+      title: validated.title,
+      content: validated.content,
+      tags: validated.tags,
+    })
+    return toUiPayload(payload)
+  })
+
+  // UI-safe project-only memory search. Forces canonical workspace/project and project scope.
+  server.handle(RPC_CHANNELS.projects.MEMORY_SEARCH, async (ctx, input: ProjectMemoryUiSearchRequest): Promise<ProjectMemoryUiSearchHit[]> => {
+    const validated = validateSearchRequest(input)
+    const { workspaceId, projectId } = await resolveProjectForMemory(ctx, validated.projectIdOrSlug)
+    const hits = await getProjectMemoryStore().search({
+      query: validated.query,
+      scopes: [{ scope: 'project', workspaceId, projectId }],
+      limit: validated.limit,
+    })
+    return hits.map((hit) => ({ score: hit.score, payload: toUiPayload(hit.payload) }))
   })
 }

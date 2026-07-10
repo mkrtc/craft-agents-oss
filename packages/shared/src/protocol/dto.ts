@@ -794,6 +794,62 @@ export interface ClaudeOAuthResult {
 }
 
 // ---------------------------------------------------------------------------
+// Project memory UI DTOs
+// ---------------------------------------------------------------------------
+
+export type ProjectMemoryUiSource = 'manual-note' | 'decision'
+
+export type ProjectMemoryUiStatusState =
+  | 'ready'
+  | 'disabled'
+  | 'not-initialized'
+  | 'config-mismatch'
+  | 'unreachable'
+  | 'error'
+
+export interface ProjectMemoryUiStatus {
+  state: ProjectMemoryUiStatusState
+  enabled: boolean
+  provider: 'qdrant'
+  url: string
+  collection: string
+  dimension: number
+  ok: boolean
+  message?: string
+  error?: string
+}
+
+export interface ProjectMemoryUiAddRequest {
+  projectIdOrSlug: string
+  source: ProjectMemoryUiSource
+  title?: string
+  content: string
+  tags?: string[]
+}
+
+export interface ProjectMemoryUiSearchRequest {
+  projectIdOrSlug: string
+  query: string
+  limit?: number
+}
+
+export interface ProjectMemoryUiPayload {
+  id: string
+  source: ProjectMemoryUiSource
+  title?: string
+  content: string
+  createdAt: number
+  updatedAt: number
+  tags?: string[]
+  projectId: string
+}
+
+export interface ProjectMemoryUiSearchHit {
+  score: number
+  payload: ProjectMemoryUiPayload
+}
+
+// ---------------------------------------------------------------------------
 // Automation types
 // ---------------------------------------------------------------------------
 

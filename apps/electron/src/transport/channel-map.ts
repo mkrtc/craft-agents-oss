@@ -399,6 +399,9 @@ export const CHANNEL_MAP = {
   listProjectAssets: invoke(RPC_CHANNELS.projects.LIST_ASSETS),
   uploadProjectAsset: invoke(RPC_CHANNELS.projects.UPLOAD_ASSET),
   deleteProjectAsset: invoke(RPC_CHANNELS.projects.DELETE_ASSET),
+  getProjectMemoryStatus: invoke(RPC_CHANNELS.projects.MEMORY_STATUS),
+  addProjectMemory: invoke(RPC_CHANNELS.projects.MEMORY_ADD),
+  searchProjectMemory: invoke(RPC_CHANNELS.projects.MEMORY_SEARCH),
   onProjectsChanged: listener(RPC_CHANNELS.projects.CHANGED),
 
   // Automations
