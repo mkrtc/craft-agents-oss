@@ -264,7 +264,7 @@ export const ProjectMemoryAddSchema = z.object({
 
 export const ProjectMemorySearchSchema = z.object({
   query: z.string().describe('Semantic/keyword query to search project memory.'),
-  scopes: z.array(ProjectMemoryScopeSchema).optional().describe('Scopes to search. Defaults to global + workspace + current project when project-bound.'),
+  scopes: z.array(ProjectMemoryScopeSchema).min(1).optional().describe('Scopes to search. Defaults to global + workspace + current project when project-bound.'),
   projectId: z.string().optional().describe('Project ID to use for project-scoped search. Defaults to current session project when available.'),
   limit: z.number().min(1).max(50).optional().describe('Maximum results to return (default 8, max 50).'),
   source: ProjectMemoryKindSchema.optional().describe('Optional memory source/type filter.'),

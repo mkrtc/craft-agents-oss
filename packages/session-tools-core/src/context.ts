@@ -287,6 +287,9 @@ export interface SessionToolContext {
   /** Absolute path to workspace folder (~/.craft-agent/workspaces/{id}) */
   workspacePath: string;
 
+  /** Canonical workspace ID (not derived from the workspace path basename). */
+  workspaceId?: string;
+
   /** Path to sources folder within workspace */
   get sourcesPath(): string;
 

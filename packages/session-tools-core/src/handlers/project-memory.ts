@@ -31,7 +31,10 @@ export interface ProjectMemorySearchArgs {
 export interface ProjectMemoryStatusArgs {}
 
 function currentWorkspaceId(ctx: SessionToolContext): string {
-  return ctx.workspacePath.split(/[\\/]/).filter(Boolean).at(-1) ?? 'default';
+  if (!ctx.workspaceId) {
+    throw new Error('workspaceId is required for project memory scoping');
+  }
+  return ctx.workspaceId;
 }
 
 function currentProjectId(ctx: SessionToolContext): string | undefined {
@@ -65,6 +68,9 @@ function resolveSearchInput(ctx: SessionToolContext, args: ProjectMemorySearchAr
     workspaceId: scope === 'global' ? undefined : workspaceId,
     projectId: scope === 'project' ? projectId : undefined,
   })).filter(scope => scope.scope !== 'project' || scope.projectId);
+  if (scopes.length === 0) {
+    throw new Error('At least one effective project memory scope is required');
+  }
   return {
     query: args.query,
     scopes,

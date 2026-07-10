@@ -27,8 +27,34 @@ interface QdrantSearchPoint {
   payload?: ProjectMemoryPayload;
 }
 
+interface QdrantCollectionInfo {
+  result?: {
+    config?: {
+      params?: {
+        vectors?: { size?: number; distance?: string } | Record<string, { size?: number; distance?: string }>;
+      };
+    };
+  };
+}
+
+class QdrantRequestError extends Error {
+  constructor(public readonly status: number, public readonly statusText: string, message: string) {
+    super(message);
+    this.name = 'QdrantRequestError';
+  }
+}
+
 const DEFAULT_URL = 'http://127.0.0.1:6333';
 const DEFAULT_COLLECTION = 'craft_memory';
+
+function parseProjectMemoryDimension(value: string | undefined): number {
+  if (!value) return PROJECT_MEMORY_VECTOR_DIMENSION;
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) {
+    return PROJECT_MEMORY_VECTOR_DIMENSION;
+  }
+  return parsed;
+}
 
 export function getDefaultProjectMemoryOptions(): Required<Omit<QdrantProjectMemoryOptions, 'apiKey'>> & { apiKey?: string } {
   return {
@@ -36,8 +62,27 @@ export function getDefaultProjectMemoryOptions(): Required<Omit<QdrantProjectMem
     url: process.env.CRAFT_QDRANT_URL || DEFAULT_URL,
     apiKey: process.env.CRAFT_QDRANT_API_KEY || undefined,
     collection: process.env.CRAFT_QDRANT_COLLECTION || DEFAULT_COLLECTION,
-    dimension: Number(process.env.CRAFT_QDRANT_DIMENSION || PROJECT_MEMORY_VECTOR_DIMENSION),
+    dimension: parseProjectMemoryDimension(process.env.CRAFT_QDRANT_DIMENSION),
   };
+}
+
+function getVectorConfig(info: QdrantCollectionInfo): { size?: number; distance?: string } | undefined {
+  const vectors = info.result?.config?.params?.vectors;
+  if (!vectors) return undefined;
+  if ('size' in vectors || 'distance' in vectors) return vectors as { size?: number; distance?: string };
+  return Object.values(vectors)[0];
+}
+
+function validateCollectionConfig(info: QdrantCollectionInfo, expectedDimension: number): string | null {
+  const vector = getVectorConfig(info);
+  if (!vector) return 'Qdrant collection has no vector configuration';
+  if (vector.size !== expectedDimension) {
+    return `Qdrant collection vector size ${vector.size ?? 'unknown'} does not match expected ${expectedDimension}`;
+  }
+  if (vector.distance && vector.distance.toLowerCase() !== 'cosine') {
+    return `Qdrant collection distance ${vector.distance} does not match expected Cosine`;
+  }
+  return null;
 }
 
 export class QdrantProjectMemoryStore implements ProjectMemoryStore {
@@ -67,7 +112,7 @@ export class QdrantProjectMemoryStore implements ProjectMemoryStore {
     });
     if (!res.ok) {
       const text = await res.text().catch(() => '');
-      throw new Error(`Qdrant ${res.status} ${res.statusText}${text ? `: ${text}` : ''}`);
+      throw new QdrantRequestError(res.status, res.statusText, `Qdrant ${res.status} ${res.statusText}${text ? `: ${text}` : ''}`);
     }
     return await res.json() as T;
   }
@@ -78,7 +123,11 @@ export class QdrantProjectMemoryStore implements ProjectMemoryStore {
       return { enabled, provider: 'qdrant', url, collection, dimension, ok: false, error: 'Project memory is disabled' };
     }
     try {
-      await this.request(`/collections/${encodeURIComponent(collection)}`);
+      const info = await this.request<QdrantCollectionInfo>(`/collections/${encodeURIComponent(collection)}`);
+      const configError = validateCollectionConfig(info, dimension);
+      if (configError) {
+        return { enabled, provider: 'qdrant', url, collection, dimension, ok: false, error: configError };
+      }
       return { enabled, provider: 'qdrant', url, collection, dimension, ok: true };
     } catch (error) {
       return {
@@ -100,6 +149,9 @@ export class QdrantProjectMemoryStore implements ProjectMemoryStore {
     if (status.ok) {
       this.collectionReady = true;
       return;
+    }
+    if (status.error && !status.error.includes('Qdrant 404')) {
+      throw new Error(status.error);
     }
 
     await this.request(`/collections/${encodeURIComponent(collection)}`, {
@@ -172,6 +224,7 @@ export class QdrantProjectMemoryStore implements ProjectMemoryStore {
     const { enabled, collection, dimension } = this.resolved;
     if (!enabled) throw new Error('Project memory is disabled');
     if (!input.query.trim()) throw new Error('Project memory search query is empty');
+    if (!input.scopes.length) throw new Error('At least one project memory search scope is required');
     await this.ensureCollection();
 
     const must: unknown[] = [];

@@ -6,7 +6,8 @@ import { handleProjectMemoryAdd, handleProjectMemorySearch, handleProjectMemoryS
 function makeContext(overrides: Partial<SessionToolContext> = {}): SessionToolContext {
   return {
     sessionId: 'session-1',
-    workspacePath: '/tmp/workspace-1',
+    workspacePath: '/tmp/workspace-folder-name',
+    workspaceId: 'workspace-1',
     plansFolderPath: '/tmp/workspace-1/sessions/session-1/plans',
     dataFolderPath: '/tmp/workspace-1/sessions/session-1/data',
     fs: createNodeFileSystem(),
@@ -92,6 +93,36 @@ describe('project memory handlers', () => {
         { scope: 'project', workspaceId: 'workspace-1', projectId: 'project-1' },
       ],
     });
+  });
+
+  test('rejects empty effective search scopes instead of searching unscoped', async () => {
+    const ctx = makeContext({
+      getSessionInfo: () => ({
+        id: 'session-1',
+        name: 'Session 1',
+        labels: [],
+        status: 'todo',
+        permissionMode: 'execute',
+        createdAt: 1,
+        isActive: true,
+      }),
+      projectMemorySearch: async () => {
+        throw new Error('should not call store for empty effective scopes');
+      },
+    });
+
+    const result = await handleProjectMemorySearch(ctx, { query: 'memory', scopes: ['project'] });
+    expect(text(result)).toContain('At least one effective project memory scope is required');
+  });
+
+  test('requires canonical workspaceId for scoped memory', async () => {
+    const ctx = makeContext({
+      workspaceId: undefined,
+      projectMemorySearch: async () => [],
+    });
+
+    const result = await handleProjectMemorySearch(ctx, { query: 'memory' });
+    expect(text(result)).toContain('workspaceId is required for project memory scoping');
   });
 
   test('reports backend status', async () => {
