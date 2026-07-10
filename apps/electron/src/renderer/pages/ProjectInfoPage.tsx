@@ -1,8 +1,8 @@
 /**
  * ProjectInfoPage
  *
- * Workspace-project detail page with three tabs: Sessions, Assets, Settings.
- * v1 scope only — no memory tab, no provider selection, no plugin marketplace.
+ * Workspace-project detail page with four tabs: Sessions, Assets, Memory, Settings.
+ * v1 scope only — no provider selection, no plugin marketplace.
  */
 
 import * as React from 'react'
@@ -26,13 +26,14 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '@craft-agent/ui'
 import { cn } from '@/lib/utils'
 import { PROJECT_COLOR_PALETTE } from '@/utils/project-colors'
 import { InlineColorPickerRow } from '@/components/ui/inline-color-picker-row'
+import { ProjectMemoryPanel } from '@/components/projects/ProjectMemoryPanel'
 import type { LoadedProject, ProjectAsset } from '@craft-agent/shared/projects/types'
 
 interface ProjectInfoPageProps {
   projectSlug: string
 }
 
-type TabKey = 'sessions' | 'assets' | 'settings'
+type TabKey = 'sessions' | 'assets' | 'memory' | 'settings'
 
 export default function ProjectInfoPage({ projectSlug }: ProjectInfoPageProps) {
   const { t } = useTranslation()
@@ -228,6 +229,9 @@ export default function ProjectInfoPage({ projectSlug }: ProjectInfoPageProps) {
             <TabButton active={tab === 'assets'} onClick={() => setTab('assets')}>
               {t('projectInfo.tabAssets')}
             </TabButton>
+            <TabButton active={tab === 'memory'} onClick={() => setTab('memory')}>
+              {t('projectInfo.tabMemory')}
+            </TabButton>
             <TabButton active={tab === 'settings'} onClick={() => setTab('settings')}>
               {t('projectInfo.tabSettings')}
             </TabButton>
@@ -315,6 +319,13 @@ export default function ProjectInfoPage({ projectSlug }: ProjectInfoPageProps) {
                   ))}
                 </ul>
               )}
+            </Info_Section>
+          )}
+
+          {/* Memory tab */}
+          {tab === 'memory' && (
+            <Info_Section title={t('projectInfo.tabMemory')}>
+              <ProjectMemoryPanel projectIdOrSlug={project.config.id} />
             </Info_Section>
           )}
 
