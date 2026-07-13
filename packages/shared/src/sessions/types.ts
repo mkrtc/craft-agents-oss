@@ -12,6 +12,7 @@
 import type { PermissionMode } from '../agent/mode-manager.ts';
 import type { ThinkingLevel } from '../agent/thinking-levels.ts';
 import type { LabelSkillAnchorState } from '../label-skill-bindings/types.ts';
+import type { MemorySelectionMode, MemorySpaceRef } from '../project-memory/connections/types.ts';
 import type { StoredAttachment, MessageRole, ToolStatus, AuthRequestType, AuthStatus, CredentialInputMode, StoredMessage } from '@craft-agent/core/types';
 
 /**
@@ -67,6 +68,10 @@ export const SESSION_PERSISTENT_FIELDS = [
   'taskNodeId',
   'taskNodeCount',
   'taskDraft',
+  // Memory: per-session space selection (read set + write target + explicitness)
+  'enabledMemorySpaceRefs',
+  'memoryWriteTargetRef',
+  'memorySelectionMode',
 ] as const;
 
 export type SessionPersistentField = typeof SESSION_PERSISTENT_FIELDS[number];
@@ -233,6 +238,15 @@ export interface SessionConfig {
   taskNodeCount?: number;
   /** Tasks Conductor: generate-time draft orchestrator. Hidden from the board until adopted (promoted) by createTask. */
   taskDraft?: boolean;
+  /**
+   * Memory: spaces this session reads from. Each ref points at a space within a
+   * memory connection. Absent = derived defaults (no explicit selection).
+   */
+  enabledMemorySpaceRefs?: MemorySpaceRef[];
+  /** Memory: the single space new memories from this session are written to. */
+  memoryWriteTargetRef?: MemorySpaceRef;
+  /** Memory: how the space selection was decided ('explicit' = user picked). */
+  memorySelectionMode?: MemorySelectionMode;
 }
 
 /**
@@ -346,6 +360,12 @@ export interface SessionHeader {
   taskNodeCount?: number;
   /** Tasks Conductor: generate-time draft orchestrator. Hidden from the board until adopted (promoted) by createTask. */
   taskDraft?: boolean;
+  /** Memory: spaces this session reads from (refs into memory connections). */
+  enabledMemorySpaceRefs?: MemorySpaceRef[];
+  /** Memory: the single space new memories from this session are written to. */
+  memoryWriteTargetRef?: MemorySpaceRef;
+  /** Memory: how the space selection was decided ('explicit' = user picked). */
+  memorySelectionMode?: MemorySelectionMode;
   // Pre-computed fields for fast list loading
   /** Number of messages in session */
   messageCount: number;
