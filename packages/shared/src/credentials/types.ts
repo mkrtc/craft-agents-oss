@@ -15,6 +15,8 @@
  * Note: Using "::" as delimiter to avoid conflicts with "/" in URLs or paths.
  */
 
+import { isUuid } from '../utils/uuid.ts';
+
 /** Types of credentials we store */
 export type CredentialType =
   // Global credentials (legacy, kept for backwards compatibility)
@@ -33,7 +35,9 @@ export type CredentialType =
   | 'source_apikey'      // API keys
   | 'source_basic'       // Basic auth (base64 encoded user:pass)
   // Messaging gateway credentials (keyed by workspaceId + platform)
-  | 'messaging_bearer';  // Platform tokens (e.g., Telegram bot token)
+  | 'messaging_bearer'   // Platform tokens (e.g., Telegram bot token)
+  // Memory connection credentials (keyed by connection UUID)
+  | 'memory_api_key';    // API key for a Qdrant Memory connection
 
 /** Valid credential types for validation */
 const VALID_CREDENTIAL_TYPES: readonly CredentialType[] = [
@@ -49,6 +53,7 @@ const VALID_CREDENTIAL_TYPES: readonly CredentialType[] = [
   'source_apikey',
   'source_basic',
   'messaging_bearer',
+  'memory_api_key',
 ] as const;
 
 /** Check if a string is a valid CredentialType */
@@ -71,6 +76,10 @@ export interface CredentialId {
   sourceId?: string;
   /** Server name or API name */
   name?: string;
+
+  // Memory connection-scoped format
+  /** Memory connection UUID for memory_api_key credentials */
+  memoryConnectionId?: string;
 }
 
 /**
@@ -157,6 +166,11 @@ const LLM_CREDENTIAL_TYPES = [
   'llm_service_account',
 ] as const;
 
+/** Memory connection credential types */
+export const MEMORY_CREDENTIAL_TYPES = [
+  'memory_api_key',
+] as const;
+
 /** Check if type is a source credential */
 function isSourceCredential(type: CredentialType): boolean {
   return (SOURCE_CREDENTIAL_TYPES as readonly string[]).includes(type);
@@ -165,6 +179,11 @@ function isSourceCredential(type: CredentialType): boolean {
 /** Check if type is an LLM connection credential */
 function isLlmCredential(type: CredentialType): boolean {
   return (LLM_CREDENTIAL_TYPES as readonly string[]).includes(type);
+}
+
+/** Check if type is a Memory connection credential */
+function isMemoryCredential(type: CredentialType): boolean {
+  return (MEMORY_CREDENTIAL_TYPES as readonly string[]).includes(type);
 }
 
 /** Convert CredentialId to credential store account string */
@@ -176,6 +195,17 @@ export function credentialIdToAccount(id: CredentialId): string {
   // llm_oauth::{connectionSlug}
   if (isLlmCredential(id.type) && id.connectionSlug) {
     parts.push(id.connectionSlug);
+    return parts.join(CREDENTIAL_DELIMITER);
+  }
+
+  // Memory connection-scoped format:
+  // memory_api_key::{connectionId}
+  // The connection id is a UUID, so it never contains the "::" delimiter.
+  if (isMemoryCredential(id.type)) {
+    if (!id.memoryConnectionId || !isUuid(id.memoryConnectionId)) {
+      throw new Error('memory_api_key credential requires a valid UUID memoryConnectionId');
+    }
+    parts.push(id.memoryConnectionId);
     return parts.join(CREDENTIAL_DELIMITER);
   }
 
@@ -252,6 +282,12 @@ export function accountToCredentialId(account: string): CredentialId | null {
     return { type, connectionSlug: parts[1] };
   }
 
+  // Memory connection-scoped format:
+  // memory_api_key::{connectionId} — second segment must be a UUID.
+  if (isMemoryCredential(type) && parts.length === 2 && isUuid(parts[1])) {
+    return { type, memoryConnectionId: parts[1] };
+  }
+
   // Workspace-scoped format (no source):
   // workspace_oauth::{workspaceId}
   if (type === 'workspace_oauth' && parts.length === 2) {
@@ -270,7 +306,8 @@ export function accountToCredentialId(account: string): CredentialId | null {
     return { type, workspaceId: parts[1], name: parts[2] };
   }
 
-  if (parts.length === 2 && parts[1] === 'global') {
+  // Memory credentials are always connection-scoped (UUID) — never "global".
+  if (parts.length === 2 && parts[1] === 'global' && !isMemoryCredential(type)) {
     return { type };
   }
 

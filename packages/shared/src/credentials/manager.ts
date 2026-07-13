@@ -10,6 +10,7 @@ import type { CredentialId, CredentialType, StoredCredential, CredentialHealthSt
 import type { LlmAuthType, LlmProviderType } from '../config/llm-connections.ts';
 import { SecureStorageBackend } from './backends/secure-storage.ts';
 import { debug } from '../utils/debug.ts';
+import { isUuid } from '../utils/uuid.ts';
 
 export class CredentialManager {
   private backends: CredentialBackend[] = [];
@@ -399,6 +400,53 @@ export class CredentialManager {
     await this.delete({ type: 'llm_oauth', connectionSlug });
     await this.delete({ type: 'llm_iam', connectionSlug });
     await this.delete({ type: 'llm_service_account', connectionSlug });
+  }
+
+  // ============================================================
+  // Memory Connection Credentials
+  //
+  // Keyed by connection UUID: memory_api_key::{connectionId}.
+  // The connection id must be a UUID (no "::" delimiter), so the account
+  // string is always unambiguous. Secrets live only here — never in config.
+  // ============================================================
+
+  private assertMemoryConnectionId(connectionId: string): void {
+    if (!isUuid(connectionId)) {
+      throw new Error(`Invalid memory connection id: ${connectionId}`);
+    }
+  }
+
+  /** Get the API key for a Memory connection. */
+  async getMemoryApiKey(connectionId: string): Promise<string | null> {
+    this.assertMemoryConnectionId(connectionId);
+    const cred = await this.get({ type: 'memory_api_key', memoryConnectionId: connectionId });
+    return cred?.value || null;
+  }
+
+  /** Set the API key for a Memory connection. */
+  async setMemoryApiKey(connectionId: string, apiKey: string): Promise<void> {
+    this.assertMemoryConnectionId(connectionId);
+    if (!apiKey) throw new Error('Memory API key must not be empty');
+    await this.set({ type: 'memory_api_key', memoryConnectionId: connectionId }, { value: apiKey });
+  }
+
+  /** Delete the API key for a Memory connection. Returns true if one was removed. */
+  async deleteMemoryApiKey(connectionId: string): Promise<boolean> {
+    this.assertMemoryConnectionId(connectionId);
+    return this.delete({ type: 'memory_api_key', memoryConnectionId: connectionId });
+  }
+
+  /** Whether a Memory connection has an API key stored. */
+  async hasMemoryApiKey(connectionId: string): Promise<boolean> {
+    return !!(await this.getMemoryApiKey(connectionId));
+  }
+
+  /** List the connection ids that have a Memory API key stored. */
+  async listMemoryApiKeyConnectionIds(): Promise<string[]> {
+    const ids = await this.list({ type: 'memory_api_key' });
+    return ids
+      .map(id => id.memoryConnectionId)
+      .filter((value): value is string => typeof value === 'string');
   }
 
   // ============================================================

@@ -16,6 +16,7 @@ import type {
 } from '@craft-agent/core/types'
 import type { PermissionMode } from '../agent/mode-types'
 import type { ThinkingLevel } from '../agent/thinking-levels'
+import type { MemorySelectionMode, MemorySpaceRef } from '../project-memory/connections/types'
 import type { CustomEndpointConfig } from '../config/llm-connections'
 import type { LabelSkillBindingsConfig, LabelSkillBindingsValidationResult, LabelSkillBindingGeneratedFrom } from '../label-skill-bindings/types'
 import type { SkillSummary } from '../skills/types'
@@ -123,6 +124,12 @@ export interface Session {
   taskNodeCount?: number
   /** Tasks Conductor: generate-time draft orchestrator, hidden from the board until adopted by createTask. */
   taskDraft?: boolean
+  /** Memory: spaces this session reads from (refs into memory connections). */
+  enabledMemorySpaceRefs?: MemorySpaceRef[]
+  /** Memory: the single space new memories from this session are written to. */
+  memoryWriteTargetRef?: MemorySpaceRef
+  /** Memory: how the space selection was decided ('explicit' = user picked). */
+  memorySelectionMode?: MemorySelectionMode
 }
 
 export interface CreateSessionOptions {
