@@ -187,6 +187,28 @@ describe('serializeSession', () => {
     expect(bundle).toBeNull()
   })
 
+  it('canonicalizes Memory selection in exported headers', () => {
+    const session = makeStoredSession({
+      enabledMemorySpaceRefs: [{
+        connectionId: '123E4567-E89B-42D3-8456-426614174000',
+        spaceId: 'AAAAAAAA-E89B-42D3-8456-426614174000',
+      }],
+      memoryWriteTargetRef: {
+        connectionId: '123E4567-E89B-42D3-8456-426614174000',
+        spaceId: 'AAAAAAAA-E89B-42D3-8456-426614174000',
+      },
+      memorySelectionMode: 'explicit',
+    })
+    setupSessionDir(tmpDir, session)
+
+    const bundle = serializeSession(tmpDir, session.id)
+
+    expect(bundle?.session.header.enabledMemorySpaceRefs).toEqual([{
+      connectionId: '123e4567-e89b-42d3-8456-426614174000',
+      spaceId: 'aaaaaaaa-e89b-42d3-8456-426614174000',
+    }])
+  })
+
   it('preserves session metadata in header', () => {
     const session = makeStoredSession({
       isFlagged: true,
@@ -248,5 +270,18 @@ describe('validateBundle', () => {
 
   it('rejects header without createdAt', () => {
     expect(validateBundle({ version: 1, session: { header: { id: 'x' }, messages: [] }, files: [] })).toBe(false)
+  })
+
+  it.each([
+    ['51 refs', { enabledMemorySpaceRefs: Array.from({ length: 51 }, () => ({ connectionId: '123e4567-e89b-42d3-8456-426614174000', spaceId: 'aaaaaaaa-e89b-42d3-8456-426614174000' })) }],
+    ['unknown nested fields', { enabledMemorySpaceRefs: [{ connectionId: '123e4567-e89b-42d3-8456-426614174000', spaceId: 'aaaaaaaa-e89b-42d3-8456-426614174000', injected: true }] }],
+    ['duplicate refs', { enabledMemorySpaceRefs: [{ connectionId: '123e4567-e89b-42d3-8456-426614174000', spaceId: 'aaaaaaaa-e89b-42d3-8456-426614174000' }, { connectionId: '123e4567-e89b-42d3-8456-426614174000', spaceId: 'aaaaaaaa-e89b-42d3-8456-426614174000' }] }],
+    ['invalid selection mode', { memorySelectionMode: 'derived' }],
+  ])('rejects imported bundle with malformed Memory selection: %s', (_name, memorySelection) => {
+    expect(validateBundle({
+      version: 1,
+      session: { header: { id: 'test', createdAt: 1000, ...memorySelection }, messages: [] },
+      files: [],
+    })).toBe(false)
   })
 })

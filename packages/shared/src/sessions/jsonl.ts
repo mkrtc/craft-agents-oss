@@ -15,6 +15,20 @@ import { toPortablePath, expandPath, normalizePath } from '../utils/paths.ts';
 import { debug } from '../utils/debug.ts';
 import { safeJsonParse } from '../utils/files.ts';
 import { pickSessionFields } from './utils.ts';
+import { normalizeSessionMemorySelection } from '../project-memory/connections/session-refs.ts';
+
+/**
+ * A valid header with 50 canonical Memory refs is roughly 6 KiB before normal
+ * session metadata. 64 KiB leaves ample room for the existing bounded metadata
+ * fields while still preventing unbounded first-line reads of corrupted JSONL.
+ */
+export const MAX_SESSION_HEADER_BYTES = 64 * 1024;
+const HEADER_READ_CHUNK_BYTES = 4096;
+const MEMORY_SELECTION_FIELDS = [
+  'enabledMemorySpaceRefs',
+  'memoryWriteTargetRef',
+  'memorySelectionMode',
+] as const;
 
 // ============================================================
 // Session Path Portability
@@ -74,25 +88,97 @@ function normalizeHeaderPermissionModes<T extends SessionHeader>(header: T): T {
 }
 
 /**
+ * Apply the all-or-nothing persisted Memory selection policy without mutating
+ * the caller: malformed selection state is quarantined (all three fields are
+ * omitted) and the rest of the session remains readable. This prevents unsafe
+ * nested input from surviving a read/write round-trip.
+ */
+export function normalizeSessionHeaderMemorySelection<T extends SessionHeader>(header: T): T {
+  const normalized = { ...header } as T & Record<string, unknown>;
+  const rawSelection: Record<string, unknown> = {};
+  const rawHeader = header as Record<string, unknown>;
+  for (const field of MEMORY_SELECTION_FIELDS) {
+    if (Object.hasOwn(rawHeader, field)) rawSelection[field] = rawHeader[field];
+    delete normalized[field];
+  }
+
+  const result = normalizeSessionMemorySelection(rawSelection);
+  if (!result.valid || !result.value) {
+    debug('[jsonl] Quarantined malformed persisted Memory selection:', result.errors.join('; '));
+    return normalized as T;
+  }
+
+  Object.assign(normalized, result.value);
+  return normalized as T;
+}
+
+function normalizeSessionHeader(header: SessionHeader): SessionHeader {
+  return normalizeSessionHeaderMemorySelection(normalizeHeaderPermissionModes(header));
+}
+
+function readFirstHeaderLineSync(fd: number): string {
+  const chunks: Buffer[] = [];
+  let total = 0;
+  let position = 0;
+  while (total < MAX_SESSION_HEADER_BYTES) {
+    const buffer = Buffer.alloc(Math.min(HEADER_READ_CHUNK_BYTES, MAX_SESSION_HEADER_BYTES - total));
+    const bytesRead = readSync(fd, buffer, 0, buffer.length, position);
+    if (bytesRead === 0) return Buffer.concat(chunks, total).toString('utf-8');
+    const newline = buffer.subarray(0, bytesRead).indexOf(0x0a);
+    const slice = newline === -1 ? buffer.subarray(0, bytesRead) : buffer.subarray(0, newline);
+    chunks.push(slice);
+    total += slice.length;
+    if (newline !== -1) return Buffer.concat(chunks, total).toString('utf-8');
+    position += bytesRead;
+  }
+
+  // A header exactly at the limit is valid if it is followed by a newline or
+  // EOF. Read one sentinel byte so we only reject a first line that is larger.
+  const sentinel = Buffer.alloc(1);
+  const bytesRead = readSync(fd, sentinel, 0, 1, position);
+  if (bytesRead === 0 || sentinel[0] === 0x0a) return Buffer.concat(chunks, total).toString('utf-8');
+  throw new Error(`Session header exceeds ${MAX_SESSION_HEADER_BYTES} byte limit`);
+}
+
+async function readFirstHeaderLineAsync(handle: Awaited<ReturnType<typeof open>>): Promise<string> {
+  const chunks: Buffer[] = [];
+  let total = 0;
+  let position = 0;
+  while (total < MAX_SESSION_HEADER_BYTES) {
+    const buffer = Buffer.alloc(Math.min(HEADER_READ_CHUNK_BYTES, MAX_SESSION_HEADER_BYTES - total));
+    const { bytesRead } = await handle.read(buffer, 0, buffer.length, position);
+    if (bytesRead === 0) return Buffer.concat(chunks, total).toString('utf-8');
+    const newline = buffer.subarray(0, bytesRead).indexOf(0x0a);
+    const slice = newline === -1 ? buffer.subarray(0, bytesRead) : buffer.subarray(0, newline);
+    chunks.push(slice);
+    total += slice.length;
+    if (newline !== -1) return Buffer.concat(chunks, total).toString('utf-8');
+    position += bytesRead;
+  }
+
+  const sentinel = Buffer.alloc(1);
+  const { bytesRead } = await handle.read(sentinel, 0, 1, position);
+  if (bytesRead === 0 || sentinel[0] === 0x0a) return Buffer.concat(chunks, total).toString('utf-8');
+  throw new Error(`Session header exceeds ${MAX_SESSION_HEADER_BYTES} byte limit`);
+}
+
+/**
  * Read only the header (first line) from a session.jsonl file.
- * Uses low-level fs to read minimal bytes for fast list loading.
+ * Reads in bounded chunks until the first newline so valid large headers are
+ * not silently truncated.
  */
 export function readSessionHeader(sessionFile: string): SessionHeader | null {
+  let fd: number | undefined;
   try {
-    const fd = openSync(sessionFile, 'r');
-    const buffer = Buffer.alloc(8192); // 8KB is plenty for metadata header
-    const bytesRead = readSync(fd, buffer, 0, 8192, 0);
-    closeSync(fd);
-
-    const content = buffer.toString('utf-8', 0, bytesRead);
-    const firstNewline = content.indexOf('\n');
-    const firstLine = firstNewline > 0 ? content.slice(0, firstNewline) : content;
-
+    fd = openSync(sessionFile, 'r');
+    const firstLine = readFirstHeaderLineSync(fd);
     const parsed = safeJsonParse(expandSessionPath(firstLine, dirname(sessionFile))) as SessionHeader;
-    return normalizeHeaderPermissionModes(parsed);
+    return normalizeSessionHeader(parsed);
   } catch (error) {
     debug('[jsonl] Failed to read session header:', sessionFile, error);
     return null;
+  } finally {
+    if (fd !== undefined) closeSync(fd);
   }
 }
 
@@ -109,7 +195,7 @@ export function readSessionJsonl(sessionFile: string): StoredSession | null {
     if (!firstLine) return null;
 
     const sessionDir = dirname(sessionFile);
-    const header = normalizeHeaderPermissionModes(
+    const header = normalizeSessionHeader(
       safeJsonParse(expandSessionPath(firstLine, sessionDir)) as SessionHeader
     );
     // Parse messages resiliently: skip lines that fail to parse (e.g. truncated by crash)
@@ -169,7 +255,7 @@ export function writeSessionJsonl(sessionFile: string, session: StoredSession): 
  * Uses pickSessionFields() to ensure all persistent fields are included.
  */
 export function createSessionHeader(session: StoredSession): SessionHeader {
-  return {
+  const header = {
     ...pickSessionFields(session),
     // Path conversion for portability
     workspaceRootPath: toPortablePath(session.workspaceRootPath),
@@ -182,6 +268,7 @@ export function createSessionHeader(session: StoredSession): SessionHeader {
     tokenUsage: session.tokenUsage,
     lastFinalMessageId: extractLastFinalMessageId(session.messages),
   } as SessionHeader;
+  return normalizeSessionHeaderMemorySelection(header);
 }
 
 /**
@@ -245,13 +332,9 @@ export async function readSessionHeaderAsync(sessionFile: string): Promise<Sessi
   try {
     const handle = await open(sessionFile, 'r');
     try {
-      const buffer = Buffer.alloc(8192);
-      const { bytesRead } = await handle.read(buffer, 0, 8192, 0);
-      const content = buffer.toString('utf-8', 0, bytesRead);
-      const firstNewline = content.indexOf('\n');
-      const firstLine = firstNewline > 0 ? content.slice(0, firstNewline) : content;
+      const firstLine = await readFirstHeaderLineAsync(handle);
       const parsed = safeJsonParse(expandSessionPath(firstLine, dirname(sessionFile))) as SessionHeader;
-      return normalizeHeaderPermissionModes(parsed);
+      return normalizeSessionHeader(parsed);
     } finally {
       await handle.close();
     }

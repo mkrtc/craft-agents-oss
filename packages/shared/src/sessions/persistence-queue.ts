@@ -21,6 +21,9 @@ interface HeaderMetadataSignature {
   permissionMode?: string
   hasUnread?: boolean
   lastReadMessageId?: string
+  enabledMemorySpaceRefs?: SessionHeader['enabledMemorySpaceRefs']
+  memoryWriteTargetRef?: SessionHeader['memoryWriteTargetRef']
+  memorySelectionMode?: SessionHeader['memorySelectionMode']
 }
 
 function getHeaderMetadataSignature(header: SessionHeader): string {
@@ -34,6 +37,9 @@ function getHeaderMetadataSignature(header: SessionHeader): string {
     permissionMode: header.permissionMode,
     hasUnread: header.hasUnread,
     lastReadMessageId: header.lastReadMessageId,
+    enabledMemorySpaceRefs: header.enabledMemorySpaceRefs,
+    memoryWriteTargetRef: header.memoryWriteTargetRef,
+    memorySelectionMode: header.memorySelectionMode,
   }
   return JSON.stringify(signature)
 }
@@ -50,6 +56,9 @@ function mergeHeaderWithExternalMetadata(localHeader: SessionHeader, diskHeader:
     permissionMode: diskHeader.permissionMode,
     hasUnread: diskHeader.hasUnread,
     lastReadMessageId: diskHeader.lastReadMessageId,
+    enabledMemorySpaceRefs: diskHeader.enabledMemorySpaceRefs,
+    memoryWriteTargetRef: diskHeader.memoryWriteTargetRef,
+    memorySelectionMode: diskHeader.memorySelectionMode,
   }
 }
 

@@ -93,6 +93,7 @@ export {
   readSessionJsonl,
   writeSessionJsonl,
   createSessionHeader,
+  normalizeSessionHeaderMemorySelection,
 } from './jsonl.ts';
 
 // Field utilities

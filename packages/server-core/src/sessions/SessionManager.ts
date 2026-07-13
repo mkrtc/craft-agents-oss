@@ -64,6 +64,7 @@ import {
   sessionPersistenceQueue,
   getHeaderMetadataSignature,
   writeSessionJsonl,
+  normalizeSessionHeaderMemorySelection,
   serializeSession,
   validateBundle,
   type SessionBundle,
@@ -9432,7 +9433,7 @@ export class SessionManager implements ISessionManager {
     const sessionDir = ensureSessionDir(workspaceRootPath, sessionId)
 
     // Build the stored session from bundle data
-    const header = bundle.session.header
+    const header = normalizeSessionHeaderMemorySelection(bundle.session.header)
     const storedSession: StoredSession = {
       id: sessionId,
       workspaceRootPath,
@@ -9459,6 +9460,12 @@ export class SessionManager implements ISessionManager {
       hidden: header.hidden,
       transferredSessionSummary: header.transferredSessionSummary,
       transferredSessionSummaryApplied: header.transferredSessionSummaryApplied,
+      // Bundle validation + normalization preserve only structurally valid,
+      // canonical selection state. Availability/authorization stays in the
+      // session Memory resolver rather than the transfer boundary.
+      enabledMemorySpaceRefs: header.enabledMemorySpaceRefs,
+      memoryWriteTargetRef: header.memoryWriteTargetRef,
+      memorySelectionMode: header.memorySelectionMode,
       messages: bundle.session.messages,
       tokenUsage: header.tokenUsage ?? DEFAULT_TOKEN_USAGE,
     }

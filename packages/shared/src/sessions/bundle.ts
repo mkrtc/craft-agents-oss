@@ -10,7 +10,8 @@
 import { existsSync, readFileSync } from 'fs'
 import type { SessionHeader, StoredMessage, SessionConfig } from './types.ts'
 import type { StoredSession } from './types.ts'
-import { readSessionJsonl } from './jsonl.ts'
+import { readSessionJsonl, normalizeSessionHeaderMemorySelection } from './jsonl.ts'
+import { normalizeSessionMemorySelection } from '../project-memory/connections/session-refs.ts'
 import { getSessionPath, getSessionFilePath } from './storage.ts'
 import { debug } from '../utils/debug.ts'
 import {
@@ -122,10 +123,10 @@ export function serializeSession(
   if (!firstLine) return null
 
   // Strip server-internal fields that shouldn't travel with the bundle
-  const header: SessionHeader = {
+  const header = normalizeSessionHeaderMemorySelection({
     ...JSON.parse(firstLine) as SessionHeader,
     // workspaceRootPath will be set by the importing server
-  }
+  })
 
   return {
     version: 1,
@@ -155,6 +156,15 @@ export function validateBundle(bundle: unknown): bundle is SessionBundle {
   const header = session.header as Record<string, unknown>
   if (typeof header.id !== 'string') return false
   if (typeof header.createdAt !== 'number') return false
+
+  // Imported bundles are untrusted. Unlike local JSONL reads, reject the
+  // complete bundle when its Memory selection is malformed so it cannot enter
+  // another backend and later be persisted verbatim.
+  const memorySelection: Record<string, unknown> = {}
+  for (const field of ['enabledMemorySpaceRefs', 'memoryWriteTargetRef', 'memorySelectionMode'] as const) {
+    if (Object.hasOwn(header, field)) memorySelection[field] = header[field]
+  }
+  if (!normalizeSessionMemorySelection(memorySelection).valid) return false
 
   if (!Array.isArray(b.files)) return false
 
