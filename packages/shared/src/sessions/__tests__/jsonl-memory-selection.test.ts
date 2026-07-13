@@ -136,6 +136,9 @@ describe('session JSONL Memory selection persistence', () => {
     writeFileSync(sessionFile, `${JSON.stringify(header)}\n`);
     expect(readSessionHeader(sessionFile)?.id).toBe('memory-selection');
     expect((await readSessionHeaderAsync(sessionFile))?.id).toBe('memory-selection');
+    writeFileSync(sessionFile, `${JSON.stringify(header)}\r\n`);
+    expect(readSessionHeader(sessionFile)?.id).toBe('memory-selection');
+    expect((await readSessionHeaderAsync(sessionFile))?.id).toBe('memory-selection');
 
     header.transferredSessionSummary += 'x';
     writeFileSync(sessionFile, `${JSON.stringify(header)}\n`);

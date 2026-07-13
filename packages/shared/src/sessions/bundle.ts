@@ -10,7 +10,7 @@
 import { existsSync, readFileSync } from 'fs'
 import type { SessionHeader, StoredMessage, SessionConfig } from './types.ts'
 import type { StoredSession } from './types.ts'
-import { readSessionJsonl, normalizeSessionHeaderMemorySelection } from './jsonl.ts'
+import { readSessionJsonl, normalizeSessionHeaderMemorySelection, assertSessionHeaderEncodedBytes } from './jsonl.ts'
 import { normalizeSessionMemorySelection } from '../project-memory/connections/session-refs.ts'
 import { getSessionPath, getSessionFilePath } from './storage.ts'
 import { debug } from '../utils/debug.ts'
@@ -154,6 +154,7 @@ export function validateBundle(bundle: unknown): bundle is SessionBundle {
   if (!Array.isArray(session.messages)) return false
 
   const header = session.header as Record<string, unknown>
+  try { assertSessionHeaderEncodedBytes(JSON.stringify(header)) } catch { return false }
   if (typeof header.id !== 'string') return false
   if (typeof header.createdAt !== 'number') return false
 
