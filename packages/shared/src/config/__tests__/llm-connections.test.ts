@@ -67,10 +67,11 @@ describe('getDefaultModelForConnection', () => {
     expect(modelIds).toContain(defaultModel)
   })
 
-  it('Pi openai default is in its own model list', () => {
+  it('Pi openai default is GPT-5.6 Sol and is in its own model list', () => {
     const defaultModel = getDefaultModelForConnection('pi', 'openai')
     const models = getDefaultModelsForConnection('pi', 'openai')
     const modelIds = models.map(m => typeof m === 'string' ? m : m.id)
+    expect(defaultModel).toBe('pi/gpt-5.6-sol')
     expect(modelIds).toContain(defaultModel)
   })
 
