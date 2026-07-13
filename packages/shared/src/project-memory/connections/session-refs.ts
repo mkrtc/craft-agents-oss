@@ -19,7 +19,7 @@
 
 import { toCanonicalUuid } from '../../utils/uuid-format.ts';
 import { MEMORY_LIMITS } from './limits.ts';
-import type { MemorySpaceRef } from './types.ts';
+import type { MemorySelectionMode, MemorySpaceRef } from './types.ts';
 import type { ValidationResult } from './validation.ts';
 
 const REF_KEYS = new Set(['connectionId', 'spaceId']);
@@ -69,10 +69,15 @@ export function validateSessionMemorySpaceRefs(input: unknown): ValidationResult
   if (!Array.isArray(input)) {
     return { valid: false, errors: ['enabledMemorySpaceRefs must be an array'] };
   }
-  const errors: string[] = [];
+  // Reject over-limit input before examining nested values. This keeps hostile
+  // persisted/bundle input bounded even when every element is malformed.
   if (input.length > MEMORY_LIMITS.MAX_SESSION_SPACE_REFS) {
-    errors.push(`a session may enable at most ${MEMORY_LIMITS.MAX_SESSION_SPACE_REFS} memory spaces`);
+    return {
+      valid: false,
+      errors: [`a session may enable at most ${MEMORY_LIMITS.MAX_SESSION_SPACE_REFS} memory spaces`],
+    };
   }
+  const errors: string[] = [];
   const seen = new Set<string>();
   const refs: MemorySpaceRef[] = [];
   for (let i = 0; i < input.length; i++) {
@@ -96,4 +101,61 @@ export function validateSessionMemorySpaceRefs(input: unknown): ValidationResult
 /** Validate and canonicalize a session's single write-target ref. */
 export function validateSessionMemoryWriteTarget(input: unknown): ValidationResult<MemorySpaceRef> {
   return validateMemorySpaceRef(input, 'memoryWriteTargetRef');
+}
+
+/**
+ * Structurally valid, canonical Memory selection fields suitable for session
+ * persistence. The fields remain independently optional for compatibility:
+ * absent selection state keeps legacy/default resolution, while a write target
+ * is only structurally validated here. Lifecycle authorization belongs to the
+ * session resolver, not this pure persistence boundary.
+ */
+export interface SessionMemorySelection {
+  enabledMemorySpaceRefs?: MemorySpaceRef[];
+  memoryWriteTargetRef?: MemorySpaceRef;
+  memorySelectionMode?: MemorySelectionMode;
+}
+
+const SELECTION_KEYS = new Set([
+  'enabledMemorySpaceRefs',
+  'memoryWriteTargetRef',
+  'memorySelectionMode',
+]);
+
+/**
+ * Strict, pure combined normalizer for all persisted session Memory selection
+ * fields. It never mutates input and returns reconstructed refs only.
+ */
+export function normalizeSessionMemorySelection(input: unknown): ValidationResult<SessionMemorySelection> {
+  if (!isPlainObject(input)) {
+    return { valid: false, errors: ['memory selection must be an object'] };
+  }
+
+  const errors: string[] = [];
+  const extras = Object.keys(input).filter(key => !SELECTION_KEYS.has(key));
+  if (extras.length > 0) errors.push(`memory selection has unknown field(s): ${extras.join(', ')}`);
+
+  const selection: SessionMemorySelection = {};
+  if (Object.hasOwn(input, 'enabledMemorySpaceRefs')) {
+    const refs = validateSessionMemorySpaceRefs(input.enabledMemorySpaceRefs);
+    if (!refs.valid || !refs.value) errors.push(...refs.errors);
+    else selection.enabledMemorySpaceRefs = refs.value;
+  }
+
+  if (Object.hasOwn(input, 'memoryWriteTargetRef')) {
+    const target = validateSessionMemoryWriteTarget(input.memoryWriteTargetRef);
+    if (!target.valid || !target.value) errors.push(...target.errors);
+    else selection.memoryWriteTargetRef = target.value;
+  }
+
+  if (Object.hasOwn(input, 'memorySelectionMode')) {
+    if (input.memorySelectionMode !== 'explicit') {
+      errors.push('memorySelectionMode must be "explicit" when present');
+    } else {
+      selection.memorySelectionMode = 'explicit';
+    }
+  }
+
+  if (errors.length > 0) return { valid: false, errors };
+  return { valid: true, value: selection, errors };
 }

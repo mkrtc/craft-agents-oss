@@ -5,6 +5,7 @@ import {
   validateMemorySpaceRef,
   validateSessionMemorySpaceRefs,
   validateSessionMemoryWriteTarget,
+  normalizeSessionMemorySelection,
 } from '../session-refs.ts';
 
 const CONN = '123e4567-e89b-42d3-8456-426614174000';
@@ -50,6 +51,36 @@ describe('validateSessionMemorySpaceRefs', () => {
 
   test('rejects a non-array', () => {
     expect(validateSessionMemorySpaceRefs({} as unknown).valid).toBe(false);
+  });
+});
+
+describe('normalizeSessionMemorySelection', () => {
+  test('preserves absent fields and canonicalizes present fields without authorization assumptions', () => {
+    expect(normalizeSessionMemorySelection({}).value).toEqual({});
+    const result = normalizeSessionMemorySelection({
+      enabledMemorySpaceRefs: [{ connectionId: CONN.toUpperCase(), spaceId: SPACE_B.toUpperCase() }],
+      memoryWriteTargetRef: { connectionId: CONN.toUpperCase(), spaceId: SPACE_A.toUpperCase() },
+      memorySelectionMode: 'explicit',
+    });
+    expect(result.valid).toBe(true);
+    expect(result.value).toEqual({
+      enabledMemorySpaceRefs: [{ connectionId: CONN, spaceId: SPACE_B }],
+      memoryWriteTargetRef: { connectionId: CONN, spaceId: SPACE_A },
+      memorySelectionMode: 'explicit',
+    });
+  });
+
+  test('rejects unknown selection fields and invalid modes', () => {
+    expect(normalizeSessionMemorySelection({ extra: true }).valid).toBe(false);
+    expect(normalizeSessionMemorySelection({ memorySelectionMode: 'derived' }).valid).toBe(false);
+  });
+
+  test('rejects over-limit refs before iterating nested values', () => {
+    const hostile = Array.from({ length: MEMORY_LIMITS.MAX_SESSION_SPACE_REFS + 1 }, () => null);
+    const result = normalizeSessionMemorySelection({ enabledMemorySpaceRefs: hostile });
+    expect(result.valid).toBe(false);
+    expect(result.errors).toHaveLength(1);
+    expect(result.errors[0]).toContain('at most');
   });
 });
 

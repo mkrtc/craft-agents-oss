@@ -1,0 +1,164 @@
+import { afterEach, describe, expect, it } from 'bun:test';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { randomUUID } from 'node:crypto';
+import {
+  createSession,
+  getSessionFilePath,
+  loadSession,
+  saveSession,
+} from '../storage.ts';
+import {
+  readSessionHeader,
+  readSessionHeaderAsync,
+  readSessionJsonl,
+  MAX_SESSION_HEADER_BYTES,
+  writeSessionJsonl,
+} from '../jsonl.ts';
+import type { StoredSession } from '../types.ts';
+
+const tempDirs: string[] = [];
+
+function makeWorkspace(): string {
+  const workspace = mkdtempSync(join(tmpdir(), 'session-memory-persistence-'));
+  tempDirs.push(workspace);
+  return workspace;
+}
+
+function ref() {
+  return { connectionId: randomUUID(), spaceId: randomUUID() };
+}
+
+function makeStoredSession(overrides: Partial<StoredSession> = {}): StoredSession {
+  return {
+    id: 'memory-selection',
+    workspaceRootPath: '/tmp/ws',
+    createdAt: 1,
+    lastUsedAt: 1,
+    messages: [],
+    tokenUsage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, contextTokens: 0, costUsd: 0 },
+    ...overrides,
+  } as StoredSession;
+}
+
+afterEach(() => {
+  for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+});
+
+describe('session JSONL Memory selection persistence', () => {
+  it('creates, writes, and reads a canonical explicit selection without mutating the caller', async () => {
+    const workspace = makeWorkspace();
+    const created = await createSession(workspace);
+    const session = loadSession(workspace, created.id)!;
+    const upper = {
+      connectionId: randomUUID().toUpperCase(),
+      spaceId: randomUUID().toUpperCase(),
+    };
+    const later = ref();
+    session.enabledMemorySpaceRefs = [later, upper];
+    session.memoryWriteTargetRef = upper;
+    session.memorySelectionMode = 'explicit';
+
+    await saveSession(session);
+
+    // The object handed to persistence remains untouched while the on-disk
+    // representation and reload use canonical deterministic values.
+    expect(upper.connectionId).toMatch(/[A-F]/);
+    const reloaded = loadSession(workspace, created.id)!;
+    expect(reloaded.enabledMemorySpaceRefs).toEqual([
+      { connectionId: upper.connectionId.toLowerCase(), spaceId: upper.spaceId.toLowerCase() },
+      later,
+    ].sort((a, b) => a.connectionId.localeCompare(b.connectionId) || a.spaceId.localeCompare(b.spaceId)));
+    expect(reloaded.memoryWriteTargetRef).toEqual({
+      connectionId: upper.connectionId.toLowerCase(),
+      spaceId: upper.spaceId.toLowerCase(),
+    });
+    expect(reloaded.memorySelectionMode).toBe('explicit');
+  });
+
+  it.each([
+    ['51 refs', { enabledMemorySpaceRefs: Array.from({ length: 51 }, ref) }],
+    ['unknown nested ref field', { enabledMemorySpaceRefs: [{ ...ref(), injected: true }] }],
+    ['duplicate refs', (() => { const value = ref(); return { enabledMemorySpaceRefs: [value, value] }; })()],
+    ['invalid selection mode', { memorySelectionMode: 'derived' }],
+  ])('quarantines malformed persisted %s rather than raw-round-tripping it', (_name, selection) => {
+    const workspace = makeWorkspace();
+    const sessionFile = join(workspace, 'session.jsonl');
+    writeSessionJsonl(sessionFile, makeStoredSession({
+      ...selection,
+      memorySelectionMode: (selection as { memorySelectionMode?: 'explicit' }).memorySelectionMode,
+    }));
+
+    const header = readSessionHeader(sessionFile)!;
+    expect(header.enabledMemorySpaceRefs).toBeUndefined();
+    expect(header.memoryWriteTargetRef).toBeUndefined();
+    expect(header.memorySelectionMode).toBeUndefined();
+    const rawHeader = JSON.parse(readFileSync(sessionFile, 'utf8').split('\n')[0]!);
+    expect(rawHeader.enabledMemorySpaceRefs).toBeUndefined();
+    expect(rawHeader.memoryWriteTargetRef).toBeUndefined();
+    expect(rawHeader.memorySelectionMode).toBeUndefined();
+  });
+
+  it('quarantines malformed selection from an existing JSONL header while preserving the session', () => {
+    const workspace = makeWorkspace();
+    const sessionFile = join(workspace, 'session.jsonl');
+    const rawHeader = {
+      ...makeStoredSession(),
+      messageCount: 0,
+      enabledMemorySpaceRefs: [{ ...ref(), attackerControlled: 'discard me' }],
+      memorySelectionMode: 'explicit',
+    };
+    writeSessionJsonl(sessionFile, rawHeader as StoredSession);
+    // Simulate a legacy/corrupt first line that bypassed the current writer.
+    const corrupted = { ...rawHeader, enabledMemorySpaceRefs: [{ ...ref(), attackerControlled: true }] };
+    writeFileSync(sessionFile, `${JSON.stringify(corrupted)}\n`);
+
+    const loaded = readSessionJsonl(sessionFile)!;
+    expect(loaded.id).toBe('memory-selection');
+    expect(loaded.enabledMemorySpaceRefs).toBeUndefined();
+    expect(loaded.memoryWriteTargetRef).toBeUndefined();
+    expect(loaded.memorySelectionMode).toBeUndefined();
+  });
+
+  it('accepts a header exactly at the cap and rejects only an oversized first line', async () => {
+    const workspace = makeWorkspace();
+    const sessionFile = join(workspace, 'session.jsonl');
+    const header = {
+      ...makeStoredSession(),
+      messageCount: 0,
+      transferredSessionSummary: '',
+    };
+    const emptyBytes = Buffer.byteLength(JSON.stringify(header));
+    header.transferredSessionSummary = 'x'.repeat(MAX_SESSION_HEADER_BYTES - emptyBytes);
+    expect(Buffer.byteLength(JSON.stringify(header))).toBe(MAX_SESSION_HEADER_BYTES);
+
+    writeFileSync(sessionFile, `${JSON.stringify(header)}\n`);
+    expect(readSessionHeader(sessionFile)?.id).toBe('memory-selection');
+    expect((await readSessionHeaderAsync(sessionFile))?.id).toBe('memory-selection');
+
+    header.transferredSessionSummary += 'x';
+    writeFileSync(sessionFile, `${JSON.stringify(header)}\n`);
+    expect(readSessionHeader(sessionFile)).toBeNull();
+    expect(await readSessionHeaderAsync(sessionFile)).toBeNull();
+  });
+
+  it('reads a valid >8 KiB header through sync and async bounded newline readers', async () => {
+    const workspace = makeWorkspace();
+    const sessionFile = join(workspace, 'session.jsonl');
+    const refs = Array.from({ length: 50 }, ref);
+    writeSessionJsonl(sessionFile, makeStoredSession({
+      enabledMemorySpaceRefs: refs,
+      memoryWriteTargetRef: refs[0],
+      memorySelectionMode: 'explicit',
+      transferredSessionSummary: 'normal metadata '.repeat(700),
+    }));
+
+    const rawHeader = readFileSync(sessionFile, 'utf8').split('\n')[0]!;
+    expect(Buffer.byteLength(rawHeader)).toBeGreaterThan(8192);
+    const syncHeader = readSessionHeader(sessionFile);
+    const asyncHeader = await readSessionHeaderAsync(sessionFile);
+    expect(syncHeader?.enabledMemorySpaceRefs).toHaveLength(50);
+    expect(asyncHeader).toEqual(syncHeader);
+  });
+});
