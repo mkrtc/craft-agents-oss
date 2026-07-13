@@ -4,8 +4,6 @@ This file accumulates release notes for the next unreleased version. PRs that ad
 
 ## Features
 
-- **Project Memory tab** — Project detail pages now surface memory backend status, manual memory adds, project-only search, and clearer Qdrant state handling with a sensitive-data warning for what gets stored. — e3c45db, 4f26207
-
 ## Improvements
 
 ## Bug Fixes
