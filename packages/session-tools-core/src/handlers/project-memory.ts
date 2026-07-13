@@ -41,14 +41,39 @@ function currentProjectId(ctx: SessionToolContext): string | undefined {
   return ctx.getSessionInfo?.(ctx.sessionId)?.projectId;
 }
 
+function assertAuthorizedProjectId(requestedProjectId: string | undefined, sessionProjectId: string | undefined): void {
+  if (requestedProjectId === undefined) return;
+  if (!sessionProjectId) {
+    throw new Error('projectId cannot be provided because the current session is not project-bound');
+  }
+  if (requestedProjectId !== sessionProjectId) {
+    throw new Error('projectId must match the current session project');
+  }
+}
+
+function resolveCanonicalScope(
+  scope: ProjectMemoryScope,
+  workspaceId: string,
+  sessionProjectId: string | undefined,
+): ProjectMemorySearchInput['scopes'][number] {
+  if (scope === 'global') return { scope };
+  if (scope === 'workspace') return { scope, workspaceId };
+  if (!sessionProjectId) {
+    throw new Error('Project memory scope "project" is unavailable because the current session is not project-bound');
+  }
+  return { scope, workspaceId, projectId: sessionProjectId };
+}
+
 function resolveAddInput(ctx: SessionToolContext, args: ProjectMemoryAddArgs): ProjectMemoryAddInput {
-  const scope = args.scope ?? (args.projectId || currentProjectId(ctx) ? 'project' : 'workspace');
-  const workspaceId = currentWorkspaceId(ctx);
-  const projectId = args.projectId ?? (scope === 'project' ? currentProjectId(ctx) : undefined);
+  const sessionProjectId = currentProjectId(ctx);
+  assertAuthorizedProjectId(args.projectId, sessionProjectId);
+
+  // Legacy compatibility: explicit global/workspace adds remain valid, but all
+  // location fields are derived from the server-authoritative session context.
+  const scope = args.scope ?? (sessionProjectId ? 'project' : 'workspace');
+  const canonicalScope = resolveCanonicalScope(scope, currentWorkspaceId(ctx), sessionProjectId);
   return {
-    scope,
-    workspaceId: scope === 'global' ? undefined : workspaceId,
-    projectId,
+    ...canonicalScope,
     source: args.source,
     title: args.title,
     path: args.path,
@@ -60,14 +85,18 @@ function resolveAddInput(ctx: SessionToolContext, args: ProjectMemoryAddArgs): P
 }
 
 function resolveSearchInput(ctx: SessionToolContext, args: ProjectMemorySearchArgs): ProjectMemorySearchInput {
+  const sessionProjectId = currentProjectId(ctx);
+  assertAuthorizedProjectId(args.projectId, sessionProjectId);
+
   const workspaceId = currentWorkspaceId(ctx);
-  const projectId = args.projectId ?? currentProjectId(ctx);
-  const requested = args.scopes ?? (projectId ? ['global', 'workspace', 'project'] : ['global', 'workspace']);
-  const scopes = requested.map(scope => ({
-    scope,
-    workspaceId: scope === 'global' ? undefined : workspaceId,
-    projectId: scope === 'project' ? projectId : undefined,
-  })).filter(scope => scope.scope !== 'project' || scope.projectId);
+  const authorizedScopes: ProjectMemoryScope[] = sessionProjectId
+    ? ['global', 'workspace', 'project']
+    : ['global', 'workspace'];
+  const requestedScopes = args.scopes ?? authorizedScopes;
+  const authorizedScopeSet = new Set<ProjectMemoryScope>(authorizedScopes);
+  const scopes = requestedScopes
+    .filter(scope => authorizedScopeSet.has(scope))
+    .map(scope => resolveCanonicalScope(scope, workspaceId, sessionProjectId));
   if (scopes.length === 0) {
     throw new Error('At least one effective project memory scope is required');
   }
