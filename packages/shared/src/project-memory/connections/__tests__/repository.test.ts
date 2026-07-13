@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { existsSync, lstatSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'fs';
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
+import { fileURLToPath } from 'url';
 import { isCanonicalUuid } from '../../../utils/uuid-format.ts';
 import { MEMORY_GLOBAL_SPACE_NAME, MemoryError, type CreateMemoryConnectionInput } from '../types.ts';
 import { MemoryConnectionRepository, deriveGlobalSpaceId } from '../repository.ts';
@@ -24,6 +25,36 @@ const CONN: CreateMemoryConnectionInput = {
   collection: 'craft_memory',
   embedding: { model: 'craft-local-hash-v1', dimension: 384 },
 };
+
+const RACE_WORKER_PATH = fileURLToPath(new URL('./repository-race-worker.ts', import.meta.url));
+
+interface RaceWorkerResult {
+  ok: boolean;
+  code?: string | null;
+  message?: string;
+}
+
+async function waitUntil(predicate: () => boolean, timeoutMs = 5_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error('timed out waiting for subprocess race barrier');
+    await Bun.sleep(10);
+  }
+}
+
+async function runCreateRaceWorker(request: Record<string, string>): Promise<RaceWorkerResult> {
+  const child = Bun.spawn([process.execPath, RACE_WORKER_PATH, JSON.stringify({ action: 'create', ...request })], {
+    stdout: 'pipe',
+    stderr: 'pipe',
+  });
+  const [stdout, stderr, exitCode] = await Promise.all([
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+    child.exited,
+  ]);
+  if (exitCode !== 0) throw new Error(`race worker exited ${exitCode}: ${stderr}`);
+  return JSON.parse(stdout.trim()) as RaceWorkerResult;
+}
 
 /** Create a connection using the repo's current root revision. */
 function create(repo: MemoryConnectionRepository, input: CreateMemoryConnectionInput = CONN) {
@@ -283,6 +314,40 @@ describe('MemoryConnectionRepository — durability, security, recovery', () => 
     }
   });
 
+  test('rejects a symlinked memory directory without writing outside configDir', async () => {
+    if (process.platform === 'win32') return;
+    const outside = mkdtempSync(join(tmpdir(), 'mem-repo-outside-'));
+    try {
+      symlinkSync(outside, join(dir, 'memory'), 'dir');
+      const repo = makeRepo();
+      await expect(repo.ensureInstallationId()).rejects.toMatchObject({ code: 'invalid_config' });
+      expect(existsSync(join(outside, 'connections.json'))).toBe(false);
+      expect(existsSync(join(outside, 'connections.json.bak'))).toBe(false);
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  test('does not mutate from a stale backup when an existing primary is EACCES', async () => {
+    if (process.platform === 'win32' || process.getuid?.() === 0) return;
+    const repo = makeRepo();
+    await create(repo);                                  // primary=[Alpha]
+    await create(repo, { ...CONN, name: 'Beta' });       // backup=[Alpha], primary=[Alpha,Beta]
+    const primary = repo.getFilePath();
+    chmodSync(primary, 0o000);
+    try {
+      expect(() => readFileSync(primary, 'utf8')).toThrow();
+      const contender = new MemoryConnectionRepository({ configDir: dir, now: () => 5_000 });
+      await expect(
+        contender.createConnection({ ...CONN, name: 'Gamma' }, 1),
+      ).rejects.toMatchObject({ code: 'storage_error' });
+    } finally {
+      chmodSync(primary, 0o600);
+    }
+    const reloaded = new MemoryConnectionRepository({ configDir: dir }).load();
+    expect(reloaded.connections.map(connection => connection.name)).toEqual(['Alpha', 'Beta']);
+  });
+
   test('never backs up a corrupt primary (self-heals on next write)', async () => {
     const repo = makeRepo();
     await create(repo);
@@ -312,6 +377,41 @@ describe('MemoryConnectionRepository — durability, security, recovery', () => 
     expect(reloaded.connections).toHaveLength(1);
     expect(reloaded.revision).toBe(1);
   });
+
+  test('two real processes cannot both acknowledge create at the same root revision', async () => {
+    const gatesDir = join(dir, 'race-gates');
+    mkdirSync(gatesDir);
+    const requestBase = {
+      configDir: dir,
+      readyPrefix: join(gatesDir, 'ready'),
+      startGate: join(gatesDir, 'start'),
+      afterLoadPrefix: join(gatesDir, 'after-load'),
+      releaseGate: join(gatesDir, 'release'),
+    };
+    const workers = [
+      runCreateRaceWorker({ ...requestBase, workerId: 'a' }),
+      runCreateRaceWorker({ ...requestBase, workerId: 'b' }),
+    ];
+
+    await waitUntil(() => existsSync(`${requestBase.readyPrefix}.a`) && existsSync(`${requestBase.readyPrefix}.b`));
+    writeFileSync(requestBase.startGate, 'go');
+    await waitUntil(() => existsSync(`${requestBase.afterLoadPrefix}.a`) || existsSync(`${requestBase.afterLoadPrefix}.b`));
+
+    // Without a filesystem transaction lock both workers reach their injected
+    // post-load barrier. With the lock only one can; give the contender enough
+    // time to expose the broken implementation, then release the owner.
+    const bothAfterLoad = () => existsSync(`${requestBase.afterLoadPrefix}.a`) && existsSync(`${requestBase.afterLoadPrefix}.b`);
+    const deadline = Date.now() + 1_000;
+    while (!bothAfterLoad() && Date.now() < deadline) await Bun.sleep(10);
+    writeFileSync(requestBase.releaseGate, 'go');
+
+    const results = await Promise.all(workers);
+    expect(results.filter(result => result.ok)).toHaveLength(1);
+    expect(results.filter(result => !result.ok && result.code === 'revision_conflict')).toHaveLength(1);
+    const reloaded = new MemoryConnectionRepository({ configDir: dir }).load();
+    expect(reloaded.connections).toHaveLength(1);
+    expect(reloaded.revision).toBe(1);
+  }, 15_000);
 
   test('serialized sequential space additions never interleave', async () => {
     const repo = makeRepo();
