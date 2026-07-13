@@ -7,9 +7,7 @@
  */
 
 import { existsSync, readFileSync, readdirSync, statSync, openSync, readSync, closeSync } from 'node:fs';
-// Keep in sync with @craft-agent/core's exported session-header contract.
-// session-tools-core cannot import shared/core source without crossing tsconfig rootDir boundaries.
-const MAX_SESSION_HEADER_BYTES = 64 * 1024;
+import { MAX_SESSION_HEADER_BYTES } from '@craft-agent/core';
 import { join } from 'node:path';
 import type { SourceConfig } from './types.ts';
 
@@ -183,7 +181,11 @@ export function resolveSessionWorkingDirectory(
       if (total === MAX_SESSION_HEADER_BYTES) {
         const sentinel = Buffer.alloc(1);
         const bytesRead = readSync(fd, sentinel, 0, 1, position);
-        if (bytesRead > 0 && sentinel[0] !== 0x0a) return undefined;
+        if (bytesRead > 0 && sentinel[0] !== 0x0a) {
+          if (sentinel[0] !== 0x0d) return undefined;
+          const newline = Buffer.alloc(1);
+          if (readSync(fd, newline, 0, 1, position + 1) !== 1 || newline[0] !== 0x0a) return undefined;
+        }
       }
       const firstLine = Buffer.concat(chunks, total).toString('utf-8').replace(/\r$/, '');
       const header = JSON.parse(firstLine);

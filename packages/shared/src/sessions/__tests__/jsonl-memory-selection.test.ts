@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'bun:test';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -144,6 +144,22 @@ describe('session JSONL Memory selection persistence', () => {
     writeFileSync(sessionFile, `${JSON.stringify(header)}\n`);
     expect(readSessionHeader(sessionFile)).toBeNull();
     expect(await readSessionHeaderAsync(sessionFile)).toBeNull();
+  });
+
+  it('rejects an oversized direct write before replacing valid disk data or creating a temp file', () => {
+    const workspace = makeWorkspace();
+    const sessionFile = join(workspace, 'session.jsonl');
+    writeSessionJsonl(sessionFile, makeStoredSession({ name: 'valid A' }));
+    const original = readFileSync(sessionFile, 'utf8');
+
+    expect(() => writeSessionJsonl(sessionFile, makeStoredSession({
+      name: 'oversized B',
+      transferredSessionSummary: 'x'.repeat(MAX_SESSION_HEADER_BYTES),
+    }))).toThrow(`Session header exceeds ${MAX_SESSION_HEADER_BYTES} byte limit`);
+
+    expect(readFileSync(sessionFile, 'utf8')).toBe(original);
+    expect(readSessionJsonl(sessionFile)?.name).toBe('valid A');
+    expect(existsSync(`${sessionFile}.tmp`)).toBe(false);
   });
 
   it('reads a valid >8 KiB header through sync and async bounded newline readers', async () => {
