@@ -1,13 +1,22 @@
 /**
  * Strict validation and canonicalization for Memory connection/space contracts.
  *
- * Every validator rejects unknown fields ("strict unknown-field rejection") and
- * enforces the frozen limits. The load-path validator additionally returns a
- * fully rebuilt, canonically-ordered config so nothing from disk is trusted or
- * round-tripped verbatim.
+ * Pure module (no Node built-ins) so it stays renderer-safe. Every validator
+ * rejects unknown fields ("strict unknown-field rejection") and enforces the
+ * frozen limits. The load-path validator additionally returns a fully rebuilt,
+ * canonically-ordered config so nothing from disk is trusted or round-tripped
+ * verbatim.
+ *
+ * Canonicalization guarantees enforced here:
+ * - URLs are reduced to a safe canonical origin (scheme + host + default/explicit
+ *   port + trailing slash); userinfo, query, fragment, control chars, malformed
+ *   ports, and non-root paths are rejected.
+ * - Names are NFC-normalized and bounded by Unicode *code points* (not UTF-16
+ *   units); duplicate/reserved checks use one canonical name-key.
+ * - Stored UUIDs must be canonical (lowercase); case variants are rejected.
  */
 
-import { isUuid } from '../../utils/uuid.ts';
+import { isCanonicalUuid } from '../../utils/uuid-format.ts';
 import { MEMORY_LIMITS } from './limits.ts';
 import {
   MEMORY_CONNECTIONS_CONFIG_VERSION,
@@ -16,6 +25,7 @@ import {
   type CreateMemorySpaceInput,
   type MemoryConnectionConfig,
   type MemoryConnectionsConfig,
+  type MemoryCredentialMode,
   type MemoryEmbeddingIdentity,
   type StoredMemorySpaceConfig,
   type UpdateMemoryConnectionInput,
@@ -31,19 +41,25 @@ export interface ValidationResult<T> {
 /** Qdrant collection names / project ids: conservative, injection-safe charset. */
 const IDENTIFIER_PATTERN = /^[A-Za-z0-9._-]+$/;
 
+/** Control characters (C0 + DEL) that must never appear in a URL. */
+const CONTROL_CHAR_PATTERN = /[\u0000-\u001F\u007F]/;
+
+/** Credential modes valid on a *stored* connection (never `legacy-environment`). */
+const STORED_CREDENTIAL_MODES: readonly MemoryCredentialMode[] = ['none', 'stored-api-key'];
+
 const CONNECTION_KEYS = new Set([
-  'connectionId', 'revision', 'provider', 'url', 'collection', 'embedding',
+  'connectionId', 'revision', 'provider', 'url', 'collection', 'embedding', 'credentialMode',
   'name', 'enabled', 'proactiveRemoteSearch', 'spaces', 'createdAt', 'updatedAt',
 ]);
 const EMBEDDING_KEYS = new Set(['model', 'dimension']);
 const CONNECTION_MUTABLE_KEYS = new Set(['name', 'enabled', 'proactiveRemoteSearch']);
 const CONNECTION_IMMUTABLE_KEYS = new Set([
-  'connectionId', 'revision', 'provider', 'url', 'collection', 'embedding', 'spaces', 'createdAt', 'updatedAt',
+  'connectionId', 'revision', 'provider', 'url', 'collection', 'embedding', 'credentialMode', 'spaces', 'createdAt', 'updatedAt',
 ]);
 const SPACE_KEYS_BY_KIND: Record<string, Set<string>> = {
-  workspace: new Set(['spaceId', 'kind', 'name', 'instructions', 'createdAt', 'updatedAt', 'workspaceId']),
-  project: new Set(['spaceId', 'kind', 'name', 'instructions', 'createdAt', 'updatedAt', 'workspaceId', 'projectId']),
-  custom: new Set(['spaceId', 'kind', 'name', 'instructions', 'createdAt', 'updatedAt']),
+  workspace: new Set(['spaceId', 'kind', 'name', 'instructions', 'writable', 'createdAt', 'updatedAt', 'workspaceId']),
+  project: new Set(['spaceId', 'kind', 'name', 'instructions', 'writable', 'createdAt', 'updatedAt', 'workspaceId', 'projectId']),
+  custom: new Set(['spaceId', 'kind', 'name', 'instructions', 'writable', 'createdAt', 'updatedAt', 'workspaceId', 'projectId']),
 };
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -54,31 +70,48 @@ function extraKeys(obj: Record<string, unknown>, allowed: Set<string>): string[]
   return Object.keys(obj).filter(key => !allowed.has(key));
 }
 
+/** Count Unicode code points (not UTF-16 units) — so astral chars count as one. */
+function countCodePoints(value: string): number {
+  let count = 0;
+  // Iterating a string yields code points, correctly handling surrogate pairs.
+  for (const _ of value) count++;
+  return count;
+}
+
+/**
+ * The single canonical name-key used for every duplicate / reserved check:
+ * NFC-normalize, trim, then lowercase. `é` composed and decomposed collide.
+ */
 export function normalizeNameKey(name: string): string {
-  return name.trim().toLowerCase();
+  return name.normalize('NFC').trim().toLowerCase();
 }
 
 // ---------------------------------------------------------------------------
 // Field validators
 // ---------------------------------------------------------------------------
 
-function validateName(value: unknown, field: string, maxChars: number, errors: string[]): string | undefined {
+function validateName(value: unknown, field: string, maxCodePoints: number, errors: string[]): string | undefined {
   if (typeof value !== 'string') {
     errors.push(`${field} must be a string`);
     return undefined;
   }
-  const trimmed = value.trim();
-  if (trimmed.length === 0) {
+  // NFC-normalize before every check, then trim; store the normalized form.
+  const normalized = value.normalize('NFC').trim();
+  if (normalized.length === 0) {
     errors.push(`${field} must not be empty`);
     return undefined;
   }
-  if (trimmed.length > maxChars) {
-    errors.push(`${field} must be at most ${maxChars} characters`);
+  if (countCodePoints(normalized) > maxCodePoints) {
+    errors.push(`${field} must be at most ${maxCodePoints} characters`);
     return undefined;
   }
-  return trimmed;
+  return normalized;
 }
 
+/**
+ * Validate and canonicalize a Qdrant base URL. Returns the canonical origin
+ * (scheme + host + trailing slash), or `undefined` (with errors) on rejection.
+ */
 function validateUrl(value: unknown, errors: string[]): string | undefined {
   if (typeof value !== 'string') {
     errors.push('url must be a string');
@@ -93,6 +126,10 @@ function validateUrl(value: unknown, errors: string[]): string | undefined {
     errors.push(`url must be at most ${MEMORY_LIMITS.URL_MAX_CHARS} characters`);
     return undefined;
   }
+  if (CONTROL_CHAR_PATTERN.test(trimmed)) {
+    errors.push('url must not contain control characters');
+    return undefined;
+  }
   let parsed: URL;
   try {
     parsed = new URL(trimmed);
@@ -104,7 +141,40 @@ function validateUrl(value: unknown, errors: string[]): string | undefined {
     errors.push('url must use http or https');
     return undefined;
   }
-  return trimmed;
+  if (!parsed.hostname) {
+    errors.push('url must have a host');
+    return undefined;
+  }
+  if (parsed.username !== '' || parsed.password !== '') {
+    errors.push('url must not contain credentials (userinfo)');
+    return undefined;
+  }
+  if (parsed.search !== '') {
+    errors.push('url must not contain a query string');
+    return undefined;
+  }
+  if (parsed.hash !== '') {
+    errors.push('url must not contain a fragment');
+    return undefined;
+  }
+  if (parsed.pathname !== '' && parsed.pathname !== '/') {
+    errors.push('url must be an origin only (no path)');
+    return undefined;
+  }
+  // Canonical origin: scheme + host (default ports collapsed by `origin`),
+  // plus a single trailing slash. Equivalent origins (e.g. `:80` vs no port)
+  // normalize to the same string.
+  return `${parsed.origin}/`;
+}
+
+/**
+ * Canonicalize a Qdrant base URL to its safe origin form, or return `null` if
+ * it fails the URL contract. Exported for the environment-compat builder.
+ */
+export function canonicalizeMemoryUrl(value: unknown): string | null {
+  const errors: string[] = [];
+  const canonical = validateUrl(value, errors);
+  return canonical ?? null;
 }
 
 function validateCollection(value: unknown, errors: string[]): string | undefined {
@@ -271,40 +341,54 @@ export function validateCreateMemorySpaceInput(input: unknown): ValidationResult
     return { valid: false, errors: ['space kind must be one of: workspace, project, custom'] };
   }
   const allowed = new Set(kind === 'workspace'
-    ? ['kind', 'name', 'instructions', 'workspaceId']
+    ? ['kind', 'name', 'instructions', 'writable', 'workspaceId']
     : kind === 'project'
-      ? ['kind', 'name', 'instructions', 'workspaceId', 'projectId']
-      : ['kind', 'name', 'instructions']);
+      ? ['kind', 'name', 'instructions', 'writable', 'workspaceId', 'projectId']
+      : ['kind', 'name', 'instructions', 'writable', 'workspaceId', 'projectId']);
   const extras = extraKeys(input, allowed);
   if (extras.length > 0) errors.push(`unknown field(s): ${extras.join(', ')}`);
 
   const name = validateName(input.name, 'name', MEMORY_LIMITS.SPACE_NAME_MAX_CHARS, errors);
   const instructions = validateInstructions(input.instructions, errors);
+  const writable = input.writable === undefined ? true : validateBoolean(input.writable, 'writable', errors);
+
+  const withOptional = <T extends CreateMemorySpaceInput>(value: T): T => {
+    if (instructions !== undefined) value.instructions = instructions;
+    if (writable !== undefined) value.writable = writable;
+    return value;
+  };
 
   if (kind === 'workspace') {
     const workspaceId = validateBindingId(input.workspaceId, 'workspaceId', MEMORY_LIMITS.WORKSPACE_ID_MAX_CHARS, errors);
-    if (errors.length > 0 || name === undefined || workspaceId === undefined) return { valid: false, errors };
-    const value: CreateMemorySpaceInput = { kind, name, workspaceId };
-    if (instructions !== undefined) value.instructions = instructions;
-    return { valid: true, value, errors };
+    if (errors.length > 0 || name === undefined || workspaceId === undefined || writable === undefined) return { valid: false, errors };
+    return { valid: true, value: withOptional({ kind, name, workspaceId }), errors };
   }
   if (kind === 'project') {
     const workspaceId = validateBindingId(input.workspaceId, 'workspaceId', MEMORY_LIMITS.WORKSPACE_ID_MAX_CHARS, errors);
     const projectId = validateBindingId(input.projectId, 'projectId', MEMORY_LIMITS.PROJECT_ID_MAX_CHARS, errors);
-    if (errors.length > 0 || name === undefined || workspaceId === undefined || projectId === undefined) {
+    if (errors.length > 0 || name === undefined || workspaceId === undefined || projectId === undefined || writable === undefined) {
       return { valid: false, errors };
     }
-    const value: CreateMemorySpaceInput = { kind, name, workspaceId, projectId };
-    if (instructions !== undefined) value.instructions = instructions;
-    return { valid: true, value, errors };
+    return { valid: true, value: withOptional({ kind, name, workspaceId, projectId }), errors };
   }
-  if (errors.length > 0 || name === undefined) return { valid: false, errors };
-  const value: CreateMemorySpaceInput = { kind, name };
-  if (instructions !== undefined) value.instructions = instructions;
-  return { valid: true, value, errors };
+  // custom: optional workspaceId/projectId; projectId requires workspaceId.
+  let workspaceId: string | undefined;
+  let projectId: string | undefined;
+  if (input.workspaceId !== undefined) {
+    workspaceId = validateBindingId(input.workspaceId, 'workspaceId', MEMORY_LIMITS.WORKSPACE_ID_MAX_CHARS, errors);
+  }
+  if (input.projectId !== undefined) {
+    projectId = validateBindingId(input.projectId, 'projectId', MEMORY_LIMITS.PROJECT_ID_MAX_CHARS, errors);
+    if (input.workspaceId === undefined) errors.push('projectId requires workspaceId');
+  }
+  if (errors.length > 0 || name === undefined || writable === undefined) return { valid: false, errors };
+  const value: CreateMemorySpaceInput = { kind: 'custom', name };
+  if (workspaceId !== undefined) value.workspaceId = workspaceId;
+  if (projectId !== undefined) value.projectId = projectId;
+  return { valid: true, value: withOptional(value), errors };
 }
 
-const UPDATE_SPACE_KEYS = new Set(['name', 'instructions']);
+const UPDATE_SPACE_KEYS = new Set(['name', 'instructions', 'writable']);
 
 export function validateUpdateMemorySpaceInput(input: unknown): ValidationResult<UpdateMemorySpaceInput> {
   const errors: string[] = [];
@@ -327,6 +411,10 @@ export function validateUpdateMemorySpaceInput(input: unknown): ValidationResult
       if (instructions !== undefined) value.instructions = instructions;
     }
   }
+  if (input.writable !== undefined) {
+    const writable = validateBoolean(input.writable, 'writable', errors);
+    if (writable !== undefined) value.writable = writable;
+  }
 
   if (errors.length > 0) return { valid: false, errors };
   return { valid: true, value, errors };
@@ -335,6 +423,27 @@ export function validateUpdateMemorySpaceInput(input: unknown): ValidationResult
 // ---------------------------------------------------------------------------
 // On-disk config validation (strict, rebuilding)
 // ---------------------------------------------------------------------------
+
+export interface ValidateConfigOptions {
+  /**
+   * Deriver for a connection's read-only Global space id. When provided, any
+   * stored space whose id collides with the derived Global id is rejected.
+   * Injected by the (backend) repository so this pure module stays crypto-free.
+   */
+  deriveGlobalSpaceId?: (connectionId: string) => string;
+}
+
+function validateCredentialMode(value: unknown, errors: string[]): MemoryCredentialMode | undefined {
+  if (typeof value !== 'string' || !(STORED_CREDENTIAL_MODES as readonly string[]).includes(value)) {
+    if (value === 'legacy-environment') {
+      errors.push('credentialMode "legacy-environment" is only valid on the synthetic environment connection');
+    } else {
+      errors.push(`credentialMode must be one of: ${STORED_CREDENTIAL_MODES.join(', ')}`);
+    }
+    return undefined;
+  }
+  return value as MemoryCredentialMode;
+}
 
 function validateStoredSpace(input: unknown, errors: string[]): StoredMemorySpaceConfig | undefined {
   if (!isPlainObject(input)) {
@@ -350,9 +459,10 @@ function validateStoredSpace(input: unknown, errors: string[]): StoredMemorySpac
   if (extras.length > 0) errors.push(`space has unknown field(s): ${extras.join(', ')}`);
 
   const spaceId = input.spaceId;
-  if (!isUuid(spaceId)) errors.push('spaceId must be a UUID');
+  if (!isCanonicalUuid(spaceId)) errors.push('spaceId must be a canonical (lowercase) UUID');
   const name = validateName(input.name, 'space.name', MEMORY_LIMITS.SPACE_NAME_MAX_CHARS, errors);
   const instructions = validateInstructions(input.instructions, errors);
+  const writable = validateBoolean(input.writable, 'space.writable', errors);
   const createdAt = validateTimestamp(input.createdAt, 'space.createdAt', errors);
   const updatedAt = validateTimestamp(input.updatedAt, 'space.updatedAt', errors);
 
@@ -364,10 +474,22 @@ function validateStoredSpace(input: unknown, errors: string[]): StoredMemorySpac
   if (kind === 'project') {
     projectId = validateBindingId(input.projectId, 'space.projectId', MEMORY_LIMITS.PROJECT_ID_MAX_CHARS, errors);
   }
+  if (kind === 'custom') {
+    if (input.workspaceId !== undefined) {
+      workspaceId = validateBindingId(input.workspaceId, 'space.workspaceId', MEMORY_LIMITS.WORKSPACE_ID_MAX_CHARS, errors);
+    }
+    if (input.projectId !== undefined) {
+      projectId = validateBindingId(input.projectId, 'space.projectId', MEMORY_LIMITS.PROJECT_ID_MAX_CHARS, errors);
+      if (input.workspaceId === undefined) errors.push('space.projectId requires space.workspaceId');
+    }
+  }
 
-  if (!isUuid(spaceId) || name === undefined || createdAt === undefined || updatedAt === undefined) return undefined;
+  if (!isCanonicalUuid(spaceId) || name === undefined || writable === undefined
+    || createdAt === undefined || updatedAt === undefined) {
+    return undefined;
+  }
 
-  const base = { spaceId, name, createdAt, updatedAt, ...(instructions !== undefined ? { instructions } : {}) };
+  const base = { spaceId, name, writable, createdAt, updatedAt, ...(instructions !== undefined ? { instructions } : {}) };
   if (kind === 'workspace') {
     if (workspaceId === undefined) return undefined;
     return { kind, workspaceId, ...base };
@@ -376,10 +498,19 @@ function validateStoredSpace(input: unknown, errors: string[]): StoredMemorySpac
     if (workspaceId === undefined || projectId === undefined) return undefined;
     return { kind, workspaceId, projectId, ...base };
   }
-  return { kind, ...base };
+  return {
+    kind,
+    ...(workspaceId !== undefined ? { workspaceId } : {}),
+    ...(projectId !== undefined ? { projectId } : {}),
+    ...base,
+  };
 }
 
-function validateStoredConnection(input: unknown, errors: string[]): MemoryConnectionConfig | undefined {
+function validateStoredConnection(
+  input: unknown,
+  errors: string[],
+  options: ValidateConfigOptions,
+): MemoryConnectionConfig | undefined {
   if (!isPlainObject(input)) {
     errors.push('connection must be an object');
     return undefined;
@@ -388,7 +519,7 @@ function validateStoredConnection(input: unknown, errors: string[]): MemoryConne
   if (extras.length > 0) errors.push(`connection has unknown field(s): ${extras.join(', ')}`);
 
   const connectionId = input.connectionId;
-  if (!isUuid(connectionId)) errors.push('connectionId must be a UUID');
+  if (!isCanonicalUuid(connectionId)) errors.push('connectionId must be a canonical (lowercase) UUID');
 
   const revision = input.revision;
   if (typeof revision !== 'number' || !Number.isInteger(revision) || revision < 1) {
@@ -400,11 +531,16 @@ function validateStoredConnection(input: unknown, errors: string[]): MemoryConne
   const url = validateUrl(input.url, errors);
   const collection = validateCollection(input.collection, errors);
   const embedding = validateEmbedding(input.embedding, errors);
+  const credentialMode = validateCredentialMode(input.credentialMode, errors);
   const name = validateName(input.name, 'name', MEMORY_LIMITS.CONNECTION_NAME_MAX_CHARS, errors);
   const enabled = validateBoolean(input.enabled, 'enabled', errors);
   const proactiveRemoteSearch = validateBoolean(input.proactiveRemoteSearch, 'proactiveRemoteSearch', errors);
   const createdAt = validateTimestamp(input.createdAt, 'createdAt', errors);
   const updatedAt = validateTimestamp(input.updatedAt, 'updatedAt', errors);
+
+  const reservedGlobalId = (isCanonicalUuid(connectionId) && options.deriveGlobalSpaceId)
+    ? options.deriveGlobalSpaceId(connectionId)
+    : undefined;
 
   const spacesRaw = input.spaces;
   const spaces: StoredMemorySpaceConfig[] = [];
@@ -419,6 +555,9 @@ function validateStoredConnection(input: unknown, errors: string[]): MemoryConne
     for (const raw of spacesRaw) {
       const space = validateStoredSpace(raw, errors);
       if (!space) continue;
+      if (reservedGlobalId !== undefined && space.spaceId === reservedGlobalId) {
+        errors.push(`stored spaceId collides with the derived Global space id: ${space.spaceId}`);
+      }
       if (seenSpaceIds.has(space.spaceId)) errors.push(`duplicate spaceId: ${space.spaceId}`);
       seenSpaceIds.add(space.spaceId);
       const nameKey = normalizeNameKey(space.name);
@@ -428,8 +567,8 @@ function validateStoredConnection(input: unknown, errors: string[]): MemoryConne
     }
   }
 
-  if (!isUuid(connectionId) || url === undefined || collection === undefined || embedding === undefined
-    || name === undefined || enabled === undefined || proactiveRemoteSearch === undefined
+  if (!isCanonicalUuid(connectionId) || url === undefined || collection === undefined || embedding === undefined
+    || credentialMode === undefined || name === undefined || enabled === undefined || proactiveRemoteSearch === undefined
     || createdAt === undefined || updatedAt === undefined
     || typeof revision !== 'number' || !Number.isInteger(revision) || revision < 1
     || input.provider !== 'qdrant') {
@@ -443,6 +582,7 @@ function validateStoredConnection(input: unknown, errors: string[]): MemoryConne
     url,
     collection,
     embedding,
+    credentialMode,
     name,
     enabled,
     proactiveRemoteSearch,
@@ -470,19 +610,35 @@ export function sortConnections(connections: MemoryConnectionConfig[]): MemoryCo
 /**
  * Strictly validate an on-disk connections config and rebuild it into a
  * canonical, deterministically-ordered document. On any error, returns
- * `valid: false` with an empty default config (caller recovers from backup).
+ * `valid: false`; callers (the repository) must NOT silently reset — they treat
+ * a present-but-invalid config as an explicit error.
  */
-export function validateMemoryConnectionsConfig(input: unknown): ValidationResult<MemoryConnectionsConfig> & { config: MemoryConnectionsConfig } {
+export function validateMemoryConnectionsConfig(
+  input: unknown,
+  options: ValidateConfigOptions = {},
+): ValidationResult<MemoryConnectionsConfig> & { config: MemoryConnectionsConfig } {
   const errors: string[] = [];
-  const empty: MemoryConnectionsConfig = { version: MEMORY_CONNECTIONS_CONFIG_VERSION, connections: [] };
+  const invalidPlaceholder: MemoryConnectionsConfig = {
+    version: MEMORY_CONNECTIONS_CONFIG_VERSION,
+    revision: 0,
+    installationId: '',
+    connections: [],
+  };
 
   if (!isPlainObject(input)) {
-    return { valid: false, errors: ['config must be an object'], config: empty };
+    return { valid: false, errors: ['config must be an object'], config: invalidPlaceholder };
   }
-  const extras = extraKeys(input, new Set(['version', 'connections']));
+  const extras = extraKeys(input, new Set(['version', 'revision', 'installationId', 'connections']));
   if (extras.length > 0) errors.push(`config has unknown field(s): ${extras.join(', ')}`);
   if (input.version !== MEMORY_CONNECTIONS_CONFIG_VERSION) {
     errors.push(`config version must be ${MEMORY_CONNECTIONS_CONFIG_VERSION}`);
+  }
+  const rootRevision = input.revision;
+  if (typeof rootRevision !== 'number' || !Number.isInteger(rootRevision) || rootRevision < 0) {
+    errors.push('config revision must be an integer >= 0');
+  }
+  if (!isCanonicalUuid(input.installationId)) {
+    errors.push('config installationId must be a canonical (lowercase) UUID');
   }
 
   const connectionsRaw = input.connections;
@@ -496,7 +652,7 @@ export function validateMemoryConnectionsConfig(input: unknown): ValidationResul
     const seenIds = new Set<string>();
     const seenNames = new Set<string>();
     for (const raw of connectionsRaw) {
-      const connection = validateStoredConnection(raw, errors);
+      const connection = validateStoredConnection(raw, errors, options);
       if (!connection) continue;
       if (seenIds.has(connection.connectionId)) errors.push(`duplicate connectionId: ${connection.connectionId}`);
       seenIds.add(connection.connectionId);
@@ -508,12 +664,13 @@ export function validateMemoryConnectionsConfig(input: unknown): ValidationResul
   }
 
   if (errors.length > 0) {
-    return { valid: false, errors, config: empty };
+    return { valid: false, errors, config: invalidPlaceholder };
   }
-  return {
-    valid: true,
-    errors,
-    config: { version: MEMORY_CONNECTIONS_CONFIG_VERSION, connections: sortConnections(connections) },
-    value: { version: MEMORY_CONNECTIONS_CONFIG_VERSION, connections: sortConnections(connections) },
+  const config: MemoryConnectionsConfig = {
+    version: MEMORY_CONNECTIONS_CONFIG_VERSION,
+    revision: rootRevision as number,
+    installationId: input.installationId as string,
+    connections: sortConnections(connections),
   };
+  return { valid: true, errors, config, value: config };
 }

@@ -15,7 +15,7 @@
  * Note: Using "::" as delimiter to avoid conflicts with "/" in URLs or paths.
  */
 
-import { isUuid } from '../utils/uuid.ts';
+import { isCanonicalUuid, toCanonicalUuid } from '../utils/uuid-format.ts';
 
 /** Types of credentials we store */
 export type CredentialType =
@@ -200,12 +200,14 @@ export function credentialIdToAccount(id: CredentialId): string {
 
   // Memory connection-scoped format:
   // memory_api_key::{connectionId}
-  // The connection id is a UUID, so it never contains the "::" delimiter.
+  // The connection id is a UUID (canonicalized to lowercase), so it never
+  // contains the "::" delimiter and case variants map to the same account.
   if (isMemoryCredential(id.type)) {
-    if (!id.memoryConnectionId || !isUuid(id.memoryConnectionId)) {
+    const canonical = id.memoryConnectionId ? toCanonicalUuid(id.memoryConnectionId) : null;
+    if (!canonical) {
       throw new Error('memory_api_key credential requires a valid UUID memoryConnectionId');
     }
-    parts.push(id.memoryConnectionId);
+    parts.push(canonical);
     return parts.join(CREDENTIAL_DELIMITER);
   }
 
@@ -283,8 +285,10 @@ export function accountToCredentialId(account: string): CredentialId | null {
   }
 
   // Memory connection-scoped format:
-  // memory_api_key::{connectionId} — second segment must be a UUID.
-  if (isMemoryCredential(type) && parts.length === 2 && isUuid(parts[1])) {
+  // memory_api_key::{connectionId} — second segment must be a canonical
+  // (lowercase) UUID; case variants are rejected so they cannot masquerade as a
+  // distinct account.
+  if (isMemoryCredential(type) && parts.length === 2 && isCanonicalUuid(parts[1])) {
     return { type, memoryConnectionId: parts[1] };
   }
 

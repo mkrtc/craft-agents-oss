@@ -15,6 +15,15 @@ describe('memory_api_key credential conversion', () => {
     expect(credentialIdToAccount({ type: 'memory_api_key', memoryConnectionId: UUID })).toBe(`memory_api_key::${UUID}`);
   });
 
+  test('credentialIdToAccount canonicalizes a case-variant UUID to lowercase', () => {
+    const upper = UUID.toUpperCase();
+    expect(credentialIdToAccount({ type: 'memory_api_key', memoryConnectionId: upper })).toBe(`memory_api_key::${UUID}`);
+  });
+
+  test('accountToCredentialId rejects a non-canonical (uppercase) account', () => {
+    expect(accountToCredentialId(`memory_api_key::${UUID.toUpperCase()}`)).toBeNull();
+  });
+
   test('the account has exactly two "::"-delimited segments (UUID carries no delimiter)', () => {
     const account = credentialIdToAccount({ type: 'memory_api_key', memoryConnectionId: UUID });
     expect(account.split('::')).toHaveLength(2);
@@ -93,11 +102,21 @@ describe('CredentialManager memory helpers (round-trip)', () => {
     expect(await manager.getMemoryApiKey(OTHER_UUID)).toBe('sk-memory-def');
   });
 
-  test('rejects a non-UUID connection id and empty key', async () => {
+  test('rejects a non-UUID connection id and empty/whitespace-only key', async () => {
     const { manager } = fakeManager();
     await expect(manager.setMemoryApiKey('not-a-uuid', 'x')).rejects.toThrow();
     await expect(manager.getMemoryApiKey('not-a-uuid')).rejects.toThrow();
     await expect(manager.deleteMemoryApiKey('not-a-uuid')).rejects.toThrow();
     await expect(manager.setMemoryApiKey(UUID, '')).rejects.toThrow();
+    await expect(manager.setMemoryApiKey(UUID, '   ')).rejects.toThrow();
+    await expect(manager.setMemoryApiKey(UUID, '\t\n')).rejects.toThrow();
+  });
+
+  test('case-variant connection ids resolve to the same canonical account', async () => {
+    const { manager } = fakeManager();
+    await manager.setMemoryApiKey(UUID.toUpperCase(), 'sk-canon');
+    expect(await manager.getMemoryApiKey(UUID)).toBe('sk-canon');
+    const ids = await manager.listMemoryApiKeyConnectionIds();
+    expect(ids).toEqual([UUID]); // canonical lowercase, de-duplicated
   });
 });

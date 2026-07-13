@@ -8,9 +8,11 @@
  */
 export const MEMORY_LIMITS = {
   /** Maximum number of Memory connections stored on disk. */
-  MAX_CONNECTIONS: 50,
+  MAX_CONNECTIONS: 20,
   /** Maximum number of user-created spaces per connection (excludes the derived Global space). */
-  MAX_SPACES_PER_CONNECTION: 200,
+  MAX_SPACES_PER_CONNECTION: 100,
+  /** Maximum number of manual space refs a single session may enable (read set). */
+  MAX_SESSION_SPACE_REFS: 50,
   /** Maximum length of a connection display name (after trimming). */
   CONNECTION_NAME_MAX_CHARS: 100,
   /** Maximum length of a space display name (after trimming). */

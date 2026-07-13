@@ -466,4 +466,10 @@ export interface SessionMetadata {
   taskNodeCount?: number;
   /** Tasks Conductor: generate-time draft orchestrator. Hidden from the board until adopted (promoted) by createTask. */
   taskDraft?: boolean;
+  /** Memory: spaces this session reads from (refs into memory connections). */
+  enabledMemorySpaceRefs?: MemorySpaceRef[];
+  /** Memory: the single space new memories from this session are written to. */
+  memoryWriteTargetRef?: MemorySpaceRef;
+  /** Memory: how the space selection was decided ('explicit' = user picked). */
+  memorySelectionMode?: MemorySelectionMode;
 }

@@ -1,6 +1,9 @@
 /**
- * Secret-free renderer/server DTOs for Memory connections and spaces, plus the
- * mappers that build them from backend config.
+ * Secret-free renderer/server DTOs for Memory connections and spaces.
+ *
+ * Pure module (no Node built-ins, no repository import) so the DTO *types* are
+ * renderer-safe. The crypto-dependent detail mapper (which derives the Global
+ * space id) lives in the backend-only `./mappers.ts`.
  *
  * DTOs never carry API keys. Presence of a key is surfaced as `hasApiKey`
  * (populated by the server from the credential store). Create/patch request
@@ -8,10 +11,9 @@
  * `connectionId`/`spaceId`.
  */
 
-import { deriveGlobalSpace } from './repository.ts';
-import { sortStoredSpaces } from './validation.ts';
 import type {
   MemoryConnectionConfig,
+  MemoryCredentialMode,
   MemoryEmbeddingIdentity,
   MemoryProvider,
   MemorySpaceConfig,
@@ -29,7 +31,9 @@ export interface MemorySpaceDto {
   kind: MemorySpaceKind;
   workspaceId?: string;
   projectId?: string;
-  /** True for the derived Global space (cannot be edited/deleted). */
+  /** Whether new memories may be written here. Absent for the Global space. */
+  writable?: boolean;
+  /** True for the derived Global space (cannot be edited/deleted/written). */
   readOnly: boolean;
   createdAt: number;
   updatedAt: number;
@@ -39,9 +43,11 @@ export interface MemoryConnectionSummaryDto {
   connectionId: string;
   name: string;
   provider: MemoryProvider;
+  /** Canonical, safe origin URL (no userinfo/query/fragment/path). */
   url: string;
   collection: string;
   embedding: MemoryEmbeddingIdentity;
+  credentialMode: MemoryCredentialMode;
   enabled: boolean;
   proactiveRemoteSearch: boolean;
   revision: number;
@@ -59,11 +65,18 @@ export interface MemoryConnectionDetailDto extends MemoryConnectionSummaryDto {
   spaces: MemorySpaceDto[];
 }
 
+/** Snapshot of the connection list plus the root revision (for future events/lists). */
+export interface MemoryConnectionsSnapshotDto {
+  revision: number;
+  connections: MemoryConnectionSummaryDto[];
+}
+
 // ---------------------------------------------------------------------------
 // Write request DTOs (ids generated server-side; no secrets)
 // ---------------------------------------------------------------------------
 
 export interface CreateMemoryConnectionRequestDto {
+  expectedRootRevision: number;
   name: string;
   url: string;
   collection: string;
@@ -83,13 +96,13 @@ export interface PatchMemoryConnectionRequestDto {
 
 export interface DeleteMemoryConnectionRequestDto {
   connectionId: string;
-  expectedRevision: number;
+  expectedRootRevision: number;
 }
 
 export type CreateMemorySpaceRequestDto =
-  | { connectionId: string; expectedRevision: number; kind: 'workspace'; name: string; instructions?: string; workspaceId: string }
-  | { connectionId: string; expectedRevision: number; kind: 'project'; name: string; instructions?: string; workspaceId: string; projectId: string }
-  | { connectionId: string; expectedRevision: number; kind: 'custom'; name: string; instructions?: string };
+  | { connectionId: string; expectedRevision: number; kind: 'workspace'; name: string; instructions?: string; writable?: boolean; workspaceId: string }
+  | { connectionId: string; expectedRevision: number; kind: 'project'; name: string; instructions?: string; writable?: boolean; workspaceId: string; projectId: string }
+  | { connectionId: string; expectedRevision: number; kind: 'custom'; name: string; instructions?: string; writable?: boolean; workspaceId?: string; projectId?: string };
 
 export interface PatchMemorySpaceRequestDto {
   connectionId: string;
@@ -98,6 +111,7 @@ export interface PatchMemorySpaceRequestDto {
   name?: string;
   /** `null` clears instructions; omit to leave unchanged. */
   instructions?: string | null;
+  writable?: boolean;
 }
 
 export interface DeleteMemorySpaceRequestDto {
@@ -107,7 +121,7 @@ export interface DeleteMemorySpaceRequestDto {
 }
 
 // ---------------------------------------------------------------------------
-// Mappers
+// Pure mappers (no crypto; the detail mapper lives in ./mappers.ts)
 // ---------------------------------------------------------------------------
 
 /** Extra, server-known facts that aren't part of the on-disk config. */
@@ -128,10 +142,15 @@ export function toMemorySpaceDto(space: MemorySpaceConfig): MemorySpaceDto {
     updatedAt: space.updatedAt,
   };
   if (space.instructions !== undefined) dto.instructions = space.instructions;
+  if (space.kind !== 'global') dto.writable = space.writable;
   if (space.kind === 'workspace') dto.workspaceId = space.workspaceId;
   if (space.kind === 'project') {
     dto.workspaceId = space.workspaceId;
     dto.projectId = space.projectId;
+  }
+  if (space.kind === 'custom') {
+    if (space.workspaceId !== undefined) dto.workspaceId = space.workspaceId;
+    if (space.projectId !== undefined) dto.projectId = space.projectId;
   }
   return dto;
 }
@@ -147,6 +166,7 @@ export function toMemoryConnectionSummaryDto(
     url: connection.url,
     collection: connection.collection,
     embedding: { model: connection.embedding.model, dimension: connection.embedding.dimension },
+    credentialMode: connection.credentialMode,
     enabled: connection.enabled,
     proactiveRemoteSearch: connection.proactiveRemoteSearch,
     revision: connection.revision,
@@ -155,16 +175,5 @@ export function toMemoryConnectionSummaryDto(
     spaceCount: connection.spaces.length + 1,
     hasApiKey: context.hasApiKey ?? false,
     isEnvironment: context.isEnvironment ?? false,
-  };
-}
-
-export function toMemoryConnectionDetailDto(
-  connection: MemoryConnectionConfig,
-  context: MemoryConnectionDtoContext = {},
-): MemoryConnectionDetailDto {
-  const spaces: MemorySpaceConfig[] = [deriveGlobalSpace(connection), ...sortStoredSpaces(connection.spaces)];
-  return {
-    ...toMemoryConnectionSummaryDto(connection, context),
-    spaces: spaces.map(toMemorySpaceDto),
   };
 }

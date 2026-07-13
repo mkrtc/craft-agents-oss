@@ -1,40 +1,66 @@
 /**
- * UUID helpers shared across the backend.
+ * UUID helpers (backend-only).
  *
- * `UUID_PATTERN` / `isUuid` are pure (regex only) so they can be used at any
- * validation boundary. `randomUuid` and `deterministicUuid` require Node's
- * `crypto` module and are therefore backend-only.
+ * The pure *format* helpers (`UUID_PATTERN`, `isUuid`, `isCanonicalUuid`,
+ * `toCanonicalUuid`, …) live in `./uuid-format.ts` and are re-exported here for
+ * convenience. UUID *generation* below requires Node's `crypto` module and is
+ * therefore backend-only — importing this file pulls `crypto` into the graph.
  */
 
 import { createHash, randomUUID } from 'crypto';
 
-/**
- * Canonical RFC-4122 textual UUID (any version/variant), case-insensitive.
- * Accepts both random (v4, from {@link randomUuid}) and derived
- * (v5-shaped, from {@link deterministicUuid}) identifiers.
- */
-export const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+export {
+  CANONICAL_UUID_PATTERN,
+  UUID_PATTERN,
+  isUuid,
+  isCanonicalUuid,
+  toCanonicalUuid,
+  equalUuid,
+} from './uuid-format.ts';
 
-/** True when `value` is a textual UUID. Never throws. */
-export function isUuid(value: unknown): value is string {
-  return typeof value === 'string' && UUID_PATTERN.test(value);
-}
+import { isUuid } from './uuid-format.ts';
 
-/** Generate a random (v4) UUID. */
+/** Generate a random (v4) UUID in canonical lowercase form. */
 export function randomUuid(): string {
+  // Node's randomUUID() already returns canonical lowercase.
   return randomUUID();
 }
 
+function uuidToBytes(uuid: string): Buffer {
+  const hex = uuid.replace(/-/g, '');
+  const bytes = Buffer.alloc(16);
+  for (let i = 0; i < 16; i++) {
+    bytes[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+  }
+  return bytes;
+}
+
+function bytesToUuid(bytes: Buffer): string {
+  const hex = bytes.subarray(0, 16).toString('hex');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`;
+}
+
 /**
- * Derive a stable, deterministic UUID from the given parts.
+ * Standards-correct RFC-4122 **version 5** (name-based, SHA-1) UUID.
  *
- * The same parts always produce the same UUID, which lets us mint stable
- * identifiers for derived/synthetic entities (e.g. the environment-compat
- * memory connection, or a connection's derived Global space) without
- * persisting them. The output is a valid RFC-4122 v5-shaped UUID.
+ * `namespace` must itself be a UUID; `name` is hashed together with the
+ * namespace's 16 raw bytes exactly as the RFC prescribes. The result is a
+ * stable, canonical lowercase UUID with the version nibble set to 5 and the
+ * RFC-4122 variant bits set. Deterministic: same (name, namespace) → same UUID.
+ *
+ * Use this for every derived/synthetic identifier (environment-compat
+ * connection id, a connection's derived Global space id) so the identifiers are
+ * real, verifiable v5 UUIDs rather than an ad-hoc hash shaped to look like one.
  */
-export function deterministicUuid(parts: readonly string[]): string {
-  const hex = createHash('sha256').update(parts.join('\0')).digest('hex');
-  // Force version nibble to 5 and the variant nibble to 8 (RFC-4122).
-  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-5${hex.slice(13, 16)}-8${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
+export function uuidV5(name: string, namespace: string): string {
+  if (!isUuid(namespace)) {
+    throw new Error(`uuidV5 namespace must be a UUID, got: ${namespace}`);
+  }
+  const nsBytes = uuidToBytes(namespace);
+  const nameBytes = Buffer.from(name, 'utf8');
+  const hash = createHash('sha1').update(Buffer.concat([nsBytes, nameBytes])).digest();
+  const bytes = Buffer.from(hash.subarray(0, 16));
+  bytes[6] = (bytes[6]! & 0x0f) | 0x50; // version 5
+  bytes[8] = (bytes[8]! & 0x3f) | 0x80; // RFC-4122 variant
+  return bytesToUuid(bytes);
 }
