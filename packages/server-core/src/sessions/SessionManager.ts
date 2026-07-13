@@ -65,6 +65,7 @@ import {
   sessionPersistenceQueue,
   getHeaderMetadataSignature,
   writeSessionJsonl,
+  preflightSessionJsonl,
   normalizeSessionHeaderMemorySelection,
   serializeSession,
   validateBundle,
@@ -1326,6 +1327,8 @@ export class SessionManager implements ISessionManager {
   private deltaFlushTimers: Map<string, NodeJS.Timeout> = new Map()
   // Config watchers for live updates (sources, etc.) - one per workspace
   private configWatchers: Map<string, ConfigWatcher> = new Map()
+  // Idle write-guard expirations for deferred external session headers.
+  private externalMetadataGuardTimers: Map<string, ReturnType<typeof setTimeout>> = new Map()
   // Automation systems for workspace event automations - one per workspace (includes scheduler, diffing, and handlers)
   private automationSystems: Map<string, AutomationSystem> = new Map()
   // Pending credential request resolvers (keyed by requestId)
@@ -1962,8 +1965,12 @@ export class SessionManager implements ISessionManager {
           //    — fs.watch fires during atomic write (unlink+rename) and can read stale data
           const hasWriteGuard = managed._metadataWriteGuardUntil && Date.now() < managed._metadataWriteGuardUntil
           if (managed.isProcessing || hasWriteGuard) {
+            // Always retain the latest header. Idle guard deferrals receive a
+            // one-shot expiry timer; processing deferrals remain owned by
+            // onProcessingStopped (the timer also checks processing state).
             managed.pendingExternalMetadata = header
             if (hasWriteGuard) {
+              this.scheduleGuardedExternalMetadata(managed)
               sessionLog.info(`Deferred external metadata update for session ${sessionId} (recent programmatic write)`)
             } else {
               sessionLog.info(`Deferred external metadata update for session ${sessionId} (processing active)`)
@@ -2583,6 +2590,36 @@ export class SessionManager implements ISessionManager {
   // atomic write completes. See onSessionMetadataChange.
   private setMetadataWriteGuard(managed: ManagedSession): void {
     managed._metadataWriteGuardUntil = Date.now() + METADATA_WRITE_GUARD_MS
+    if (managed.pendingExternalMetadata && !managed.isProcessing) {
+      this.scheduleGuardedExternalMetadata(managed)
+    }
+  }
+
+  private clearExternalMetadataGuardTimer(sessionId: string): void {
+    const timer = this.externalMetadataGuardTimers.get(sessionId)
+    if (timer) clearTimeout(timer)
+    this.externalMetadataGuardTimers.delete(sessionId)
+  }
+
+  private scheduleGuardedExternalMetadata(managed: ManagedSession): void {
+    const sessionId = managed.id
+    this.clearExternalMetadataGuardTimer(sessionId)
+    const guardUntil = managed._metadataWriteGuardUntil ?? Date.now()
+    const delay = Math.max(0, guardUntil - Date.now()) + 1
+    const timer = setTimeout(() => {
+      this.externalMetadataGuardTimers.delete(sessionId)
+      const current = this.sessions.get(sessionId)
+      if (current !== managed) return
+      // Processing-stop owns application in this case; keep the latest header.
+      if (current.isProcessing) return
+      const pendingHeader = current.pendingExternalMetadata
+      current.pendingExternalMetadata = undefined
+      current._metadataWriteGuardUntil = undefined
+      if (!pendingHeader) return
+      sessionLog.info(`Applying deferred external metadata for session ${sessionId} after write guard expiry`)
+      this.applyExternalSessionMetadata(current, pendingHeader)
+    }, delay)
+    this.externalMetadataGuardTimers.set(sessionId, timer)
   }
 
   /**
@@ -3149,7 +3186,10 @@ export class SessionManager implements ISessionManager {
     // announced to the renderer (see notifySessionCreated). Callers that register the session
     // themselves — the `sessions:create` RPC adds it from the return value — pass
     // `{ emitCreatedEvent: false }` to avoid a redundant hydrate.
-    internal?: { emitCreatedEvent?: boolean },
+    internal?: {
+      emitCreatedEvent?: boolean
+      initialTransferredSessionSummary?: string
+    },
   ): Promise<Session> {
     const workspace = getWorkspaceByNameOrId(workspaceId)
     if (!workspace) {
@@ -3463,6 +3503,8 @@ export class SessionManager implements ISessionManager {
       // The workspace-default fallback stays dynamic — freezing it into the header would
       // pin every ordinary session to the defaults as of its creation time.
       enabledSourceSlugs: options?.enabledSourceSlugs,
+      transferredSessionSummary: internal?.initialTransferredSessionSummary,
+      transferredSessionSummaryApplied: internal?.initialTransferredSessionSummary ? false : undefined,
     })
 
     // Branch: copy messages from source session up to and including the branch point
@@ -3592,6 +3634,7 @@ export class SessionManager implements ISessionManager {
                 m.autoRetryTimer = undefined
               }
               if (m) m.autoRetryPending = undefined
+              this.clearExternalMetadataGuardTimer(id)
               this.sessions.delete(id)
             },
             deleteStoredSession,
@@ -6267,6 +6310,8 @@ export class SessionManager implements ISessionManager {
       managed.autoRetryTimer = undefined
     }
     managed.autoRetryPending = undefined
+    this.clearExternalMetadataGuardTimer(sessionId)
+    managed.pendingExternalMetadata = undefined
 
     this.sessions.delete(sessionId)
 
@@ -7309,6 +7354,7 @@ export class SessionManager implements ISessionManager {
 
     // 4. Apply deferred external metadata updates captured while processing.
     if (managed.pendingExternalMetadata) {
+      this.clearExternalMetadataGuardTimer(sessionId)
       const pendingHeader = managed.pendingExternalMetadata
       managed.pendingExternalMetadata = undefined
       sessionLog.info(`Applying deferred external metadata for session ${sessionId} after processing stop`)
@@ -9357,22 +9403,17 @@ export class SessionManager implements ISessionManager {
       throw new Error('Invalid remote session transfer payload')
     }
 
-    const session = await this.createSession(workspaceId, {
-      name: payload.name,
-      permissionMode: payload.permissionMode,
-      sessionStatus: payload.sessionStatus,
-      labels: payload.labels,
-    })
-
-    const managed = this.sessions.get(session.id)
-    if (!managed) {
-      throw new Error(`Transferred session ${session.id} was not created`)
-    }
-
-    managed.transferredSessionSummary = payload.summary.trim()
-    managed.transferredSessionSummaryApplied = false
-    this.persistSession(managed)
-    await sessionPersistenceQueue.flush(session.id)
+    const summary = payload.summary.trim()
+    const session = await this.createSession(
+      workspaceId,
+      {
+        name: payload.name,
+        permissionMode: payload.permissionMode,
+        sessionStatus: payload.sessionStatus,
+        labels: payload.labels,
+      },
+      { initialTransferredSessionSummary: summary },
+    )
 
     return { sessionId: session.id }
   }
@@ -9458,10 +9499,7 @@ export class SessionManager implements ISessionManager {
       throw new Error(`Session ${sessionId} already exists in target workspace`)
     }
 
-    // Create session directory with all subdirectories
-    const sessionDir = ensureSessionDir(workspaceRootPath, sessionId)
-
-    // Build the stored session from bundle data
+    // Build the complete target session before any filesystem side effect.
     const header = normalizeSessionHeaderMemorySelection(bundle.session.header)
     const storedSession: StoredSession = {
       id: sessionId,
@@ -9569,10 +9607,15 @@ export class SessionManager implements ISessionManager {
       sessionLog.info('[import] No LLM connection in bundle — will use default')
     }
 
-    // Write JSONL file (after compatibility checks so remapped values are persisted)
+    // Preflight the FINAL reconstructed target header before creating the
+    // session directory, restoring files, registering runtime state, or events.
     const sessionFile = getSessionFilePath(workspaceRootPath, sessionId)
+    preflightSessionJsonl(sessionFile, storedSession)
+    const sessionDir = ensureSessionDir(workspaceRootPath, sessionId)
     sessionLog.info(`[import] Writing JSONL: ${sessionFile} (llmConnection=${storedSession.llmConnection ?? 'default'}, messages=${storedSession.messages.length})`)
     writeSessionJsonl(sessionFile, storedSession)
+    const persistedHeader = readSessionHeader(sessionFile)
+    if (persistedHeader) sessionPersistenceQueue.initializeBaseline(sessionId, persistedHeader)
 
     // Write all bundle files (attachments, plans, data, downloads, etc.)
     // Uses restoreFiles() for path traversal, size, and base64 validation.
@@ -9643,6 +9686,10 @@ export class SessionManager implements ISessionManager {
       sessionLog.info(`Stopped config watcher for ${path}`)
     }
     this.configWatchers.clear()
+
+    for (const timer of this.externalMetadataGuardTimers.values()) clearTimeout(timer)
+    this.externalMetadataGuardTimers.clear()
+    for (const managed of this.sessions.values()) managed.pendingExternalMetadata = undefined
 
     // Dispose all AutomationSystems (includes scheduler, handlers, and event loggers)
     for (const [workspacePath, automationSystem] of this.automationSystems) {

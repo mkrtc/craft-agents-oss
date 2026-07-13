@@ -190,6 +190,20 @@ describe('cold-session metadata persistence', () => {
     }
   })
 
+  it('persists the first message mutation after a cold session is loaded', async () => {
+    const sessionId = 'cold-message'
+    seedColdSession(sessionId, { messages: [makeUserMessage('m1', 'existing')] })
+    await sm.getSession(sessionId)
+    const managed = (sm as unknown as {
+      sessions: Map<string, { messages: Array<Record<string, unknown>> }>
+    }).sessions.get(sessionId)!
+    managed.messages.push({ id: 'm2', role: 'user', content: 'new', timestamp: Date.now() })
+    ;(sm as unknown as { persistSession: (m: unknown) => void }).persistSession(managed)
+    await sm.flushSession(sessionId)
+
+    expect(readDiskMessageIds(sessionId)).toEqual(['m1', 'm2'])
+  })
+
   it('flushSession on a cold session returns only after the disk write lands', async () => {
     const sessionId = 'cold-flush-ordering'
     seedColdSession(sessionId, { sessionStatus: 'todo' })

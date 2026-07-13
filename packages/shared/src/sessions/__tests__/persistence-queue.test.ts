@@ -1,6 +1,6 @@
 import { afterEach, describe, it, expect } from 'bun:test'
 import { existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs'
-import { open as fsOpen, rename as fsRename, unlink as fsUnlink } from 'node:fs/promises'
+import { copyFile as fsCopyFile, open as fsOpen, rename as fsRename, unlink as fsUnlink } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { SessionHeader, StoredSession } from '../types'
@@ -67,6 +67,8 @@ describe('session persistence header conflict helpers', () => {
       permissionMode: 'allow-all',
       hasUnread: true,
       lastReadMessageId: 'm-local',
+      projectId: 'project-local',
+      kanbanColumn: 'todo',
       messageCount: 99,
       lastUsedAt: 500,
     })
@@ -81,6 +83,8 @@ describe('session persistence header conflict helpers', () => {
       permissionMode: 'safe',
       hasUnread: false,
       lastReadMessageId: 'm-disk',
+      projectId: 'project-disk',
+      kanbanColumn: 'done',
       messageCount: 1,
       lastUsedAt: 50,
     })
@@ -96,10 +100,14 @@ describe('session persistence header conflict helpers', () => {
     expect(merged.permissionMode).toBe('safe')
     expect(merged.hasUnread).toBe(false)
     expect(merged.lastReadMessageId).toBe('m-disk')
+    expect(merged.projectId).toBe('project-disk')
+    expect(merged.kanbanColumn).toBe('done')
 
     // Local computed/runtime persistence fields remain local
     expect(merged.messageCount).toBe(99)
     expect(merged.lastUsedAt).toBe(500)
+    merged.labels!.push('mutated')
+    expect(disk.labels).toEqual(['disk'])
   })
 
   it('merge preserves external Memory selection while keeping local computed fields', () => {
@@ -130,6 +138,26 @@ describe('session persistence header conflict helpers', () => {
     merged.memoryWriteTargetRef!.spaceId = 'dddddddd-e89b-42d3-8456-426614174000'
     expect(disk.enabledMemorySpaceRefs).toEqual([diskRef])
     expect(disk.memoryWriteTargetRef).toEqual(diskRef)
+  })
+
+  it('does not replace an established baseline while a local mutation is pending', () => {
+    const queue = new SessionPersistenceQueue(60_000)
+    queue.initializeBaseline('active-baseline', makeHeader({ name: 'A' }))
+    queue.enqueue({
+      id: 'active-baseline',
+      workspaceRootPath: '/tmp/not-written',
+      name: 'B',
+      createdAt: 1,
+      lastUsedAt: 1,
+      messages: [],
+      tokenUsage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, contextTokens: 0, costUsd: 0 },
+    })
+    queue.initializeBaseline('active-baseline', makeHeader({ name: 'external C' }))
+
+    expect(queue.getLastWrittenSignature('active-baseline')).toBe(
+      getHeaderMetadataSignature(makeHeader({ name: 'A' })),
+    )
+    queue.cancel('active-baseline')
   })
 
   it('queued writes preserve a valid external Memory selection change', async () => {
@@ -262,6 +290,69 @@ describe('session persistence header conflict helpers', () => {
     expect(existsSync(`${filePath}.tmp`)).toBe(false)
     expect(queue.hasPending(sessionId)).toBe(true)
     queue.cancel(sessionId)
+  })
+
+  it('restores old A on queued Windows fallback rename failure, retains pending B, then retries', async () => {
+    const workspaceRootPath = mkdtempSync(join(tmpdir(), 'session-memory-rename-fault-'))
+    tempDirs.push(workspaceRootPath)
+    const sessionId = 'rename-fault'
+    const filePath = getSessionFilePath(workspaceRootPath, sessionId)
+    const tmpFile = `${filePath}.tmp`
+    const backupFile = `${filePath}.bak`
+    mkdirSync(join(workspaceRootPath, 'sessions', sessionId), { recursive: true })
+    const sessionA: StoredSession = {
+      id: sessionId,
+      workspaceRootPath,
+      name: 'A',
+      createdAt: 1,
+      lastUsedAt: 1,
+      messages: [],
+      tokenUsage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, contextTokens: 0, costUsd: 0 },
+    }
+    writeSessionJsonl(filePath, sessionA)
+    let tmpTargetAttempts = 0
+    let failRenameRestore = true
+    const fs: SessionPersistenceFsAdapter = {
+      open: async (path, flags) => {
+        const handle = await fsOpen(path, flags)
+        return {
+          writeFile: async (data, encoding) => { await handle.writeFile(data, encoding) },
+          sync: async () => { await handle.sync() },
+          close: async () => { await handle.close() },
+        }
+      },
+      rename: async (oldPath, newPath) => {
+        if (oldPath === tmpFile && newPath === filePath) {
+          tmpTargetAttempts++
+          if (tmpTargetAttempts === 1) throw Object.assign(new Error('destination exists'), { code: 'EEXIST' })
+          if (tmpTargetAttempts === 2) throw Object.assign(new Error('injected replacement failure'), { code: 'EIO' })
+        }
+        if (oldPath === backupFile && newPath === filePath && failRenameRestore) {
+          failRenameRestore = false
+          throw Object.assign(new Error('injected restore rename failure'), { code: 'EIO' })
+        }
+        await fsRename(oldPath, newPath)
+      },
+      unlink: fsUnlink,
+      copyFile: fsCopyFile,
+    }
+    const queue = new SessionPersistenceQueue(60_000, fs)
+    queue.initializeBaseline(sessionId, makeHeader({ name: 'A' }))
+    const signatureA = queue.getLastWrittenSignature(sessionId)
+    queue.enqueue({ ...sessionA, name: 'B' })
+
+    await expect(queue.flush(sessionId)).rejects.toThrow('injected replacement failure')
+    expect(readSessionJsonl(filePath)?.name).toBe('A')
+    expect(queue.getLastWrittenSignature(sessionId)).toBe(signatureA)
+    expect(queue.hasPending(sessionId)).toBe(true)
+    expect(existsSync(tmpFile)).toBe(false)
+    expect(existsSync(backupFile)).toBe(false)
+
+    await queue.flush(sessionId)
+    expect(readSessionJsonl(filePath)?.name).toBe('B')
+    expect(queue.hasPending(sessionId)).toBe(false)
+    expect(existsSync(tmpFile)).toBe(false)
+    expect(existsSync(backupFile)).toBe(false)
   })
 
   it('serializes a timer write with a concurrent flush and coalesces to newest C after failure', async () => {

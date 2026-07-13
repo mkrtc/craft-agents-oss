@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'bun:test';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdtempSync, readFileSync, renameSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -15,6 +15,7 @@ import {
   readSessionJsonl,
   MAX_SESSION_HEADER_BYTES,
   writeSessionJsonl,
+  type SessionJsonlFsAdapter,
 } from '../jsonl.ts';
 import type { StoredSession } from '../types.ts';
 
@@ -160,6 +161,45 @@ describe('session JSONL Memory selection persistence', () => {
     expect(readFileSync(sessionFile, 'utf8')).toBe(original);
     expect(readSessionJsonl(sessionFile)?.name).toBe('valid A');
     expect(existsSync(`${sessionFile}.tmp`)).toBe(false);
+  });
+
+  it('restores old A when Windows fallback rename fails, then retries to B', () => {
+    const workspace = makeWorkspace();
+    const sessionFile = join(workspace, 'session.jsonl');
+    writeSessionJsonl(sessionFile, makeStoredSession({ name: 'A' }));
+    const tmpFile = `${sessionFile}.tmp`;
+    const backupFile = `${sessionFile}.bak`;
+    let tmpTargetAttempts = 0;
+    let failRenameRestore = true;
+    const fs: SessionJsonlFsAdapter = {
+      writeFile: (path, data) => writeFileSync(path, data),
+      syncFile: () => {},
+      rename: (oldPath, newPath) => {
+        if (oldPath === tmpFile && newPath === sessionFile) {
+          tmpTargetAttempts++;
+          if (tmpTargetAttempts === 1) throw Object.assign(new Error('destination exists'), { code: 'EEXIST' });
+          if (tmpTargetAttempts === 2) throw Object.assign(new Error('injected replacement failure'), { code: 'EIO' });
+        }
+        if (oldPath === backupFile && newPath === sessionFile && failRenameRestore) {
+          failRenameRestore = false;
+          throw Object.assign(new Error('injected restore rename failure'), { code: 'EIO' });
+        }
+        renameSync(oldPath, newPath);
+      },
+      unlink: (path) => unlinkSync(path),
+      copyFile: (source, destination) => copyFileSync(source, destination),
+    };
+
+    expect(() => writeSessionJsonl(sessionFile, makeStoredSession({ name: 'B' }), fs))
+      .toThrow('injected replacement failure');
+    expect(readSessionJsonl(sessionFile)?.name).toBe('A');
+    expect(existsSync(tmpFile)).toBe(false);
+    expect(existsSync(backupFile)).toBe(false);
+
+    writeSessionJsonl(sessionFile, makeStoredSession({ name: 'B' }), fs);
+    expect(readSessionJsonl(sessionFile)?.name).toBe('B');
+    expect(existsSync(tmpFile)).toBe(false);
+    expect(existsSync(backupFile)).toBe(false);
   });
 
   it('reads a valid >8 KiB header through sync and async bounded newline readers', async () => {
