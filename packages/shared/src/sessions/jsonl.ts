@@ -9,6 +9,7 @@ import { openSync, readSync, closeSync, readFileSync, writeFileSync, renameSync,
 import { open, readFile } from 'fs/promises';
 import { dirname } from 'path';
 import type { SessionHeader, StoredSession, StoredMessage, SessionTokenUsage } from './types.ts';
+
 import type { PermissionMode } from '../agent/mode-types.ts';
 import { parsePermissionMode } from '../agent/mode-types.ts';
 import { toPortablePath, expandPath, normalizePath } from '../utils/paths.ts';
@@ -23,6 +24,11 @@ import { normalizeSessionMemorySelection } from '../project-memory/connections/s
  * fields while still preventing unbounded first-line reads of corrupted JSONL.
  */
 export const MAX_SESSION_HEADER_BYTES = 64 * 1024;
+export function assertSessionHeaderEncodedBytes(encodedHeader: string): number {
+  const bytes = Buffer.byteLength(encodedHeader, 'utf-8');
+  if (bytes > MAX_SESSION_HEADER_BYTES) throw new Error(`Session header exceeds ${MAX_SESSION_HEADER_BYTES} byte limit`);
+  return bytes;
+}
 const HEADER_READ_CHUNK_BYTES = 4096;
 const MEMORY_SELECTION_FIELDS = [
   'enabledMemorySpaceRefs',
@@ -104,7 +110,7 @@ export function normalizeSessionHeaderMemorySelection<T extends SessionHeader>(h
 
   const result = normalizeSessionMemorySelection(rawSelection);
   if (!result.valid || !result.value) {
-    debug('[jsonl] Quarantined malformed persisted Memory selection:', result.errors.join('; '));
+    debug(`[jsonl] Quarantined malformed Memory selection (code=invalid-memory-selection,errorCount=${result.errors.length})`);
     return normalized as T;
   }
 
@@ -237,8 +243,10 @@ export function writeSessionJsonl(sessionFile: string, session: StoredSession): 
   const header = createSessionHeader(session);
   const sessionDir = dirname(sessionFile);
 
+  const headerLine = makeSessionPathPortable(JSON.stringify(header), sessionDir);
+  assertSessionHeaderEncodedBytes(headerLine);
   const lines = [
-    makeSessionPathPortable(JSON.stringify(header), sessionDir),
+    headerLine,
     ...session.messages.map(m => makeSessionPathPortable(JSON.stringify(m), sessionDir)),
   ];
 

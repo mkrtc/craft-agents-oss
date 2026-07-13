@@ -7,6 +7,9 @@
  */
 
 import { existsSync, readFileSync, readdirSync, statSync, openSync, readSync, closeSync } from 'node:fs';
+// Keep in sync with @craft-agent/core's exported session-header contract.
+// session-tools-core cannot import shared/core source without crossing tsconfig rootDir boundaries.
+const MAX_SESSION_HEADER_BYTES = 64 * 1024;
 import { join } from 'node:path';
 import type { SourceConfig } from './types.ts';
 
@@ -159,12 +162,30 @@ export function resolveSessionWorkingDirectory(
   try {
     const sessionFile = join(workspacePath, 'sessions', sessionId, 'session.jsonl');
     if (!existsSync(sessionFile)) return undefined;
-    // Read first line only (header) — 8KB buffer is plenty
+    // Read the complete first line with the same bounded contract as session
+    // persistence. CRLF is a terminator, not part of the JSON payload.
     const fd = openSync(sessionFile, 'r');
     try {
-      const buffer = Buffer.alloc(8192);
-      const bytesRead = readSync(fd, buffer, 0, 8192, 0);
-      const firstLine = buffer.toString('utf-8', 0, bytesRead).split('\n')[0] ?? '';
+      const chunks: Buffer[] = [];
+      let total = 0;
+      let position = 0;
+      while (total < MAX_SESSION_HEADER_BYTES) {
+        const buffer = Buffer.alloc(Math.min(4096, MAX_SESSION_HEADER_BYTES - total));
+        const bytesRead = readSync(fd, buffer, 0, buffer.length, position);
+        if (bytesRead === 0) break;
+        const newline = buffer.subarray(0, bytesRead).indexOf(0x0a);
+        const slice = newline === -1 ? buffer.subarray(0, bytesRead) : buffer.subarray(0, newline);
+        chunks.push(slice);
+        total += slice.length;
+        if (newline !== -1) break;
+        position += bytesRead;
+      }
+      if (total === MAX_SESSION_HEADER_BYTES) {
+        const sentinel = Buffer.alloc(1);
+        const bytesRead = readSync(fd, sentinel, 0, 1, position);
+        if (bytesRead > 0 && sentinel[0] !== 0x0a) return undefined;
+      }
+      const firstLine = Buffer.concat(chunks, total).toString('utf-8').replace(/\r$/, '');
       const header = JSON.parse(firstLine);
       return header.workingDirectory || undefined;
     } finally {

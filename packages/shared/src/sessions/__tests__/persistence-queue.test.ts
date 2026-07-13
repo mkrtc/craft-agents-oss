@@ -156,22 +156,21 @@ describe('session persistence header conflict helpers', () => {
     queue.cancel(session.id)
   })
 
-  it('startup scenario: external metadata differs from local signature', () => {
-    const local = makeHeader({ name: 'Local Name', labels: ['local'] })
-    const disk = makeHeader({ name: 'External Name', labels: ['external'] })
-
-    const localSig = getHeaderMetadataSignature(local)
-    const diskSig = getHeaderMetadataSignature(disk)
-
-    // This is the condition used by persistence queue at startup:
-    // no previousSig yet, disk differs from local → preserve external metadata.
-    const hasExternalMetadataChange = diskSig !== localSig
-      && (undefined === undefined || diskSig !== undefined)
-
-    expect(hasExternalMetadataChange).toBe(true)
-
-    const merged = mergeHeaderWithExternalMetadata(local, disk)
-    expect(merged.name).toBe('External Name')
-    expect(merged.labels).toEqual(['external'])
+  it('fresh queue preserves external disk Memory selection over stale local state', async () => {
+    const workspaceRootPath = mkdtempSync(join(tmpdir(), 'session-memory-fresh-'))
+    tempDirs.push(workspaceRootPath)
+    const refA = { connectionId: '123e4567-e89b-42d3-8456-426614174000', spaceId: 'aaaaaaaa-e89b-42d3-8456-426614174000' }
+    const refB = { connectionId: '123e4567-e89b-42d3-8456-426614174000', spaceId: 'bbbbbbbb-e89b-42d3-8456-426614174000' }
+    const disk: StoredSession = { id: 'fresh', workspaceRootPath, createdAt: 1, lastUsedAt: 1, messages: [], tokenUsage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, contextTokens: 0, costUsd: 0 }, enabledMemorySpaceRefs: [refB], memoryWriteTargetRef: refB, memorySelectionMode: 'explicit' }
+    const filePath = getSessionFilePath(workspaceRootPath, disk.id)
+    require('node:fs').mkdirSync(join(workspaceRootPath, 'sessions', disk.id), { recursive: true })
+    writeSessionJsonl(filePath, disk)
+    const queue = new SessionPersistenceQueue(1)
+    const stale = { ...disk, enabledMemorySpaceRefs: [refA], memoryWriteTargetRef: refA }
+    queue.enqueue(stale)
+    await queue.flush(stale.id)
+    const persisted = readSessionJsonl(filePath)!
+    expect(persisted.enabledMemorySpaceRefs).toEqual([refB])
+    expect(persisted.memoryWriteTargetRef).toEqual(refB)
   })
 })
