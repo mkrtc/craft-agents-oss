@@ -4,8 +4,6 @@ This file accumulates release notes for the next unreleased version. PRs that ad
 
 ## Features
 
-- Added OpenAI GPT-5.6 Luna, Terra, and Sol support for Pi/OpenAI providers, with GPT-5.6 Sol as the preferred OpenAI default.
-
 ## Improvements
 
 ## Bug Fixes
