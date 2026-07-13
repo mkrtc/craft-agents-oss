@@ -1,5 +1,5 @@
-import { open, rename, unlink } from 'fs/promises'
-import { assertSessionHeaderEncodedBytes } from './jsonl.js'
+import { copyFile, open, rename, unlink } from 'fs/promises'
+import { encodeSessionHeaderForFile } from './jsonl.js'
 import { dirname } from 'path'
 import type { StoredSession, SessionHeader } from './types.js'
 import { getSessionFilePath, ensureSessionsDir, ensureSessionDir } from './storage.js'
@@ -19,12 +19,61 @@ interface PersistenceFileHandle {
 }
 
 export interface SessionPersistenceFsAdapter {
-  open(path: string, flags: 'w'): Promise<PersistenceFileHandle>
+  open(path: string, flags: 'w' | 'r'): Promise<PersistenceFileHandle>
   rename(oldPath: string, newPath: string): Promise<void>
   unlink(path: string): Promise<void>
+  copyFile?(source: string, destination: string): Promise<void>
 }
 
-const defaultFsAdapter: SessionPersistenceFsAdapter = { open, rename, unlink }
+const defaultFsAdapter: SessionPersistenceFsAdapter = { open, rename, unlink, copyFile }
+
+function isDestinationReplaceConflict(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException | undefined)?.code
+  return code === 'EEXIST' || code === 'EPERM' || code === 'EACCES'
+}
+
+async function atomicReplace(
+  tmpFile: string,
+  filePath: string,
+  fs: SessionPersistenceFsAdapter,
+): Promise<void> {
+  try {
+    await fs.rename(tmpFile, filePath)
+    try { await fs.unlink(`${filePath}.bak`) } catch { /* best-effort stale backup cleanup */ }
+    return
+  } catch (error) {
+    if (!isDestinationReplaceConflict(error)) throw error
+
+    const backupFile = `${filePath}.bak`
+    try { await fs.unlink(backupFile) } catch { /* best-effort stale backup cleanup */ }
+    try {
+      await fs.rename(filePath, backupFile)
+    } catch {
+      throw error
+    }
+    try {
+      await fs.rename(tmpFile, filePath)
+    } catch (replaceError) {
+      try {
+        await fs.rename(backupFile, filePath)
+      } catch (restoreError) {
+        if (!fs.copyFile) {
+          throw new AggregateError([replaceError, restoreError], `Failed to replace and restore ${filePath}`)
+        }
+        try {
+          await fs.copyFile(backupFile, filePath)
+          const restored = await fs.open(filePath, 'r')
+          try { await restored.sync() } finally { await restored.close() }
+          try { await fs.unlink(backupFile) } catch { /* copied target is authoritative */ }
+        } catch (copyError) {
+          throw new AggregateError([replaceError, restoreError, copyError], `Failed to replace and restore ${filePath}`)
+        }
+      }
+      throw replaceError
+    }
+    try { await fs.unlink(backupFile) } catch { /* installed file remains authoritative */ }
+  }
+}
 
 interface HeaderMetadataSignature {
   name?: string
@@ -36,6 +85,8 @@ interface HeaderMetadataSignature {
   permissionMode?: string
   hasUnread?: boolean
   lastReadMessageId?: string
+  projectId?: string
+  kanbanColumn?: string
   enabledMemorySpaceRefs?: SessionHeader['enabledMemorySpaceRefs']
   memoryWriteTargetRef?: SessionHeader['memoryWriteTargetRef']
   memorySelectionMode?: SessionHeader['memorySelectionMode']
@@ -52,6 +103,8 @@ function getHeaderMetadataSignature(header: SessionHeader): string {
     permissionMode: header.permissionMode,
     hasUnread: header.hasUnread,
     lastReadMessageId: header.lastReadMessageId,
+    projectId: header.projectId,
+    kanbanColumn: header.kanbanColumn,
     enabledMemorySpaceRefs: header.enabledMemorySpaceRefs,
     memoryWriteTargetRef: header.memoryWriteTargetRef,
     memorySelectionMode: header.memorySelectionMode,
@@ -63,7 +116,7 @@ function mergeHeaderWithExternalMetadata(localHeader: SessionHeader, diskHeader:
   return {
     ...localHeader,
     name: diskHeader.name,
-    labels: diskHeader.labels,
+    labels: diskHeader.labels ? [...diskHeader.labels] : undefined,
     isFlagged: diskHeader.isFlagged,
     isPinned: diskHeader.isPinned,
     pinnedAt: diskHeader.pinnedAt,
@@ -71,6 +124,8 @@ function mergeHeaderWithExternalMetadata(localHeader: SessionHeader, diskHeader:
     permissionMode: diskHeader.permissionMode,
     hasUnread: diskHeader.hasUnread,
     lastReadMessageId: diskHeader.lastReadMessageId,
+    projectId: diskHeader.projectId,
+    kanbanColumn: diskHeader.kanbanColumn,
     enabledMemorySpaceRefs: diskHeader.enabledMemorySpaceRefs?.map(ref => ({ ...ref })),
     memoryWriteTargetRef: diskHeader.memoryWriteTargetRef ? { ...diskHeader.memoryWriteTargetRef } : undefined,
     memorySelectionMode: diskHeader.memorySelectionMode,
@@ -122,6 +177,10 @@ class SessionPersistenceQueue {
 
   /** Seed the durable baseline when a session header has been loaded from disk. */
   initializeBaseline(sessionId: string, header: SessionHeader): void {
+    // A disk scan/load must not redefine authority underneath an already
+    // queued or active local mutation. Startup/import/cold-load seeding occurs
+    // before enqueue, while concurrent list refreshes safely no-op here.
+    if (this.pending.has(sessionId) || this.writeInProgress.has(sessionId)) return
     this.lastWrittenHeaderSignature.set(sessionId, getHeaderMetadataSignature(header))
   }
 
@@ -137,9 +196,6 @@ class SessionPersistenceQueue {
 
     try {
       const { data } = entry
-      ensureSessionsDir(data.workspaceRootPath)
-      ensureSessionDir(data.workspaceRootPath, sessionId)
-
       const filePath = getSessionFilePath(data.workspaceRootPath, sessionId)
 
       // Prepare session with portable paths for cross-machine compatibility
@@ -183,8 +239,7 @@ class SessionPersistenceQueue {
       const persistableMessages = storageSession.messages
       // Use original absolute sessionDir (before toPortablePath) for path replacement
       const sessionDir = dirname(filePath)
-      const headerLine = makeSessionPathPortable(JSON.stringify(header), sessionDir)
-      assertSessionHeaderEncodedBytes(headerLine)
+      const headerLine = encodeSessionHeaderForFile(filePath, header)
       const lines = [
         headerLine,
         ...persistableMessages.map(m => makeSessionPathPortable(JSON.stringify(m), sessionDir)),
@@ -195,18 +250,24 @@ class SessionPersistenceQueue {
       // pending local write so a later flush can retry it.
       const finalSignature = getHeaderMetadataSignature(header)
       this.inFlightHeaderSignature.set(sessionId, finalSignature)
-      const tmpFile = filePath + '.tmp'
+      const tmpFile = `${filePath}.tmp`
       try {
-        const handle = await this.fs.open(tmpFile, 'w')
+        // Header cap validation above is intentionally before any directory side effect.
+        ensureSessionsDir(data.workspaceRootPath)
+        ensureSessionDir(data.workspaceRootPath, sessionId)
         try {
-          await handle.writeFile(lines.join('\n') + '\n', 'utf-8')
-          await handle.sync()
-        } finally {
-          await handle.close()
+          const handle = await this.fs.open(tmpFile, 'w')
+          try {
+            await handle.writeFile(lines.join('\n') + '\n', 'utf-8')
+            await handle.sync()
+          } finally {
+            await handle.close()
+          }
+          await atomicReplace(tmpFile, filePath, this.fs)
+        } catch (error) {
+          try { await this.fs.unlink(tmpFile) } catch { /* best-effort failed-write cleanup */ }
+          throw error
         }
-        // On Windows, rename fails if target exists. Delete first for cross-platform compatibility.
-        try { await this.fs.unlink(filePath) } catch { /* ignore if doesn't exist */ }
-        await this.fs.rename(tmpFile, filePath)
         this.lastWrittenHeaderSignature.set(sessionId, finalSignature)
         debug(`[PersistenceQueue] Wrote session ${sessionId}`)
       } finally {

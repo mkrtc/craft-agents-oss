@@ -21,6 +21,10 @@ const refB = {
   connectionId: '123e4567-e89b-42d3-8456-426614174000',
   spaceId: 'bbbbbbbb-e89b-42d3-8456-426614174000',
 }
+const refC = {
+  connectionId: '123e4567-e89b-42d3-8456-426614174000',
+  spaceId: 'cccccccc-e89b-42d3-8456-426614174000',
+}
 
 type PublicMemorySession = {
   name?: string
@@ -106,14 +110,18 @@ describe('SessionManager external Memory reconciliation', () => {
     return sm.getSessions(workspace.id).find(session => session.id === sessionId)! as PublicMemorySession
   }
 
-  async function notifyAndWait(predicate: (session: PublicMemorySession) => boolean): Promise<void> {
-    sm.notifyConfigFileChange(workspaceRootPath, `sessions/${sessionId}/session.jsonl`)
+  async function waitFor(predicate: (session: PublicMemorySession) => boolean): Promise<void> {
     const deadline = Date.now() + 2_000
     while (Date.now() < deadline) {
       if (predicate(current())) return
       await Bun.sleep(25)
     }
     expect(predicate(current())).toBe(true)
+  }
+
+  async function notifyAndWait(predicate: (session: PublicMemorySession) => boolean): Promise<void> {
+    sm.notifyConfigFileChange(workspaceRootPath, `sessions/${sessionId}/session.jsonl`)
+    await waitFor(predicate)
   }
 
   it('applies a Memory-only external B update to runtime A -> B through the watch path', async () => {
@@ -172,6 +180,63 @@ describe('SessionManager external Memory reconciliation', () => {
     expect(current().enabledMemorySpaceRefs).toBeUndefined()
     expect(current().memoryWriteTargetRef).toBeUndefined()
     expect(current().memorySelectionMode).toBeUndefined()
+  })
+
+  it('applies idle external B at guard expiry without requiring a second watcher event', async () => {
+    seedManaged(stored('A'))
+    const managed = (sm as unknown as {
+      sessions: Map<string, { _metadataWriteGuardUntil?: number }>
+    }).sessions.get(sessionId)!
+    managed._metadataWriteGuardUntil = Date.now() + 250
+    writeSessionJsonl(getSessionFilePath(workspaceRootPath, sessionId), stored('B'))
+    sm.notifyConfigFileChange(workspaceRootPath, `sessions/${sessionId}/session.jsonl`)
+
+    await Bun.sleep(140)
+    expect(current().enabledMemorySpaceRefs).toEqual([refA])
+    await waitFor(session => session.enabledMemorySpaceRefs?.[0]?.spaceId === refB.spaceId)
+    expect(current().enabledMemorySpaceRefs).toEqual([refB])
+  })
+
+  it('applies only the latest of multiple external headers deferred by the guard', async () => {
+    seedManaged(stored('A'))
+    const managed = (sm as unknown as {
+      sessions: Map<string, { _metadataWriteGuardUntil?: number }>
+    }).sessions.get(sessionId)!
+    managed._metadataWriteGuardUntil = Date.now() + 450
+    writeSessionJsonl(getSessionFilePath(workspaceRootPath, sessionId), stored('B'))
+    sm.notifyConfigFileChange(workspaceRootPath, `sessions/${sessionId}/session.jsonl`)
+    await Bun.sleep(140)
+
+    writeSessionJsonl(getSessionFilePath(workspaceRootPath, sessionId), stored('none', {
+      enabledMemorySpaceRefs: [refC],
+      memoryWriteTargetRef: refC,
+      memorySelectionMode: 'explicit',
+    }))
+    sm.notifyConfigFileChange(workspaceRootPath, `sessions/${sessionId}/session.jsonl`)
+    await Bun.sleep(140)
+    expect(current().enabledMemorySpaceRefs).toEqual([refA])
+
+    const deadline = Date.now() + 1_000
+    while (Date.now() < deadline && current().enabledMemorySpaceRefs?.[0]?.spaceId !== refC.spaceId) {
+      await Bun.sleep(25)
+    }
+    expect(current().enabledMemorySpaceRefs).toEqual([refC])
+  })
+
+  it('cleanup cancels an idle guard timer before it can mutate runtime state', async () => {
+    seedManaged(stored('A'))
+    const managed = (sm as unknown as {
+      sessions: Map<string, { _metadataWriteGuardUntil?: number }>
+    }).sessions.get(sessionId)!
+    managed._metadataWriteGuardUntil = Date.now() + 350
+    writeSessionJsonl(getSessionFilePath(workspaceRootPath, sessionId), stored('B'))
+    sm.notifyConfigFileChange(workspaceRootPath, `sessions/${sessionId}/session.jsonl`)
+    await Bun.sleep(140)
+    expect(current().enabledMemorySpaceRefs).toEqual([refA])
+
+    sm.cleanup()
+    await Bun.sleep(260)
+    expect(current().enabledMemorySpaceRefs).toEqual([refA])
   })
 
   it('a fresh manager persistence cannot re-persist stale local A over existing disk B', async () => {

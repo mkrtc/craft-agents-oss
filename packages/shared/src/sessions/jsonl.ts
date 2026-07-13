@@ -5,7 +5,7 @@
  * Format: Line 1 = SessionHeader, Lines 2+ = StoredMessage (one per line)
  */
 
-import { openSync, readSync, closeSync, readFileSync, writeFileSync, renameSync, unlinkSync } from 'fs';
+import { openSync, readSync, closeSync, fsyncSync, copyFileSync, readFileSync, writeFileSync, renameSync, unlinkSync } from 'fs';
 import { open, readFile } from 'fs/promises';
 import { dirname } from 'path';
 import type { SessionHeader, StoredSession, StoredMessage, SessionTokenUsage } from './types.ts';
@@ -29,6 +29,75 @@ export function assertSessionHeaderEncodedBytes(encodedHeader: string): number {
   const bytes = Buffer.byteLength(encodedHeader, 'utf-8');
   if (bytes > MAX_SESSION_HEADER_BYTES) throw new Error(`Session header exceeds ${MAX_SESSION_HEADER_BYTES} byte limit`);
   return bytes;
+}
+
+export interface SessionJsonlFsAdapter {
+  writeFile(path: string, data: string): void;
+  syncFile(path: string): void;
+  rename(oldPath: string, newPath: string): void;
+  unlink(path: string): void;
+  copyFile?(source: string, destination: string): void;
+}
+
+const defaultSessionJsonlFs: SessionJsonlFsAdapter = {
+  writeFile: (path, data) => writeFileSync(path, data),
+  syncFile: (path) => {
+    const fd = openSync(path, 'r');
+    try { fsyncSync(fd); } finally { closeSync(fd); }
+  },
+  rename: (oldPath, newPath) => renameSync(oldPath, newPath),
+  unlink: (path) => unlinkSync(path),
+  copyFile: (source, destination) => copyFileSync(source, destination),
+};
+
+function isDestinationReplaceConflict(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException | undefined)?.code;
+  return code === 'EEXIST' || code === 'EPERM' || code === 'EACCES';
+}
+
+function atomicReplaceSync(
+  tmpFile: string,
+  sessionFile: string,
+  fs: SessionJsonlFsAdapter,
+): void {
+  try {
+    // POSIX atomically replaces the destination without exposing a gap.
+    fs.rename(tmpFile, sessionFile);
+    try { fs.unlink(`${sessionFile}.bak`); } catch { /* best-effort stale backup cleanup */ }
+    return;
+  } catch (error) {
+    if (!isDestinationReplaceConflict(error)) throw error;
+
+    // Windows may reject rename-over-existing. Move the old file aside, then
+    // restore it if installing the new file fails; never pre-unlink valid data.
+    const backupFile = `${sessionFile}.bak`;
+    try { fs.unlink(backupFile); } catch { /* best-effort stale backup cleanup */ }
+    try {
+      fs.rename(sessionFile, backupFile);
+    } catch {
+      throw error;
+    }
+    try {
+      fs.rename(tmpFile, sessionFile);
+    } catch (replaceError) {
+      try {
+        fs.rename(backupFile, sessionFile);
+      } catch (restoreError) {
+        if (!fs.copyFile) {
+          throw new AggregateError([replaceError, restoreError], `Failed to replace and restore ${sessionFile}`);
+        }
+        try {
+          fs.copyFile(backupFile, sessionFile);
+          fs.syncFile(sessionFile);
+          try { fs.unlink(backupFile); } catch { /* copied target is authoritative */ }
+        } catch (copyError) {
+          throw new AggregateError([replaceError, restoreError, copyError], `Failed to replace and restore ${sessionFile}`);
+        }
+      }
+      throw replaceError;
+    }
+    try { fs.unlink(backupFile); } catch { /* installed file is authoritative; stale backup is harmless */ }
+  }
 }
 const HEADER_READ_CHUNK_BYTES = 4096;
 const MEMORY_SELECTION_FIELDS = [
@@ -243,6 +312,23 @@ export function readSessionJsonl(sessionFile: string): StoredSession | null {
   }
 }
 
+/** Encode and cap-check the final target header without filesystem side effects. */
+export function encodeSessionHeaderForFile(sessionFile: string, header: SessionHeader): string {
+  const headerLine = makeSessionPathPortable(JSON.stringify(header), dirname(sessionFile));
+  assertSessionHeaderEncodedBytes(headerLine);
+  return headerLine;
+}
+
+/**
+ * Build and cap-check the exact target header a producer will persist. Callers
+ * that create directories/register runtime state must invoke this first.
+ */
+export function preflightSessionJsonl(sessionFile: string, session: StoredSession): SessionHeader {
+  const header = createSessionHeader(session);
+  encodeSessionHeaderForFile(sessionFile, header);
+  return header;
+}
+
 /**
  * Write session to JSONL format using atomic write (write-to-temp-then-rename).
  * Prevents file corruption if the process crashes mid-write: either the old
@@ -251,22 +337,28 @@ export function readSessionJsonl(sessionFile: string): StoredSession | null {
  * Line 1: Header with pre-computed metadata
  * Lines 2+: Messages (one per line)
  */
-export function writeSessionJsonl(sessionFile: string, session: StoredSession): void {
-  const header = createSessionHeader(session);
+export function writeSessionJsonl(
+  sessionFile: string,
+  session: StoredSession,
+  fs: SessionJsonlFsAdapter = defaultSessionJsonlFs,
+): void {
+  const header = preflightSessionJsonl(sessionFile, session);
   const sessionDir = dirname(sessionFile);
-
-  const headerLine = makeSessionPathPortable(JSON.stringify(header), sessionDir);
-  assertSessionHeaderEncodedBytes(headerLine);
+  const headerLine = encodeSessionHeaderForFile(sessionFile, header);
   const lines = [
     headerLine,
     ...session.messages.map(m => makeSessionPathPortable(JSON.stringify(m), sessionDir)),
   ];
 
-  const tmpFile = sessionFile + '.tmp';
-  writeFileSync(tmpFile, lines.join('\n') + '\n');
-  // On Windows, rename fails if target exists. Delete first for cross-platform compatibility.
-  try { unlinkSync(sessionFile); } catch { /* ignore if doesn't exist */ }
-  renameSync(tmpFile, sessionFile);
+  const tmpFile = `${sessionFile}.tmp`;
+  try {
+    fs.writeFile(tmpFile, lines.join('\n') + '\n');
+    fs.syncFile(tmpFile);
+    atomicReplaceSync(tmpFile, sessionFile, fs);
+  } catch (error) {
+    try { fs.unlink(tmpFile); } catch { /* best-effort failed-write cleanup */ }
+    throw error;
+  }
 }
 
 /**

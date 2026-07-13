@@ -113,6 +113,8 @@ export {
   readSessionJsonl,
   writeSessionJsonl,
   createSessionHeader,
+  encodeSessionHeaderForFile,
+  preflightSessionJsonl,
   normalizeSessionHeaderMemorySelection,
 } from './jsonl.ts';
 

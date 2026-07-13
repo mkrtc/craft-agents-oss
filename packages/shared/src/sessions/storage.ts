@@ -40,11 +40,39 @@ import type { Plan } from '../agent/plan-types.ts';
 import { validateSessionStatus } from '../statuses/validation.ts';
 import { debug } from '../utils/debug.ts';
 import { getStatusCategory } from '../statuses/storage.ts';
-import { readSessionHeader, readSessionJsonl } from './jsonl.ts';
-import { sessionPersistenceQueue } from './persistence-queue.ts';
+import { createSessionHeader, readSessionHeader, readSessionJsonl } from './jsonl.ts';
+import { mergeHeaderWithExternalMetadata, sessionPersistenceQueue } from './persistence-queue.ts';
 
 // Re-export types for convenience
 export type { SessionConfig } from './types.ts';
+
+const SESSION_LOADED_BASELINE = Symbol('sessionLoadedBaseline');
+type StoredSessionWithBaseline = StoredSession & { [SESSION_LOADED_BASELINE]?: SessionHeader };
+
+function attachLoadedBaseline(session: StoredSession, header: SessionHeader): void {
+  Object.defineProperty(session, SESSION_LOADED_BASELINE, {
+    value: header,
+    writable: true,
+    configurable: true,
+    enumerable: false,
+  });
+}
+
+const RECONCILED_METADATA_FIELDS = [
+  'name', 'labels', 'isFlagged', 'isPinned', 'pinnedAt', 'sessionStatus',
+  'permissionMode', 'hasUnread', 'lastReadMessageId', 'projectId', 'kanbanColumn',
+  'enabledMemorySpaceRefs', 'memoryWriteTargetRef', 'memorySelectionMode',
+] as const;
+
+function reconcileSavedSessionMetadata(session: StoredSession, persistedHeader: SessionHeader): void {
+  const reconciled = mergeHeaderWithExternalMetadata(createSessionHeader(session), persistedHeader);
+  const target = session as unknown as Record<string, unknown>;
+  for (const field of RECONCILED_METADATA_FIELDS) {
+    const value = reconciled[field];
+    if (value === undefined) delete target[field];
+    else target[field] = value;
+  }
+}
 
 // ============================================================
 // Directory Utilities
@@ -195,15 +223,13 @@ export async function createSession(
     taskRunId?: string;
     taskNodeId?: string;
     taskDraft?: boolean;
+    /** Internal producer fields used by transactional remote transfer import. */
+    transferredSessionSummary?: string;
+    transferredSessionSummaryApplied?: boolean;
   }
 ): Promise<SessionConfig> {
-  ensureSessionsDir(workspaceRootPath);
-
   const now = Date.now();
   const sessionId = generateSessionId(workspaceRootPath);
-
-  // Create session directory with all subdirectories (plans, attachments)
-  ensureSessionDir(workspaceRootPath, sessionId);
 
   // Set sdkCwd to initial working directory or session path - this never changes
   // The SDK stores session transcripts at ~/.claude/projects/{cwd-slugified}/
@@ -234,6 +260,8 @@ export async function createSession(
     taskRunId: options?.taskRunId,
     taskNodeId: options?.taskNodeId,
     taskDraft: options?.taskDraft,
+    transferredSessionSummary: options?.transferredSessionSummary,
+    transferredSessionSummaryApplied: options?.transferredSessionSummaryApplied,
   };
 
   // Save empty session
@@ -248,7 +276,14 @@ export async function createSession(
       costUsd: 0,
     },
   };
-  await saveSession(storedSession);
+  try {
+    await saveSession(storedSession);
+  } catch (error) {
+    // Failed creates must not leave a pending retry that can create the
+    // session directory after the caller observed rejection.
+    sessionPersistenceQueue.cancel(sessionId);
+    throw error;
+  }
 
   return session;
 }
@@ -275,12 +310,8 @@ export async function getOrCreateSessionById(
     };
   }
 
-  // Create new session with the specified ID
-  ensureSessionsDir(workspaceRootPath);
-
-  // Create session directory with all subdirectories (plans, attachments)
-  ensureSessionDir(workspaceRootPath, sessionId);
-
+  // Create new session with the specified ID. Persistence performs final-header
+  // preflight before creating any directory.
   const now = Date.now();
   // Set sdkCwd to session path - this never changes (ensures SDK can find session transcripts)
   const sdkCwd = getSessionPath(workspaceRootPath, sessionId);
@@ -304,7 +335,12 @@ export async function getOrCreateSessionById(
       costUsd: 0,
     },
   };
-  await saveSession(storedSession);
+  try {
+    await saveSession(storedSession);
+  } catch (error) {
+    sessionPersistenceQueue.cancel(sessionId);
+    throw error;
+  }
 
   return session;
 }
@@ -319,8 +355,19 @@ export async function getOrCreateSessionById(
  * Writes in JSONL format: line 1 = header, lines 2+ = messages
  */
 export async function saveSession(session: StoredSession): Promise<void> {
+  // Reassert the exact baseline captured with this loaded object. A concurrent
+  // list scan may have observed a newer external header between load and save;
+  // retaining the object's older baseline lets the queue detect that divergence
+  // instead of treating the scan as authority to overwrite it.
+  const loadedBaseline = (session as StoredSessionWithBaseline)[SESSION_LOADED_BASELINE];
+  if (loadedBaseline) sessionPersistenceQueue.initializeBaseline(session.id, loadedBaseline);
   sessionPersistenceQueue.enqueue(session);
   await sessionPersistenceQueue.flush(session.id);
+  const persistedHeader = readSessionHeader(getSessionFilePath(session.workspaceRootPath, session.id));
+  if (persistedHeader) {
+    reconcileSavedSessionMetadata(session, persistedHeader);
+    attachLoadedBaseline(session, persistedHeader);
+  }
 }
 
 /**
@@ -341,6 +388,14 @@ export function loadSession(workspaceRootPath: string, sessionId: string): Store
   if (existsSync(jsonlPath)) {
     const session = readSessionJsonl(jsonlPath);
     if (session) {
+      // Authoritative disk loads establish mutation authority before callers
+      // change and save the returned object. Unloaded stale snapshots still
+      // receive the queue's conservative external-preservation behavior.
+      const header = readSessionHeader(jsonlPath);
+      if (header) {
+        sessionPersistenceQueue.initializeBaseline(sessionId, header);
+        attachLoadedBaseline(session, header);
+      }
       end();
       return session;
     }
@@ -384,6 +439,7 @@ export function listSessions(workspaceRootPath: string): SessionMetadata[] {
       if (existsSync(jsonlFile)) {
         const header = readSessionHeader(jsonlFile);
         if (header) {
+          sessionPersistenceQueue.initializeBaseline(sessionId, header);
           const metadata = headerToMetadata(header, workspaceRootPath);
           if (metadata) sessions.push(metadata);
         }
@@ -444,6 +500,7 @@ function headerToMetadata(header: SessionHeader, workspaceRootPath: string): Ses
  */
 export function deleteSession(workspaceRootPath: string, sessionId: string): boolean {
   try {
+    sessionPersistenceQueue.cancel(sessionId);
     // Delete session directory (includes session.json, attachments, plans)
     const sessionDir = getSessionPath(workspaceRootPath, sessionId);
     if (existsSync(sessionDir)) {
