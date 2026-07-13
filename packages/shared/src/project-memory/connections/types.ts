@@ -30,13 +30,32 @@ export const MEMORY_GLOBAL_SPACE_NAME = 'Global';
 /** Vector-database provider. Currently Qdrant only; part of connection identity. */
 export type MemoryProvider = 'qdrant';
 
-/** Immutable embedding identity for a connection. */
+/**
+ * Immutable embedding identity for a connection.
+ *
+ * The structured `{ model, dimension }` shape is an approved amendment over the
+ * original flat `embeddingIdentity` string. The canonical, immutable identity
+ * *key* (equivalent to the legacy `embeddingIdentity` string,
+ * `"<model>:<dimension>"`) is derived by `embeddingIdentityKey()` in
+ * `./identity.ts` and is what connection-identity comparisons key on.
+ */
 export interface MemoryEmbeddingIdentity {
   /** Stable identifier of the embedding model/provider (e.g. `craft-local-hash-v1`). */
   model: string;
   /** Vector dimension. Preserved verbatim (arbitrary values are allowed). */
   dimension: number;
 }
+
+/**
+ * How a connection's API key is provided.
+ * - `'none'`: no key (keyless / loopback HTTP).
+ * - `'stored-api-key'`: a key is held in the encrypted credential store,
+ *   keyed by `memory_api_key::{connectionId}`.
+ * - `'legacy-environment'`: the key comes from `CRAFT_QDRANT_API_KEY`. This is
+ *   valid **only** on the synthetic, derived environment-compat connection and
+ *   is rejected on any stored connection.
+ */
+export type MemoryCredentialMode = 'none' | 'stored-api-key' | 'legacy-environment';
 
 // ---------------------------------------------------------------------------
 // Spaces (discriminated union on `kind`)
@@ -65,6 +84,8 @@ export interface GlobalMemorySpaceConfig extends BaseMemorySpaceConfig {
 export interface WorkspaceMemorySpaceConfig extends BaseMemorySpaceConfig {
   kind: 'workspace';
   workspaceId: string;
+  /** Whether new memories may be written to this space (non-Global spaces only). */
+  writable: boolean;
 }
 
 /** Space bound to a single project within a workspace. */
@@ -72,11 +93,20 @@ export interface ProjectMemorySpaceConfig extends BaseMemorySpaceConfig {
   kind: 'project';
   workspaceId: string;
   projectId: string;
+  /** Whether new memories may be written to this space (non-Global spaces only). */
+  writable: boolean;
 }
 
-/** Free-standing, user-named space not bound to a workspace/project. */
+/**
+ * Free-standing, user-named space. Optionally bound to a workspace (and,
+ * further, a project). `projectId` requires `workspaceId`.
+ */
 export interface CustomMemorySpaceConfig extends BaseMemorySpaceConfig {
   kind: 'custom';
+  workspaceId?: string;
+  projectId?: string;
+  /** Whether new memories may be written to this space (non-Global spaces only). */
+  writable: boolean;
 }
 
 /** Spaces that are persisted on disk (Global is excluded — it is derived). */
@@ -106,18 +136,24 @@ export interface MemorySpaceRef {
  * Contains no secrets.
  */
 export interface MemoryConnectionConfig {
-  /** Server-generated UUID. Immutable identity. */
+  /** Server-generated canonical (lowercase) UUID. Immutable identity. */
   connectionId: string;
-  /** Optimistic-concurrency revision. Starts at 1 and increments on every mutation. */
+  /**
+   * Per-connection optimistic-concurrency revision (fine-grained). Starts at 1
+   * and increments on every committed mutation *of this connection or its
+   * spaces*. Coarse, cross-connection concurrency uses the root `revision`.
+   */
   revision: number;
   /** Immutable identity: vector-database provider. */
   provider: MemoryProvider;
-  /** Immutable identity: base URL of the Qdrant instance. */
+  /** Immutable identity: canonical origin URL of the Qdrant instance. */
   url: string;
   /** Immutable identity: Qdrant collection name. */
   collection: string;
   /** Immutable identity: embedding model + dimension. */
   embedding: MemoryEmbeddingIdentity;
+  /** How the connection's API key is provided. */
+  credentialMode: MemoryCredentialMode;
   /** Mutable: arbitrary bounded, case-insensitively unique display name. */
   name: string;
   /** Mutable: whether the connection is active. */
@@ -133,6 +169,20 @@ export interface MemoryConnectionConfig {
 /** Root document persisted to `connections.json`. */
 export interface MemoryConnectionsConfig {
   version: typeof MEMORY_CONNECTIONS_CONFIG_VERSION;
+  /**
+   * Root optimistic-concurrency revision. Increments on **every** committed
+   * mutation (connection create/update/delete, space add/update/delete). Starts
+   * at 0 for a fresh/empty config. Connection create/delete guard on this;
+   * future list snapshots / change events also key on it.
+   */
+  revision: number;
+  /**
+   * Backend-local installation identifier (canonical UUID). Generated once for
+   * this backend installation and used as the UUIDv5 namespace for deriving the
+   * synthetic environment-compat connection id. Never synchronized between
+   * installations.
+   */
+  installationId: string;
   connections: MemoryConnectionConfig[];
 }
 
@@ -170,17 +220,23 @@ export interface UpdateMemoryConnectionInput {
   proactiveRemoteSearch?: boolean;
 }
 
-/** Input for creating a space. `spaceId`/timestamps are server-set. Global is not creatable. */
+/**
+ * Input for creating a space. `spaceId`/timestamps are server-set. Global is not
+ * creatable. `writable` defaults to `true`. For `custom`, `projectId` requires
+ * `workspaceId`.
+ */
 export type CreateMemorySpaceInput =
-  | { kind: 'workspace'; name: string; instructions?: string; workspaceId: string }
-  | { kind: 'project'; name: string; instructions?: string; workspaceId: string; projectId: string }
-  | { kind: 'custom'; name: string; instructions?: string };
+  | { kind: 'workspace'; name: string; instructions?: string; writable?: boolean; workspaceId: string }
+  | { kind: 'project'; name: string; instructions?: string; writable?: boolean; workspaceId: string; projectId: string }
+  | { kind: 'custom'; name: string; instructions?: string; writable?: boolean; workspaceId?: string; projectId?: string };
 
-/** Patchable space fields. Binding (`kind`/ids) is immutable. */
+/** Patchable space fields. Binding (`kind`/ids) is immutable; `writable` is not. */
 export interface UpdateMemorySpaceInput {
   name?: string;
   /** Pass `null` to clear instructions; omit to leave unchanged. */
   instructions?: string | null;
+  /** Toggle whether new memories may be written to this space. */
+  writable?: boolean;
 }
 
 // ---------------------------------------------------------------------------

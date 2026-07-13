@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'fs';
+import { existsSync, lstatSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
-import { isUuid } from '../../../utils/uuid.ts';
+import { isCanonicalUuid } from '../../../utils/uuid-format.ts';
 import { MEMORY_GLOBAL_SPACE_NAME, MemoryError, type CreateMemoryConnectionInput } from '../types.ts';
 import { MemoryConnectionRepository, deriveGlobalSpaceId } from '../repository.ts';
 
@@ -25,6 +25,11 @@ const CONN: CreateMemoryConnectionInput = {
   embedding: { model: 'craft-local-hash-v1', dimension: 384 },
 };
 
+/** Create a connection using the repo's current root revision. */
+function create(repo: MemoryConnectionRepository, input: CreateMemoryConnectionInput = CONN) {
+  return repo.createConnection(input, repo.getRootRevision());
+}
+
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'mem-repo-'));
 });
@@ -33,77 +38,88 @@ afterEach(() => {
   rmSync(dir, { recursive: true, force: true });
 });
 
-describe('MemoryConnectionRepository — connection CRUD', () => {
-  test('creates a connection with a server-generated UUID, revision 1, no spaces', async () => {
+describe('MemoryConnectionRepository — connection CRUD + root revision', () => {
+  test('creates a connection with a canonical UUID, revision 1, and bumps the root revision', async () => {
     const repo = makeRepo();
-    const conn = await repo.createConnection(CONN);
-    expect(isUuid(conn.connectionId)).toBe(true);
+    expect(repo.getRootRevision()).toBe(0);
+    const conn = await create(repo);
+    expect(isCanonicalUuid(conn.connectionId)).toBe(true);
     expect(conn.revision).toBe(1);
-    expect(conn.provider).toBe('qdrant');
-    expect(conn.enabled).toBe(true);
-    expect(conn.proactiveRemoteSearch).toBe(false);
+    expect(conn.credentialMode).toBe('none');
     expect(conn.spaces).toEqual([]);
-    expect(repo.getConnection(conn.connectionId)?.name).toBe('Alpha');
+    expect(repo.getRootRevision()).toBe(1);
+    // Canonical origin is stored.
+    expect(conn.url).toBe('http://127.0.0.1:6333/');
   });
 
-  test('persists to ${configDir}/memory/connections.json and leaves no temp file', async () => {
+  test('persists a stable installationId across instances', async () => {
     const repo = makeRepo();
-    await repo.createConnection(CONN);
-    expect(repo.getFilePath()).toBe(join(dir, 'memory', 'connections.json'));
-    expect(existsSync(repo.getFilePath())).toBe(true);
-    expect(existsSync(`${repo.getFilePath()}.tmp`)).toBe(false);
+    await create(repo);
+    const id1 = repo.getInstallationId();
+    expect(isCanonicalUuid(id1)).toBe(true);
+    const id2 = new MemoryConnectionRepository({ configDir: dir }).getInstallationId();
+    expect(id2).toBe(id1);
   });
 
-  test('accepts arbitrary unicode names but rejects case-insensitive duplicates', async () => {
+  test('ensureInstallationId persists a stable id even with no connections', async () => {
     const repo = makeRepo();
-    await repo.createConnection({ ...CONN, name: 'Prod 🧠' });
-    await expect(repo.createConnection({ ...CONN, name: 'prod 🧠' })).rejects.toMatchObject({ code: 'duplicate_name' });
+    const id = await repo.ensureInstallationId();
+    expect(isCanonicalUuid(id)).toBe(true);
+    expect(new MemoryConnectionRepository({ configDir: dir }).getInstallationId()).toBe(id);
   });
 
-  test('updates only mutable fields and bumps revision', async () => {
+  test('create guards on the root revision (stale create rejected)', async () => {
     const repo = makeRepo();
-    const conn = await repo.createConnection(CONN);
+    await create(repo); // root 0 -> 1
+    await expect(repo.createConnection({ ...CONN, name: 'Beta' }, 0)).rejects.toMatchObject({ code: 'revision_conflict' });
+    await repo.createConnection({ ...CONN, name: 'Beta' }, 1); // correct root
+    expect(repo.getRootRevision()).toBe(2);
+  });
+
+  test('delete guards on the root revision (stale delete rejected)', async () => {
+    const repo = makeRepo();
+    const conn = await create(repo); // root 1
+    await expect(repo.deleteConnection(conn.connectionId, 0)).rejects.toMatchObject({ code: 'revision_conflict' });
+    await repo.deleteConnection(conn.connectionId, 1);
+    expect(repo.getConnection(conn.connectionId)).toBeNull();
+    expect(repo.getRootRevision()).toBe(2);
+  });
+
+  test('update guards on the per-connection revision and bumps both revisions', async () => {
+    const repo = makeRepo();
+    const conn = await create(repo); // root 1, conn rev 1
     const updated = await repo.updateConnection(conn.connectionId, { name: 'Beta', enabled: false, proactiveRemoteSearch: true }, conn.revision);
     expect(updated.name).toBe('Beta');
-    expect(updated.enabled).toBe(false);
-    expect(updated.proactiveRemoteSearch).toBe(true);
     expect(updated.revision).toBe(2);
-    // Identity is unchanged.
-    expect(updated.url).toBe(CONN.url);
-    expect(updated.collection).toBe(CONN.collection);
+    expect(repo.getRootRevision()).toBe(2);
+    await expect(repo.updateConnection(conn.connectionId, { name: 'Gamma' }, 1)).rejects.toMatchObject({ code: 'revision_conflict' });
+  });
+
+  test('a canonical no-op patch does NOT bump the revision, timestamp, or root revision', async () => {
+    const repo = makeRepo();
+    const conn = await create(repo); // root 1
+    const before = repo.getConnection(conn.connectionId)!;
+    const same = await repo.updateConnection(conn.connectionId, { name: 'Alpha', enabled: true, proactiveRemoteSearch: false }, conn.revision);
+    expect(same.revision).toBe(before.revision);
+    expect(same.updatedAt).toBe(before.updatedAt);
+    expect(repo.getRootRevision()).toBe(1);
   });
 
   test('rejects immutable-field changes at runtime', async () => {
     const repo = makeRepo();
-    const conn = await repo.createConnection(CONN);
+    const conn = await create(repo);
     await expect(
       repo.updateConnection(conn.connectionId, { url: 'http://evil' } as unknown as { name?: string }, conn.revision),
     ).rejects.toMatchObject({ code: 'immutable_field' });
   });
 
-  test('enforces optimistic revision on update', async () => {
+  test('rejects case-insensitive duplicate names but allows renaming own casing', async () => {
     const repo = makeRepo();
-    const conn = await repo.createConnection(CONN);
-    await repo.updateConnection(conn.connectionId, { name: 'Beta' }, conn.revision); // now revision 2
-    await expect(repo.updateConnection(conn.connectionId, { name: 'Gamma' }, 1)).rejects.toMatchObject({ code: 'revision_conflict' });
-  });
-
-  test('rename cannot collide with another connection', async () => {
-    const repo = makeRepo();
-    const a = await repo.createConnection({ ...CONN, name: 'A' });
-    const b = await repo.createConnection({ ...CONN, name: 'B' });
+    const a = await create(repo, { ...CONN, name: 'A' });
+    const b = await create(repo, { ...CONN, name: 'B' });
     await expect(repo.updateConnection(b.connectionId, { name: 'a' }, b.revision)).rejects.toMatchObject({ code: 'duplicate_name' });
-    // Renaming to its own (differently-cased) name is allowed.
     const renamed = await repo.updateConnection(a.connectionId, { name: 'a' }, a.revision);
     expect(renamed.name).toBe('a');
-  });
-
-  test('deletes with revision check', async () => {
-    const repo = makeRepo();
-    const conn = await repo.createConnection(CONN);
-    await expect(repo.deleteConnection(conn.connectionId, 999)).rejects.toMatchObject({ code: 'revision_conflict' });
-    await repo.deleteConnection(conn.connectionId, conn.revision);
-    expect(repo.getConnection(conn.connectionId)).toBeNull();
   });
 
   test('throws not_found for unknown connections', async () => {
@@ -113,9 +129,9 @@ describe('MemoryConnectionRepository — connection CRUD', () => {
 
   test('orders connections deterministically by createdAt regardless of insertion order', async () => {
     const repo = makeRepo([3000, 1000, 2000]);
-    await repo.createConnection({ ...CONN, name: 'first' });
-    await repo.createConnection({ ...CONN, name: 'second' });
-    await repo.createConnection({ ...CONN, name: 'third' });
+    await repo.createConnection({ ...CONN, name: 'first' }, repo.getRootRevision());
+    await repo.createConnection({ ...CONN, name: 'second' }, repo.getRootRevision());
+    await repo.createConnection({ ...CONN, name: 'third' }, repo.getRootRevision());
     expect(repo.listConnections().map(c => c.name)).toEqual(['second', 'third', 'first']);
   });
 });
@@ -123,7 +139,7 @@ describe('MemoryConnectionRepository — connection CRUD', () => {
 describe('MemoryConnectionRepository — spaces', () => {
   test('lists the derived read-only Global space first, then stored spaces', async () => {
     const repo = makeRepo();
-    const conn = await repo.createConnection(CONN);
+    const conn = await create(repo);
     const spaces = repo.listSpaces(conn.connectionId);
     expect(spaces).toHaveLength(1);
     expect(spaces[0]!.kind).toBe('global');
@@ -131,46 +147,59 @@ describe('MemoryConnectionRepository — spaces', () => {
     expect(spaces[0]!.spaceId).toBe(deriveGlobalSpaceId(conn.connectionId));
   });
 
-  test('adds workspace/project/custom spaces and bumps the connection revision', async () => {
+  test('adds workspace/project/custom spaces, defaults writable true, bumps both revisions', async () => {
     const repo = makeRepo();
-    const conn = await repo.createConnection(CONN);
+    const conn = await create(repo);
     const { space, connection } = await repo.addSpace(conn.connectionId, { kind: 'workspace', name: 'WS', workspaceId: 'ws-1' }, conn.revision);
     expect(space.kind).toBe('workspace');
-    expect(isUuid(space.spaceId)).toBe(true);
+    expect(space.writable).toBe(true);
+    expect(isCanonicalUuid(space.spaceId)).toBe(true);
     expect(connection.revision).toBe(2);
+    expect(repo.getRootRevision()).toBe(2);
 
-    const p = await repo.addSpace(conn.connectionId, { kind: 'project', name: 'Proj', workspaceId: 'ws-1', projectId: 'pr-1' }, connection.revision);
+    const p = await repo.addSpace(conn.connectionId, { kind: 'project', name: 'Proj', workspaceId: 'ws-1', projectId: 'pr-1', writable: false }, connection.revision);
     expect(p.space.kind).toBe('project');
+    expect(p.space.writable).toBe(false);
     const c = await repo.addSpace(conn.connectionId, { kind: 'custom', name: 'Custom', instructions: 'notes' }, p.connection.revision);
     expect(c.space.kind).toBe('custom');
 
-    const spaces = repo.listSpaces(conn.connectionId);
-    expect(spaces.map(s => s.kind)).toEqual(['global', 'workspace', 'project', 'custom']);
+    expect(repo.listSpaces(conn.connectionId).map(s => s.kind)).toEqual(['global', 'workspace', 'project', 'custom']);
   });
 
   test('rejects duplicate space names and the reserved Global name', async () => {
     const repo = makeRepo();
-    const conn = await repo.createConnection(CONN);
+    const conn = await create(repo);
     const { connection } = await repo.addSpace(conn.connectionId, { kind: 'custom', name: 'Notes' }, conn.revision);
     await expect(repo.addSpace(conn.connectionId, { kind: 'custom', name: 'notes' }, connection.revision)).rejects.toMatchObject({ code: 'duplicate_name' });
     await expect(repo.addSpace(conn.connectionId, { kind: 'custom', name: 'Global' }, connection.revision)).rejects.toMatchObject({ code: 'duplicate_name' });
   });
 
-  test('updates a stored space and rejects editing the derived Global space', async () => {
+  test('updates a stored space (incl. writable) and rejects editing the derived Global space', async () => {
     const repo = makeRepo();
-    const conn = await repo.createConnection(CONN);
+    const conn = await create(repo);
     const { space, connection } = await repo.addSpace(conn.connectionId, { kind: 'custom', name: 'Notes' }, conn.revision);
-    const updated = await repo.updateSpace(conn.connectionId, space.spaceId, { name: 'Renamed', instructions: 'x' }, connection.revision);
+    const updated = await repo.updateSpace(conn.connectionId, space.spaceId, { name: 'Renamed', instructions: 'x', writable: false }, connection.revision);
     expect(updated.space.name).toBe('Renamed');
     expect(updated.space.instructions).toBe('x');
+    expect(updated.space.writable).toBe(false);
 
     const globalId = deriveGlobalSpaceId(conn.connectionId);
     await expect(repo.updateSpace(conn.connectionId, globalId, { name: 'nope' }, updated.connection.revision)).rejects.toMatchObject({ code: 'read_only' });
   });
 
+  test('a no-op space patch does not bump revisions', async () => {
+    const repo = makeRepo();
+    const conn = await create(repo);
+    const { space, connection } = await repo.addSpace(conn.connectionId, { kind: 'custom', name: 'Notes' }, conn.revision);
+    const rootBefore = repo.getRootRevision();
+    const same = await repo.updateSpace(conn.connectionId, space.spaceId, { name: 'Notes', writable: true }, connection.revision);
+    expect(same.connection.revision).toBe(connection.revision);
+    expect(repo.getRootRevision()).toBe(rootBefore);
+  });
+
   test('clears instructions with null', async () => {
     const repo = makeRepo();
-    const conn = await repo.createConnection(CONN);
+    const conn = await create(repo);
     const { space, connection } = await repo.addSpace(conn.connectionId, { kind: 'custom', name: 'Notes', instructions: 'hi' }, conn.revision);
     const cleared = await repo.updateSpace(conn.connectionId, space.spaceId, { instructions: null }, connection.revision);
     expect(cleared.space.instructions).toBeUndefined();
@@ -178,7 +207,7 @@ describe('MemoryConnectionRepository — spaces', () => {
 
   test('deletes a stored space and rejects deleting the derived Global space', async () => {
     const repo = makeRepo();
-    const conn = await repo.createConnection(CONN);
+    const conn = await create(repo);
     const { space, connection } = await repo.addSpace(conn.connectionId, { kind: 'custom', name: 'Notes' }, conn.revision);
     const globalId = deriveGlobalSpaceId(conn.connectionId);
     await expect(repo.deleteSpace(conn.connectionId, globalId, connection.revision)).rejects.toMatchObject({ code: 'read_only' });
@@ -189,16 +218,17 @@ describe('MemoryConnectionRepository — spaces', () => {
 
   test('enforces the connection revision on space mutations', async () => {
     const repo = makeRepo();
-    const conn = await repo.createConnection(CONN);
+    const conn = await create(repo);
     await expect(repo.addSpace(conn.connectionId, { kind: 'custom', name: 'X' }, 999)).rejects.toMatchObject({ code: 'revision_conflict' });
   });
 });
 
-describe('MemoryConnectionRepository — atomic write / backup / recovery', () => {
-  test('writes files with restrictive permissions (POSIX)', async () => {
+describe('MemoryConnectionRepository — durability, security, recovery', () => {
+  test('writes files with restrictive permissions and no leftover temp (POSIX)', async () => {
     const repo = makeRepo();
-    await repo.createConnection(CONN);
-    await repo.createConnection({ ...CONN, name: 'Beta' }); // second write creates a backup
+    await create(repo);
+    await create(repo, { ...CONN, name: 'Beta' }); // second write creates a backup
+    expect(existsSync(`${repo.getFilePath()}.tmp`)).toBe(false);
     if (process.platform !== 'win32') {
       expect(statSync(repo.getFilePath()).mode & 0o077).toBe(0);
       expect(statSync(repo.getBackupPath()).mode & 0o077).toBe(0);
@@ -207,8 +237,8 @@ describe('MemoryConnectionRepository — atomic write / backup / recovery', () =
 
   test('recovers from backup when the primary is corrupted', async () => {
     const repo = makeRepo();
-    await repo.createConnection(CONN);                     // primary=[Alpha]
-    await repo.createConnection({ ...CONN, name: 'Beta' }); // backup=[Alpha], primary=[Alpha,Beta]
+    await create(repo);                                 // primary=[Alpha]
+    await create(repo, { ...CONN, name: 'Beta' });      // backup=[Alpha], primary=[Alpha,Beta]
     expect(existsSync(repo.getBackupPath())).toBe(true);
 
     writeFileSync(repo.getFilePath(), 'not valid json {{{');
@@ -216,39 +246,78 @@ describe('MemoryConnectionRepository — atomic write / backup / recovery', () =
     expect(recovered.connections.map(c => c.name)).toEqual(['Alpha']);
   });
 
-  test('falls back to an empty config when both files are unusable', async () => {
+  test('throws invalid_config when both primary and backup are corrupt (never silently resets)', async () => {
     const repo = makeRepo();
-    await repo.createConnection(CONN);
-    await repo.createConnection({ ...CONN, name: 'Beta' });
+    await create(repo);
+    await create(repo, { ...CONN, name: 'Beta' });
     writeFileSync(repo.getFilePath(), 'garbage');
     writeFileSync(repo.getBackupPath(), 'garbage');
-    expect(new MemoryConnectionRepository({ configDir: dir }).load().connections).toEqual([]);
+    expect(() => new MemoryConnectionRepository({ configDir: dir }).load()).toThrow(MemoryError);
+    try {
+      new MemoryConnectionRepository({ configDir: dir }).load();
+    } catch (e) {
+      expect((e as MemoryError).code).toBe('invalid_config');
+    }
+  });
+
+  test('a missing config is a fresh empty config (not an error)', () => {
+    const repo = new MemoryConnectionRepository({ configDir: dir });
+    expect(repo.load().connections).toEqual([]);
+    expect(repo.load().revision).toBe(0);
+  });
+
+  test('refuses to follow a symlinked primary (invalid_config)', async () => {
+    if (process.platform === 'win32') return;
+    const repo = makeRepo();
+    await create(repo);
+    const decoy = join(dir, 'decoy.json');
+    writeFileSync(decoy, '{"version":1,"revision":0,"installationId":"x","connections":[]}');
+    unlinkSync(repo.getFilePath());
+    symlinkSync(decoy, repo.getFilePath());
+    expect(lstatSync(repo.getFilePath()).isSymbolicLink()).toBe(true);
+    try {
+      new MemoryConnectionRepository({ configDir: dir }).load();
+      throw new Error('expected load to throw');
+    } catch (e) {
+      expect((e as MemoryError).code).toBe('invalid_config');
+    }
   });
 
   test('never backs up a corrupt primary (self-heals on next write)', async () => {
     const repo = makeRepo();
-    await repo.createConnection(CONN);
-    await repo.createConnection({ ...CONN, name: 'Beta' }); // good backup=[Alpha]
-    writeFileSync(repo.getFilePath(), 'corrupt');           // primary corrupt, backup still good
+    await create(repo);
+    await create(repo, { ...CONN, name: 'Beta' }); // good backup=[Alpha]
+    writeFileSync(repo.getFilePath(), 'corrupt');   // primary corrupt, backup still good
 
     const repo2 = new MemoryConnectionRepository({ configDir: dir, now: () => 5000 });
-    // load() recovers [Alpha]; the mutation writes a fresh, valid primary.
-    const conn = await repo2.createConnection({ ...CONN, name: 'Gamma' });
+    const conn = await repo2.createConnection({ ...CONN, name: 'Gamma' }, repo2.getRootRevision());
     expect(conn.name).toBe('Gamma');
     const reloaded = new MemoryConnectionRepository({ configDir: dir }).load();
     expect(reloaded.connections.map(c => c.name).sort()).toEqual(['Alpha', 'Gamma']);
-    // The good backup was preserved (corrupt primary was not backed up).
     const backup = JSON.parse(readFileSync(repo.getBackupPath(), 'utf8'));
     expect(backup.connections.map((c: { name: string }) => c.name)).toEqual(['Alpha']);
   });
 
-  test('serializes concurrent mutations without interleaving', async () => {
+  test('concurrent Promise.all creates: exactly one wins the root revision, file stays valid', async () => {
     const repo = makeRepo();
-    const base = await repo.createConnection(CONN);
-    // Fire several space additions concurrently; each must observe the prior revision.
+    const results = await Promise.allSettled(
+      Array.from({ length: 10 }, (_, i) => repo.createConnection({ ...CONN, name: `c${i}` }, 0)),
+    );
+    const fulfilled = results.filter(r => r.status === 'fulfilled');
+    const conflicts = results.filter(r => r.status === 'rejected' && (r.reason as MemoryError).code === 'revision_conflict');
+    expect(fulfilled).toHaveLength(1);
+    expect(conflicts).toHaveLength(9);
+    // Reloaded from disk: exactly one connection, valid config, root revision 1.
+    const reloaded = new MemoryConnectionRepository({ configDir: dir }).load();
+    expect(reloaded.connections).toHaveLength(1);
+    expect(reloaded.revision).toBe(1);
+  });
+
+  test('serialized sequential space additions never interleave', async () => {
+    const repo = makeRepo();
+    const base = await create(repo);
     let rev = base.revision;
-    const names = ['a', 'b', 'c', 'd', 'e'];
-    for (const name of names) {
+    for (const name of ['a', 'b', 'c', 'd', 'e']) {
       const res = await repo.addSpace(base.connectionId, { kind: 'custom', name }, rev);
       rev = res.connection.revision;
     }

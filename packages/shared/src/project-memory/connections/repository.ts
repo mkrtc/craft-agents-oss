@@ -6,22 +6,30 @@
  * Guarantees:
  * - **Serialized process-local mutation** — every write goes through a promise
  *   chain, so concurrent callers never interleave a read-modify-write.
- * - **Atomic write + backup + recovery** — writes go to a temp file then rename;
- *   the last-known-good primary is preserved as `.bak`; a corrupt primary is
- *   recovered from `.bak`, and a corrupt pair falls back to an empty config.
- * - **Restrictive permissions where supported** — dir `0o700`, files `0o600`.
- * - **Deterministic ordering** — connections and spaces are sorted canonically.
- * - **Optimistic revision** — mutations on an existing connection require the
- *   caller's `expectedRevision` to match; the revision is bumped on success.
+ * - **Durable, symlink-safe atomic writes** — data is written to a unique,
+ *   same-dir, exclusive (`O_EXCL`) `0600` temp file, `fsync`ed, then renamed
+ *   directly over the target (no unlink gap); the directory is `fsync`ed where
+ *   supported. Symlinked primary/backup/temp targets are refused, never
+ *   followed. The backup goes through its own unique temp + fsync + rename.
+ * - **No silent data loss** — a missing config is a fresh/empty config, but a
+ *   *present-but-unreadable/corrupt* primary AND backup surface an explicit
+ *   `invalid_config` error rather than silently resetting to empty. A corrupt
+ *   primary with a good backup recovers from the backup.
+ * - **Restrictive permissions** — dir `0o700`, files `0o600`; existing dir/files
+ *   are repaired toward those modes where POSIX-supported.
+ * - **Root + per-connection revisions** — the root `revision` bumps on every
+ *   committed mutation (connection create/delete guard on it); each connection
+ *   also keeps a fine-grained `revision` (update / space mutations guard on it).
  * - **Explicit CRUD** — no whole-config replacement API is exposed.
  * - **No secrets** — API keys are never read or written here.
  */
 
-import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'fs';
-import { join } from 'path';
+import { chmodSync, closeSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeSync } from 'fs';
+import { basename, join } from 'path';
 import { CONFIG_DIR } from '../../config/paths.ts';
 import { safeJsonParse } from '../../utils/files.ts';
-import { deterministicUuid, randomUuid } from '../../utils/uuid.ts';
+import { randomUuid } from '../../utils/uuid.ts';
+import { deriveGlobalSpace, deriveGlobalSpaceId } from './global-space.ts';
 import { MEMORY_LIMITS } from './limits.ts';
 import {
   MEMORY_CONNECTIONS_CONFIG_VERSION,
@@ -30,7 +38,6 @@ import {
   MemoryError,
   type CreateMemoryConnectionInput,
   type CreateMemorySpaceInput,
-  type GlobalMemorySpaceConfig,
   type MemoryConnectionConfig,
   type MemoryConnectionsConfig,
   type MemorySpaceConfig,
@@ -49,6 +56,12 @@ import {
   validateUpdateMemorySpaceInput,
 } from './validation.ts';
 
+// Re-export the Global-space derivation so existing importers keep working.
+export { deriveGlobalSpace, deriveGlobalSpaceId } from './global-space.ts';
+
+/** Upper bound on the config file size we will read (bounded reads). */
+const MAX_CONFIG_BYTES = 4 * 1024 * 1024;
+
 export interface MemoryConnectionRepositoryOptions {
   /** Root config dir (defaults to CONFIG_DIR). Overridable for tests. */
   configDir?: string;
@@ -62,9 +75,10 @@ export interface MemorySpaceMutationResult {
   space: StoredMemorySpaceConfig;
 }
 
-function emptyConfig(): MemoryConnectionsConfig {
-  return { version: MEMORY_CONNECTIONS_CONFIG_VERSION, connections: [] };
-}
+type ReadResult =
+  | { status: 'ok'; config: MemoryConnectionsConfig }
+  | { status: 'missing' }
+  | { status: 'error'; reason: string };
 
 export class MemoryConnectionRepository {
   private readonly dir: string;
@@ -72,6 +86,8 @@ export class MemoryConnectionRepository {
   private readonly backupPath: string;
   private readonly now: () => number;
   private mutationChain: Promise<unknown> = Promise.resolve();
+  /** Stable ephemeral installationId for a fresh (unwritten) config on this instance. */
+  private pendingInstallationId: string | null = null;
 
   constructor(options: MemoryConnectionRepositoryOptions = {}) {
     this.dir = join(options.configDir ?? CONFIG_DIR, 'memory');
@@ -92,13 +108,42 @@ export class MemoryConnectionRepository {
   // Reads (synchronous, always reflect on-disk state)
   // -------------------------------------------------------------------------
 
-  /** Load the validated, canonical config, recovering from backup if needed. */
+  /**
+   * Load the validated, canonical config. Recovers a corrupt primary from the
+   * backup. Throws `invalid_config` if a present config is unreadable/corrupt
+   * (both primary and backup) — it NEVER silently resets to empty.
+   */
   load(): MemoryConnectionsConfig {
-    const primary = this.tryLoad(this.filePath);
-    if (primary) return primary;
-    const backup = this.tryLoad(this.backupPath);
-    if (backup) return backup;
-    return emptyConfig();
+    const primary = this.tryReadConfig(this.filePath);
+    if (primary.status === 'ok') return primary.config;
+    const backup = this.tryReadConfig(this.backupPath);
+    if (backup.status === 'ok') return backup.config;
+    if (primary.status === 'missing' && backup.status === 'missing') {
+      return this.freshEmptyConfig();
+    }
+    throw new MemoryError(
+      'invalid_config',
+      `memory connections config is unreadable or corrupt (primary: ${describe(primary)}, backup: ${describe(backup)}); refusing to reset`,
+      { primary: describe(primary), backup: describe(backup) },
+    );
+  }
+
+  getRootRevision(): number {
+    return this.load().revision;
+  }
+
+  getInstallationId(): string {
+    return this.load().installationId;
+  }
+
+  /** Ensure the installationId is generated and persisted (stable across restarts). */
+  ensureInstallationId(): Promise<string> {
+    return this.runExclusive(() => {
+      const existed = existsSync(this.filePath);
+      const config = this.load();
+      if (!existed) this.persist(config);
+      return config.installationId;
+    });
   }
 
   listConnections(): MemoryConnectionConfig[] {
@@ -128,22 +173,49 @@ export class MemoryConnectionRepository {
     return deriveGlobalSpaceId(connectionId);
   }
 
-  private tryLoad(path: string): MemoryConnectionsConfig | null {
+  private freshEmptyConfig(): MemoryConnectionsConfig {
+    this.pendingInstallationId ??= randomUuid();
+    return { version: MEMORY_CONNECTIONS_CONFIG_VERSION, revision: 0, installationId: this.pendingInstallationId, connections: [] };
+  }
+
+  private tryReadConfig(path: string): ReadResult {
+    let stat;
     try {
-      if (!existsSync(path)) return null;
-      const parsed = safeJsonParse(readFileSync(path, 'utf8'));
-      const result = validateMemoryConnectionsConfig(parsed);
-      return result.valid ? result.config : null;
-    } catch {
-      return null;
+      stat = lstatSync(path);
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === 'ENOENT') return { status: 'missing' };
+      return { status: 'error', reason: `stat failed: ${code ?? 'unknown'}` };
     }
+    if (stat.isSymbolicLink()) return { status: 'error', reason: 'target is a symlink' };
+    if (!stat.isFile()) return { status: 'error', reason: 'target is not a regular file' };
+    if (stat.size > MAX_CONFIG_BYTES) return { status: 'error', reason: 'file exceeds size limit' };
+
+    let raw: string;
+    try {
+      raw = readFileSync(path, 'utf8');
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === 'ENOENT') return { status: 'missing' };
+      return { status: 'error', reason: `read failed: ${code ?? 'unknown'}` };
+    }
+
+    let parsed: unknown;
+    try {
+      parsed = safeJsonParse(raw);
+    } catch {
+      return { status: 'error', reason: 'invalid JSON' };
+    }
+    const result = validateMemoryConnectionsConfig(parsed, { deriveGlobalSpaceId });
+    if (!result.valid) return { status: 'error', reason: `invalid schema: ${result.errors[0] ?? 'unknown'}` };
+    return { status: 'ok', config: result.config };
   }
 
   // -------------------------------------------------------------------------
-  // Connection CRUD (serialized)
+  // Connection CRUD (serialized). Create/delete guard on the ROOT revision.
   // -------------------------------------------------------------------------
 
-  createConnection(input: CreateMemoryConnectionInput): Promise<MemoryConnectionConfig> {
+  createConnection(input: CreateMemoryConnectionInput, expectedRootRevision: number): Promise<MemoryConnectionConfig> {
     return this.runExclusive(() => {
       const validation = validateCreateMemoryConnectionInput(input);
       if (!validation.valid || !validation.value) {
@@ -151,6 +223,7 @@ export class MemoryConnectionRepository {
       }
       const value = validation.value;
       const config = this.load();
+      assertRootRevision(config, expectedRootRevision);
       if (config.connections.length >= MEMORY_LIMITS.MAX_CONNECTIONS) {
         throw new MemoryError('limit_exceeded', `at most ${MEMORY_LIMITS.MAX_CONNECTIONS} connections are allowed`);
       }
@@ -164,6 +237,7 @@ export class MemoryConnectionRepository {
         url: value.url,
         collection: value.collection,
         embedding: value.embedding,
+        credentialMode: 'none',
         name: value.name,
         enabled: value.enabled ?? true,
         proactiveRemoteSearch: value.proactiveRemoteSearch ?? false,
@@ -172,6 +246,7 @@ export class MemoryConnectionRepository {
         updatedAt: timestamp,
       };
       config.connections.push(connection);
+      config.revision += 1;
       this.persist(config);
       return connection;
     });
@@ -185,7 +260,6 @@ export class MemoryConnectionRepository {
     return this.runExclusive(() => {
       const validation = validateUpdateMemoryConnectionInput(patch);
       if (!validation.valid || !validation.value) {
-        // Distinguish immutable-field attempts for a clearer error code.
         const immutable = validation.errors.some(e => e.includes('immutable'));
         throw new MemoryError(immutable ? 'immutable_field' : 'invalid_input', validation.errors.join('; '), validation.errors);
       }
@@ -194,32 +268,46 @@ export class MemoryConnectionRepository {
       const connection = this.requireConnection(config, connectionId);
       assertRevision(connection, expectedRevision);
 
-      if (value.name !== undefined && normalizeNameKey(value.name) !== normalizeNameKey(connection.name)) {
-        assertConnectionNameAvailable(config, value.name, connectionId);
+      const nameChanges = value.name !== undefined && value.name !== connection.name;
+      const enabledChanges = value.enabled !== undefined && value.enabled !== connection.enabled;
+      const proactiveChanges = value.proactiveRemoteSearch !== undefined && value.proactiveRemoteSearch !== connection.proactiveRemoteSearch;
+
+      // Canonical no-op patch: nothing actually changes → no revision/timestamp
+      // bump and no write.
+      if (!nameChanges && !enabledChanges && !proactiveChanges) {
+        return connection;
       }
-      if (value.name !== undefined) connection.name = value.name;
-      if (value.enabled !== undefined) connection.enabled = value.enabled;
-      if (value.proactiveRemoteSearch !== undefined) connection.proactiveRemoteSearch = value.proactiveRemoteSearch;
+
+      if (nameChanges) {
+        if (normalizeNameKey(value.name!) !== normalizeNameKey(connection.name)) {
+          assertConnectionNameAvailable(config, value.name!, connectionId);
+        }
+        connection.name = value.name!;
+      }
+      if (enabledChanges) connection.enabled = value.enabled!;
+      if (proactiveChanges) connection.proactiveRemoteSearch = value.proactiveRemoteSearch!;
       connection.revision += 1;
       connection.updatedAt = this.now();
+      config.revision += 1;
 
       this.persist(config);
       return connection;
     });
   }
 
-  deleteConnection(connectionId: string, expectedRevision: number): Promise<void> {
+  deleteConnection(connectionId: string, expectedRootRevision: number): Promise<void> {
     return this.runExclusive(() => {
       const config = this.load();
-      const connection = this.requireConnection(config, connectionId);
-      assertRevision(connection, expectedRevision);
+      assertRootRevision(config, expectedRootRevision);
+      this.requireConnection(config, connectionId);
       config.connections = config.connections.filter(c => c.connectionId !== connectionId);
+      config.revision += 1;
       this.persist(config);
     });
   }
 
   // -------------------------------------------------------------------------
-  // Space CRUD (serialized; bumps the parent connection's revision)
+  // Space CRUD (serialized; bumps parent connection + root revision)
   // -------------------------------------------------------------------------
 
   addSpace(
@@ -242,9 +330,11 @@ export class MemoryConnectionRepository {
       assertSpaceNameAvailable(connection, value.name);
 
       const timestamp = this.now();
+      const writable = value.writable ?? true;
       const base = {
         spaceId: randomUuid(),
         name: value.name,
+        writable,
         createdAt: timestamp,
         updatedAt: timestamp,
         ...(value.instructions !== undefined ? { instructions: value.instructions } : {}),
@@ -253,11 +343,17 @@ export class MemoryConnectionRepository {
         ? { kind: 'workspace', workspaceId: value.workspaceId, ...base }
         : value.kind === 'project'
           ? { kind: 'project', workspaceId: value.workspaceId, projectId: value.projectId, ...base }
-          : { kind: 'custom', ...base };
+          : {
+            kind: 'custom',
+            ...(value.workspaceId !== undefined ? { workspaceId: value.workspaceId } : {}),
+            ...(value.projectId !== undefined ? { projectId: value.projectId } : {}),
+            ...base,
+          };
 
       connection.spaces = sortStoredSpaces([...connection.spaces, space]);
       connection.revision += 1;
       connection.updatedAt = timestamp;
+      config.revision += 1;
       this.persist(config);
       return { connection, space };
     });
@@ -284,18 +380,32 @@ export class MemoryConnectionRepository {
       const space = connection.spaces.find(s => s.spaceId === spaceId);
       if (!space) throw new MemoryError('space_not_found', `space not found: ${spaceId}`);
 
-      if (value.name !== undefined && normalizeNameKey(value.name) !== normalizeNameKey(space.name)) {
-        assertSpaceNameAvailable(connection, value.name, spaceId);
+      const nameChanges = value.name !== undefined && value.name !== space.name;
+      const instructionsChanges = value.instructions !== undefined
+        && (value.instructions === null ? space.instructions !== undefined : value.instructions !== space.instructions);
+      const writableChanges = value.writable !== undefined && value.writable !== space.writable;
+
+      // Canonical no-op patch: no revision/timestamp bump, no write.
+      if (!nameChanges && !instructionsChanges && !writableChanges) {
+        return { connection, space };
+      }
+
+      if (nameChanges && normalizeNameKey(value.name!) !== normalizeNameKey(space.name)) {
+        assertSpaceNameAvailable(connection, value.name!, spaceId);
       }
       const timestamp = this.now();
-      if (value.name !== undefined) space.name = value.name;
-      if (value.instructions === null) delete space.instructions;
-      else if (value.instructions !== undefined) space.instructions = value.instructions;
+      if (nameChanges) space.name = value.name!;
+      if (instructionsChanges) {
+        if (value.instructions === null) delete space.instructions;
+        else space.instructions = value.instructions;
+      }
+      if (writableChanges) space.writable = value.writable!;
       space.updatedAt = timestamp;
 
       connection.spaces = sortStoredSpaces(connection.spaces);
       connection.revision += 1;
       connection.updatedAt = timestamp;
+      config.revision += 1;
       this.persist(config);
       return { connection, space };
     });
@@ -320,6 +430,7 @@ export class MemoryConnectionRepository {
       }
       connection.revision += 1;
       connection.updatedAt = this.now();
+      config.revision += 1;
       this.persist(config);
       return connection;
     });
@@ -344,59 +455,108 @@ export class MemoryConnectionRepository {
   }
 
   private persist(config: MemoryConnectionsConfig): void {
-    if (!existsSync(this.dir)) {
-      mkdirSync(this.dir, { recursive: true, mode: 0o700 });
-    }
+    this.ensureDirSecure();
     // Preserve the last-known-good primary as backup (never back up corrupt data).
-    try {
-      if (existsSync(this.filePath)) {
-        const raw = readFileSync(this.filePath, 'utf8');
-        if (validateMemoryConnectionsConfig(safeJsonParse(raw)).valid) {
-          writeFileSync(this.backupPath, raw, { mode: 0o600 });
-        }
-      }
-    } catch {
-      // Best-effort backup; a failure here must not block the primary write.
+    const current = this.tryReadConfig(this.filePath);
+    if (current.status === 'ok') {
+      this.atomicWriteSecure(this.backupPath, serialize(current.config));
+      this.repairFileMode(this.backupPath);
     }
     const canonical: MemoryConnectionsConfig = {
       version: MEMORY_CONNECTIONS_CONFIG_VERSION,
+      revision: config.revision,
+      installationId: config.installationId,
       connections: sortConnections(config.connections.map(c => ({ ...c, spaces: sortStoredSpaces(c.spaces) }))),
     };
-    this.atomicWrite(this.filePath, `${JSON.stringify(canonical, null, 2)}\n`);
+    this.atomicWriteSecure(this.filePath, serialize(canonical));
+    this.repairFileMode(this.filePath);
   }
 
-  private atomicWrite(path: string, data: string): void {
-    const tmp = `${path}.tmp`;
+  private ensureDirSecure(): void {
+    if (!existsSync(this.dir)) {
+      mkdirSync(this.dir, { recursive: true, mode: 0o700 });
+    } else if (process.platform !== 'win32') {
+      try { chmodSync(this.dir, 0o700); } catch { /* best effort */ }
+    }
+  }
+
+  private repairFileMode(path: string): void {
+    if (process.platform === 'win32') return;
+    try { chmodSync(path, 0o600); } catch { /* best effort */ }
+  }
+
+  private assertNotSymlink(path: string): void {
     try {
-      writeFileSync(tmp, data, { mode: 0o600 });
-      // Windows rename fails if the target exists; remove it first.
-      try { unlinkSync(path); } catch { /* ignore if absent */ }
+      const stat = lstatSync(path);
+      if (stat.isSymbolicLink()) {
+        throw new MemoryError('invalid_config', `refusing to write through a symlink: ${path}`);
+      }
+    } catch (error) {
+      if (error instanceof MemoryError) throw error;
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === 'ENOENT') return; // target absent → safe to create
+      throw new MemoryError('invalid_config', `cannot stat ${path}: ${code ?? 'unknown'}`);
+    }
+  }
+
+  /**
+   * Write `data` to `path` durably and symlink-safely: unique same-dir exclusive
+   * `0600` temp → fsync → direct atomic rename over the target (no unlink gap) →
+   * fsync dir (where supported).
+   */
+  private atomicWriteSecure(path: string, data: string): void {
+    this.assertNotSymlink(path);
+    const tmp = join(this.dir, `.${basename(path)}.${randomUuid()}.tmp`);
+    let fd: number | undefined;
+    try {
+      fd = openSync(tmp, 'wx', 0o600); // O_CREAT | O_EXCL | O_WRONLY, mode 0600
+      writeSync(fd, data, null, 'utf8');
+      fsyncSync(fd);
+      closeSync(fd);
+      fd = undefined;
       renameSync(tmp, path);
     } catch (error) {
+      if (fd !== undefined) { try { closeSync(fd); } catch { /* ignore */ } }
       try { unlinkSync(tmp); } catch { /* ignore */ }
       throw error;
+    }
+    this.fsyncDir();
+  }
+
+  private fsyncDir(): void {
+    if (process.platform === 'win32') return; // directory fsync unsupported
+    let dfd: number | undefined;
+    try {
+      dfd = openSync(this.dir, 'r');
+      fsyncSync(dfd);
+    } catch {
+      // Best effort: some filesystems reject directory fsync.
+    } finally {
+      if (dfd !== undefined) { try { closeSync(dfd); } catch { /* ignore */ } }
     }
   }
 }
 
 // ---------------------------------------------------------------------------
-// Pure helpers (exported for reuse by DTO mappers / environment builder)
+// Pure helpers
 // ---------------------------------------------------------------------------
 
-/** Deterministic id of a connection's derived Global space. */
-export function deriveGlobalSpaceId(connectionId: string): string {
-  return deterministicUuid([connectionId, 'space', 'global']);
+function serialize(config: MemoryConnectionsConfig): string {
+  return `${JSON.stringify(config, null, 2)}\n`;
 }
 
-/** Build the derived, read-only Global space for a connection. */
-export function deriveGlobalSpace(connection: MemoryConnectionConfig): GlobalMemorySpaceConfig {
-  return {
-    kind: 'global',
-    spaceId: deriveGlobalSpaceId(connection.connectionId),
-    name: MEMORY_GLOBAL_SPACE_NAME,
-    createdAt: connection.createdAt,
-    updatedAt: connection.updatedAt,
-  };
+function describe(result: ReadResult): string {
+  return result.status === 'error' ? result.reason : result.status;
+}
+
+function assertRootRevision(config: MemoryConnectionsConfig, expectedRootRevision: number): void {
+  if (config.revision !== expectedRootRevision) {
+    throw new MemoryError(
+      'revision_conflict',
+      `root revision conflict: expected ${expectedRootRevision}, found ${config.revision}`,
+      { expected: expectedRootRevision, actual: config.revision },
+    );
+  }
 }
 
 function assertRevision(connection: MemoryConnectionConfig, expectedRevision: number): void {

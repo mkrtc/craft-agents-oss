@@ -10,7 +10,7 @@ import type { CredentialId, CredentialType, StoredCredential, CredentialHealthSt
 import type { LlmAuthType, LlmProviderType } from '../config/llm-connections.ts';
 import { SecureStorageBackend } from './backends/secure-storage.ts';
 import { debug } from '../utils/debug.ts';
-import { isUuid } from '../utils/uuid.ts';
+import { isUuid, toCanonicalUuid } from '../utils/uuid.ts';
 
 export class CredentialManager {
   private backends: CredentialBackend[] = [];
@@ -426,7 +426,8 @@ export class CredentialManager {
   /** Set the API key for a Memory connection. */
   async setMemoryApiKey(connectionId: string, apiKey: string): Promise<void> {
     this.assertMemoryConnectionId(connectionId);
-    if (!apiKey) throw new Error('Memory API key must not be empty');
+    // Reject empty and whitespace-only keys (a blank key is never a valid secret).
+    if (!apiKey || apiKey.trim().length === 0) throw new Error('Memory API key must not be empty');
     await this.set({ type: 'memory_api_key', memoryConnectionId: connectionId }, { value: apiKey });
   }
 
@@ -441,12 +442,19 @@ export class CredentialManager {
     return !!(await this.getMemoryApiKey(connectionId));
   }
 
-  /** List the connection ids that have a Memory API key stored. */
+  /** List the canonical (lowercase) connection ids that have a Memory API key stored. */
   async listMemoryApiKeyConnectionIds(): Promise<string[]> {
     const ids = await this.list({ type: 'memory_api_key' });
-    return ids
-      .map(id => id.memoryConnectionId)
-      .filter((value): value is string => typeof value === 'string');
+    const seen = new Set<string>();
+    const result: string[] = [];
+    for (const id of ids) {
+      const canonical = id.memoryConnectionId ? toCanonicalUuid(id.memoryConnectionId) : null;
+      if (canonical && !seen.has(canonical)) {
+        seen.add(canonical);
+        result.push(canonical);
+      }
+    }
+    return result;
   }
 
   // ============================================================
