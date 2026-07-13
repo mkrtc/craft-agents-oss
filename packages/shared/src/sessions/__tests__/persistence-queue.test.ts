@@ -1,11 +1,12 @@
 import { afterEach, describe, it, expect } from 'bun:test'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs'
+import { open as fsOpen, rename as fsRename, unlink as fsUnlink } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { SessionHeader, StoredSession } from '../types'
-import { getHeaderMetadataSignature, mergeHeaderWithExternalMetadata, SessionPersistenceQueue } from '../persistence-queue'
+import { getHeaderMetadataSignature, mergeHeaderWithExternalMetadata, SessionPersistenceQueue, type SessionPersistenceFsAdapter } from '../persistence-queue'
 import { getSessionFilePath } from '../storage'
-import { readSessionJsonl, writeSessionJsonl } from '../jsonl'
+import { MAX_SESSION_HEADER_BYTES, readSessionJsonl, writeSessionJsonl } from '../jsonl'
 
 const tempDirs: string[] = []
 
@@ -121,6 +122,14 @@ describe('session persistence header conflict helpers', () => {
     expect(merged.memoryWriteTargetRef).toEqual(diskRef)
     expect(merged.memorySelectionMode).toBe('explicit')
     expect(merged.messageCount).toBe(99)
+
+    // The merge boundary must be pure: callers may mutate the result without
+    // mutating watcher-owned disk header arrays or nested refs.
+    merged.enabledMemorySpaceRefs![0]!.spaceId = 'cccccccc-e89b-42d3-8456-426614174000'
+    merged.enabledMemorySpaceRefs!.push({ ...local.enabledMemorySpaceRefs![0]! })
+    merged.memoryWriteTargetRef!.spaceId = 'dddddddd-e89b-42d3-8456-426614174000'
+    expect(disk.enabledMemorySpaceRefs).toEqual([diskRef])
+    expect(disk.memoryWriteTargetRef).toEqual(diskRef)
   })
 
   it('queued writes preserve a valid external Memory selection change', async () => {
@@ -163,7 +172,7 @@ describe('session persistence header conflict helpers', () => {
     const refB = { connectionId: '123e4567-e89b-42d3-8456-426614174000', spaceId: 'bbbbbbbb-e89b-42d3-8456-426614174000' }
     const disk: StoredSession = { id: 'fresh', workspaceRootPath, createdAt: 1, lastUsedAt: 1, messages: [], tokenUsage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, contextTokens: 0, costUsd: 0 }, enabledMemorySpaceRefs: [refB], memoryWriteTargetRef: refB, memorySelectionMode: 'explicit' }
     const filePath = getSessionFilePath(workspaceRootPath, disk.id)
-    require('node:fs').mkdirSync(join(workspaceRootPath, 'sessions', disk.id), { recursive: true })
+    mkdirSync(join(workspaceRootPath, 'sessions', disk.id), { recursive: true })
     writeSessionJsonl(filePath, disk)
     const queue = new SessionPersistenceQueue(1)
     const stale = { ...disk, enabledMemorySpaceRefs: [refA], memoryWriteTargetRef: refA }
@@ -172,5 +181,156 @@ describe('session persistence header conflict helpers', () => {
     const persisted = readSessionJsonl(filePath)!
     expect(persisted.enabledMemorySpaceRefs).toEqual([refB])
     expect(persisted.memoryWriteTargetRef).toEqual(refB)
+  })
+
+  it('surfaces a deterministic fsync failure, retains durable baseline and pending data, then retries B', async () => {
+    const workspaceRootPath = mkdtempSync(join(tmpdir(), 'session-memory-fault-'))
+    tempDirs.push(workspaceRootPath)
+    const sessionId = 'fault-retry'
+    const filePath = getSessionFilePath(workspaceRootPath, sessionId)
+    mkdirSync(join(workspaceRootPath, 'sessions', sessionId), { recursive: true })
+    const sessionA: StoredSession = {
+      id: sessionId,
+      workspaceRootPath,
+      name: 'A',
+      createdAt: 1,
+      lastUsedAt: 1,
+      messages: [],
+      tokenUsage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, contextTokens: 0, costUsd: 0 },
+    }
+    writeSessionJsonl(filePath, sessionA)
+    const headerA = readSessionJsonl(filePath)!
+    let failSync = true
+    const fs: SessionPersistenceFsAdapter = {
+      open: async (path, flags) => {
+        const handle = await fsOpen(path, flags)
+        return {
+          writeFile: async (data, encoding) => { await handle.writeFile(data, encoding) },
+          sync: async () => {
+            if (failSync) throw Object.assign(new Error('injected fsync failure'), { code: 'EIO' })
+            await handle.sync()
+          },
+          close: async () => { await handle.close() },
+        }
+      },
+      rename: fsRename,
+      unlink: fsUnlink,
+    }
+    const queue = new SessionPersistenceQueue(60_000, fs)
+    queue.initializeBaseline(sessionId, makeHeader({ name: headerA.name }))
+    const signatureA = queue.getLastWrittenSignature(sessionId)
+    queue.enqueue({ ...sessionA, name: 'B' })
+
+    await expect(queue.flush(sessionId)).rejects.toThrow('injected fsync failure')
+    expect(readSessionJsonl(filePath)?.name).toBe('A')
+    expect(queue.getLastWrittenSignature(sessionId)).toBe(signatureA)
+    expect(queue.hasPending(sessionId)).toBe(true)
+
+    failSync = false
+    await queue.flush(sessionId)
+    expect(readSessionJsonl(filePath)?.name).toBe('B')
+    expect(queue.getLastWrittenSignature(sessionId)).toBe(
+      getHeaderMetadataSignature(makeHeader({ name: 'B' })),
+    )
+    expect(queue.hasPending(sessionId)).toBe(false)
+    expect(existsSync(`${filePath}.tmp`)).toBe(false)
+  })
+
+  it('rejects an oversized queued write before replacing valid disk data or creating a temp file', async () => {
+    const workspaceRootPath = mkdtempSync(join(tmpdir(), 'session-memory-queue-cap-'))
+    tempDirs.push(workspaceRootPath)
+    const sessionId = 'queue-cap'
+    const filePath = getSessionFilePath(workspaceRootPath, sessionId)
+    mkdirSync(join(workspaceRootPath, 'sessions', sessionId), { recursive: true })
+    const valid: StoredSession = {
+      id: sessionId,
+      workspaceRootPath,
+      name: 'valid A',
+      createdAt: 1,
+      lastUsedAt: 1,
+      messages: [],
+      tokenUsage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, contextTokens: 0, costUsd: 0 },
+    }
+    writeSessionJsonl(filePath, valid)
+    const queue = new SessionPersistenceQueue(60_000)
+    queue.enqueue({ ...valid, name: 'oversized B', transferredSessionSummary: 'x'.repeat(MAX_SESSION_HEADER_BYTES) })
+
+    await expect(queue.flush(sessionId)).rejects.toThrow(
+      `Session header exceeds ${MAX_SESSION_HEADER_BYTES} byte limit`,
+    )
+    expect(readSessionJsonl(filePath)?.name).toBe('valid A')
+    expect(existsSync(`${filePath}.tmp`)).toBe(false)
+    expect(queue.hasPending(sessionId)).toBe(true)
+    queue.cancel(sessionId)
+  })
+
+  it('serializes a timer write with a concurrent flush and coalesces to newest C after failure', async () => {
+    const workspaceRootPath = mkdtempSync(join(tmpdir(), 'session-memory-coalesce-fault-'))
+    tempDirs.push(workspaceRootPath)
+    const sessionId = 'fault-coalesce'
+    const filePath = getSessionFilePath(workspaceRootPath, sessionId)
+    mkdirSync(join(workspaceRootPath, 'sessions', sessionId), { recursive: true })
+    const sessionA: StoredSession = {
+      id: sessionId,
+      workspaceRootPath,
+      name: 'A',
+      createdAt: 1,
+      lastUsedAt: 1,
+      messages: [],
+      tokenUsage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, contextTokens: 0, costUsd: 0 },
+    }
+    writeSessionJsonl(filePath, sessionA)
+
+    let enterSync!: () => void
+    const syncEntered = new Promise<void>(resolve => { enterSync = resolve })
+    let releaseSync!: () => void
+    const syncReleased = new Promise<void>(resolve => { releaseSync = resolve })
+    let failNextSync = true
+    let activeHandles = 0
+    let maxActiveHandles = 0
+    const fs: SessionPersistenceFsAdapter = {
+      open: async (path, flags) => {
+        const handle = await fsOpen(path, flags)
+        activeHandles++
+        maxActiveHandles = Math.max(maxActiveHandles, activeHandles)
+        return {
+          writeFile: async (data, encoding) => { await handle.writeFile(data, encoding) },
+          sync: async () => {
+            if (failNextSync) {
+              enterSync()
+              await syncReleased
+              failNextSync = false
+              throw Object.assign(new Error('injected coalescing failure'), { code: 'EIO' })
+            }
+            await handle.sync()
+          },
+          close: async () => {
+            try { await handle.close() } finally { activeHandles-- }
+          },
+        }
+      },
+      rename: fsRename,
+      unlink: fsUnlink,
+    }
+    const queue = new SessionPersistenceQueue(1, fs)
+    queue.initializeBaseline(sessionId, makeHeader({ name: 'A' }))
+    const signatureA = queue.getLastWrittenSignature(sessionId)
+    queue.enqueue({ ...sessionA, name: 'B' })
+    await syncEntered // B started from the debounce timer.
+    queue.enqueue({ ...sessionA, name: 'C' })
+    const concurrentFlush = queue.flush(sessionId)
+    await Bun.sleep(5)
+    expect(maxActiveHandles).toBe(1)
+    releaseSync()
+
+    await expect(concurrentFlush).rejects.toThrow('injected coalescing failure')
+    expect(readSessionJsonl(filePath)?.name).toBe('A')
+    expect(queue.getLastWrittenSignature(sessionId)).toBe(signatureA)
+    expect(queue.hasPending(sessionId)).toBe(true)
+
+    await queue.flush(sessionId)
+    expect(readSessionJsonl(filePath)?.name).toBe('C')
+    expect(queue.hasPending(sessionId)).toBe(false)
+    expect(maxActiveHandles).toBe(1)
   })
 })

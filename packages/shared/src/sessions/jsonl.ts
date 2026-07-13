@@ -9,6 +9,7 @@ import { openSync, readSync, closeSync, readFileSync, writeFileSync, renameSync,
 import { open, readFile } from 'fs/promises';
 import { dirname } from 'path';
 import type { SessionHeader, StoredSession, StoredMessage, SessionTokenUsage } from './types.ts';
+import { MAX_SESSION_HEADER_BYTES } from '@craft-agent/core';
 
 import type { PermissionMode } from '../agent/mode-types.ts';
 import { parsePermissionMode } from '../agent/mode-types.ts';
@@ -20,10 +21,10 @@ import { normalizeSessionMemorySelection } from '../project-memory/connections/s
 
 /**
  * A valid header with 50 canonical Memory refs is roughly 6 KiB before normal
- * session metadata. 64 KiB leaves ample room for the existing bounded metadata
- * fields while still preventing unbounded first-line reads of corrupted JSONL.
+ * session metadata. The shared cap leaves ample room for bounded metadata while
+ * still preventing unbounded first-line reads of corrupted JSONL.
  */
-export const MAX_SESSION_HEADER_BYTES = 64 * 1024;
+export { MAX_SESSION_HEADER_BYTES } from '@craft-agent/core';
 export function assertSessionHeaderEncodedBytes(encodedHeader: string): number {
   const bytes = Buffer.byteLength(encodedHeader, 'utf-8');
   if (bytes > MAX_SESSION_HEADER_BYTES) throw new Error(`Session header exceeds ${MAX_SESSION_HEADER_BYTES} byte limit`);

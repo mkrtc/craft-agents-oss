@@ -12,6 +12,20 @@ interface PendingWrite {
   timer?: ReturnType<typeof setTimeout>
 }
 
+interface PersistenceFileHandle {
+  writeFile(data: string, encoding: BufferEncoding): Promise<void>
+  sync(): Promise<void>
+  close(): Promise<void>
+}
+
+export interface SessionPersistenceFsAdapter {
+  open(path: string, flags: 'w'): Promise<PersistenceFileHandle>
+  rename(oldPath: string, newPath: string): Promise<void>
+  unlink(path: string): Promise<void>
+}
+
+const defaultFsAdapter: SessionPersistenceFsAdapter = { open, rename, unlink }
+
 interface HeaderMetadataSignature {
   name?: string
   labels?: string[]
@@ -80,9 +94,11 @@ class SessionPersistenceQueue {
   /** Signature being atomically written, used only to suppress fs.watch echoes. */
   private inFlightHeaderSignature = new Map<string, string>()
   private debounceMs: number
+  private fs: SessionPersistenceFsAdapter
 
-  constructor(debounceMs = 500) {
+  constructor(debounceMs = 500, fs: SessionPersistenceFsAdapter = defaultFsAdapter) {
     this.debounceMs = debounceMs
+    this.fs = fs
   }
 
   /**
@@ -94,7 +110,9 @@ class SessionPersistenceQueue {
     if (existing?.timer) clearTimeout(existing.timer)
 
     const timer = setTimeout(() => {
-      void this.write(session.id).catch(error => {
+      // Timer-driven writes must use the same serialized path as explicit
+      // flushes; calling write() directly can race on the shared .tmp file.
+      void this.flush(session.id).catch(error => {
         console.error(`[PersistenceQueue] Failed to write session ${session.id}:`, error)
       })
     }, this.debounceMs)
@@ -179,7 +197,7 @@ class SessionPersistenceQueue {
       this.inFlightHeaderSignature.set(sessionId, finalSignature)
       const tmpFile = filePath + '.tmp'
       try {
-        const handle = await open(tmpFile, 'w')
+        const handle = await this.fs.open(tmpFile, 'w')
         try {
           await handle.writeFile(lines.join('\n') + '\n', 'utf-8')
           await handle.sync()
@@ -187,8 +205,8 @@ class SessionPersistenceQueue {
           await handle.close()
         }
         // On Windows, rename fails if target exists. Delete first for cross-platform compatibility.
-        try { await unlink(filePath) } catch { /* ignore if doesn't exist */ }
-        await rename(tmpFile, filePath)
+        try { await this.fs.unlink(filePath) } catch { /* ignore if doesn't exist */ }
+        await this.fs.rename(tmpFile, filePath)
         this.lastWrittenHeaderSignature.set(sessionId, finalSignature)
         debug(`[PersistenceQueue] Wrote session ${sessionId}`)
       } finally {
@@ -208,22 +226,26 @@ class SessionPersistenceQueue {
    */
   async flush(sessionId: string): Promise<void> {
     const entry = this.pending.get(sessionId)
-    if (entry) {
-      if (entry.timer) clearTimeout(entry.timer)
+    if (entry?.timer) clearTimeout(entry.timer)
 
-      // Wait for any in-progress write to complete first
-      const inProgress = this.writeInProgress.get(sessionId)
-      if (inProgress) {
-        await inProgress
-      }
+    // Wait for any timer- or caller-initiated write. Re-enter afterward so a
+    // newer update queued during that write is serialized behind it, and so
+    // concurrent flush callers also wait for the newest tracked write.
+    const inProgress = this.writeInProgress.get(sessionId)
+    if (inProgress) {
+      await inProgress
+      return this.flush(sessionId)
+    }
 
-      // Start new write and track it
-      const writePromise = this.write(sessionId)
-      this.writeInProgress.set(sessionId, writePromise)
+    if (!this.pending.has(sessionId)) return
 
-      try {
-        await writePromise
-      } finally {
+    const writePromise = this.write(sessionId)
+    this.writeInProgress.set(sessionId, writePromise)
+
+    try {
+      await writePromise
+    } finally {
+      if (this.writeInProgress.get(sessionId) === writePromise) {
         this.writeInProgress.delete(sessionId)
       }
     }
