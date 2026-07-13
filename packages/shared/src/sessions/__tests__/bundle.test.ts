@@ -272,6 +272,14 @@ describe('validateBundle', () => {
     expect(validateBundle({ version: 1, session: { header: { id: 'x' }, messages: [] }, files: [] })).toBe(false)
   })
 
+  it('rejects a bundle whose encoded header exceeds the JSONL cap', () => {
+    expect(validateBundle({
+      version: 1,
+      session: { header: { id: 'x', createdAt: 1, transferredSessionSummary: 'x'.repeat(70 * 1024) }, messages: [] },
+      files: [],
+    })).toBe(false)
+  })
+
   it.each([
     ['51 refs', { enabledMemorySpaceRefs: Array.from({ length: 51 }, () => ({ connectionId: '123e4567-e89b-42d3-8456-426614174000', spaceId: 'aaaaaaaa-e89b-42d3-8456-426614174000' })) }],
     ['unknown nested fields', { enabledMemorySpaceRefs: [{ connectionId: '123e4567-e89b-42d3-8456-426614174000', spaceId: 'aaaaaaaa-e89b-42d3-8456-426614174000', injected: true }] }],

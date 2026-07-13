@@ -131,7 +131,8 @@ function readFirstHeaderLineSync(fd: number): string {
     const bytesRead = readSync(fd, buffer, 0, buffer.length, position);
     if (bytesRead === 0) return Buffer.concat(chunks, total).toString('utf-8');
     const newline = buffer.subarray(0, bytesRead).indexOf(0x0a);
-    const slice = newline === -1 ? buffer.subarray(0, bytesRead) : buffer.subarray(0, newline);
+    const rawSlice = newline === -1 ? buffer.subarray(0, bytesRead) : buffer.subarray(0, newline);
+    const slice = newline !== -1 && rawSlice[rawSlice.length - 1] === 0x0d ? rawSlice.subarray(0, -1) : rawSlice;
     chunks.push(slice);
     total += slice.length;
     if (newline !== -1) return Buffer.concat(chunks, total).toString('utf-8');
@@ -143,6 +144,10 @@ function readFirstHeaderLineSync(fd: number): string {
   const sentinel = Buffer.alloc(1);
   const bytesRead = readSync(fd, sentinel, 0, 1, position);
   if (bytesRead === 0 || sentinel[0] === 0x0a) return Buffer.concat(chunks, total).toString('utf-8');
+  if (sentinel[0] === 0x0d) {
+    const newline = Buffer.alloc(1);
+    if (readSync(fd, newline, 0, 1, position + 1) === 1 && newline[0] === 0x0a) return Buffer.concat(chunks, total).toString('utf-8');
+  }
   throw new Error(`Session header exceeds ${MAX_SESSION_HEADER_BYTES} byte limit`);
 }
 
@@ -155,7 +160,8 @@ async function readFirstHeaderLineAsync(handle: Awaited<ReturnType<typeof open>>
     const { bytesRead } = await handle.read(buffer, 0, buffer.length, position);
     if (bytesRead === 0) return Buffer.concat(chunks, total).toString('utf-8');
     const newline = buffer.subarray(0, bytesRead).indexOf(0x0a);
-    const slice = newline === -1 ? buffer.subarray(0, bytesRead) : buffer.subarray(0, newline);
+    const rawSlice = newline === -1 ? buffer.subarray(0, bytesRead) : buffer.subarray(0, newline);
+    const slice = newline !== -1 && rawSlice[rawSlice.length - 1] === 0x0d ? rawSlice.subarray(0, -1) : rawSlice;
     chunks.push(slice);
     total += slice.length;
     if (newline !== -1) return Buffer.concat(chunks, total).toString('utf-8');
@@ -165,6 +171,11 @@ async function readFirstHeaderLineAsync(handle: Awaited<ReturnType<typeof open>>
   const sentinel = Buffer.alloc(1);
   const { bytesRead } = await handle.read(sentinel, 0, 1, position);
   if (bytesRead === 0 || sentinel[0] === 0x0a) return Buffer.concat(chunks, total).toString('utf-8');
+  if (sentinel[0] === 0x0d) {
+    const newline = Buffer.alloc(1);
+    const next = await handle.read(newline, 0, 1, position + 1);
+    if (next.bytesRead === 1 && newline[0] === 0x0a) return Buffer.concat(chunks, total).toString('utf-8');
+  }
   throw new Error(`Session header exceeds ${MAX_SESSION_HEADER_BYTES} byte limit`);
 }
 
