@@ -25,7 +25,9 @@ import type { ValidationResult } from './validation.ts';
 const REF_KEYS = new Set(['connectionId', 'spaceId']);
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
 }
 
 function refKey(ref: MemorySpaceRef): string {
@@ -44,10 +46,10 @@ export function validateMemorySpaceRef(input: unknown, label = 'memory space ref
   const extras = Object.keys(input).filter(k => !REF_KEYS.has(k));
   if (extras.length > 0) errors.push(`${label} has unknown field(s): ${extras.join(', ')}`);
 
-  const connectionId = toCanonicalUuid(input.connectionId);
-  const spaceId = toCanonicalUuid(input.spaceId);
-  if (connectionId === null) errors.push(`${label}.connectionId must be a UUID`);
-  if (spaceId === null) errors.push(`${label}.spaceId must be a UUID`);
+  const connectionId = Object.hasOwn(input, 'connectionId') ? toCanonicalUuid(input.connectionId) : null;
+  const spaceId = Object.hasOwn(input, 'spaceId') ? toCanonicalUuid(input.spaceId) : null;
+  if (connectionId === null) errors.push(`${label}.connectionId must be an own UUID property`);
+  if (spaceId === null) errors.push(`${label}.spaceId must be an own UUID property`);
 
   if (errors.length > 0 || connectionId === null || spaceId === null) {
     return { valid: false, errors };

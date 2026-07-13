@@ -61,6 +61,7 @@ import {
   getSessionPath as getSessionStoragePath,
   ensureSessionDir,
   getSessionFilePath,
+  readSessionHeader,
   generateSessionId,
   sessionPersistenceQueue,
   getHeaderMetadataSignature,
@@ -924,6 +925,10 @@ interface ManagedSession {
   hasUnread?: boolean
   // Per-session source selection (slugs of enabled sources)
   enabledSourceSlugs?: string[]
+  // Structurally canonical Memory selection; availability is resolved separately.
+  enabledMemorySpaceRefs?: SessionHeader['enabledMemorySpaceRefs']
+  memoryWriteTargetRef?: SessionHeader['memoryWriteTargetRef']
+  memorySelectionMode?: SessionHeader['memorySelectionMode']
   // Labels applied to this session (additive tags, many-per-session)
   labels?: string[]
   // Workspace-scoped project binding (undefined = unbound)
@@ -1989,6 +1994,9 @@ export class SessionManager implements ISessionManager {
    */
   private applyExternalSessionMetadata(managed: ManagedSession, header: SessionHeader): boolean {
     const sessionId = managed.id
+    // Defense in depth: the watcher currently reads normalized headers, but
+    // reconciliation must remain atomic if another caller supplies one.
+    header = normalizeSessionHeaderMemorySelection(header)
     let changed = false
 
     // Labels
@@ -2038,6 +2046,25 @@ export class SessionManager implements ISessionManager {
     // Project binding (no dedicated event today — handled via metaChanged broadcast)
     if (managed.projectId !== header.projectId) {
       managed.projectId = header.projectId
+      changed = true
+    }
+
+    // Memory selection is one atomic persisted unit. Deletion/absence clears
+    // all fields; cloned refs avoid aliasing watcher-owned header objects.
+    const oldMemory = JSON.stringify({
+      enabledMemorySpaceRefs: managed.enabledMemorySpaceRefs,
+      memoryWriteTargetRef: managed.memoryWriteTargetRef,
+      memorySelectionMode: managed.memorySelectionMode,
+    })
+    const nextMemory = {
+      enabledMemorySpaceRefs: header.enabledMemorySpaceRefs?.map(ref => ({ ...ref })),
+      memoryWriteTargetRef: header.memoryWriteTargetRef ? { ...header.memoryWriteTargetRef } : undefined,
+      memorySelectionMode: header.memorySelectionMode,
+    }
+    if (oldMemory !== JSON.stringify(nextMemory)) {
+      managed.enabledMemorySpaceRefs = nextMemory.enabledMemorySpaceRefs
+      managed.memoryWriteTargetRef = nextMemory.memoryWriteTargetRef
+      managed.memorySelectionMode = nextMemory.memorySelectionMode
       changed = true
     }
 
@@ -2772,6 +2799,8 @@ export class SessionManager implements ISessionManager {
           }
 
           this.sessions.set(meta.id, managed)
+          const header = readSessionHeader(getSessionFilePath(workspaceRootPath, meta.id))
+          if (header) sessionPersistenceQueue.initializeBaseline(meta.id, header)
 
           // Initialize session metadata in AutomationSystem for diffing
           const automationSystem = this.automationSystems.get(workspaceRootPath)
