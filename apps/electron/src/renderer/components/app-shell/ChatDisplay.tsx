@@ -77,6 +77,13 @@ import { resolveBranchNewPanelOption } from "./branching"
 import { getAutoManagedActivityTurnKey, shouldAutoExpandTurnActivities, shouldUseCompactResponseWindow } from "./ChatDisplay.display-rules"
 import { handleErrorMessageAction } from "./error-message-actions"
 import * as storage from "@/lib/local-storage"
+import { WhipButton } from "@/components/chat/whip/WhipButton"
+import { PhysicsWhipOverlay, type WhipEffect } from "@/components/chat/whip/PhysicsWhipOverlay"
+import { useWhip } from "@/components/chat/whip/useWhip"
+import { isInteractiveEventTarget, hasActiveTextSelection, WHIP_CURSOR_STYLE } from "@/components/chat/whip/whip-dom"
+import { canHandleWhipClick, pickWhipMessageKey, shouldCancelOnWhipRightClick } from "@/components/chat/whip/whip-logic"
+import { WHIP_LEFT_HIT_MESSAGE_KEYS, WHIP_RIGHT_HIT_MESSAGE_KEYS } from "@/components/chat/whip/whipMessages"
+import type { WhipVec } from "@/components/chat/whip/whip-physics"
 
 // ============================================================================
 // CSS Custom Highlight API helper
@@ -510,6 +517,16 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
   const messagesEndRef = React.useRef<HTMLDivElement>(null)
   const scrollViewportRef = React.useRef<HTMLDivElement>(null)
   const prevSessionIdRef = React.useRef<string | null>(null)
+  // Whip click-to-interrupt easter egg (ephemeral UI only, no transcript message)
+  const whip = useWhip({ sessionId: session?.id, isProcessing: !!session?.isProcessing })
+  const [whipEffect, setWhipEffect] = useState<WhipEffect | null>(null)
+  // Container-local pointer position for the armed dangling rope; updated only while
+  // armed, read imperatively by the physics rAF loop (no re-render per pointer move).
+  const whipPointerRef = React.useRef<WhipVec | null>(null)
+  // Drop any in-flight hit/fade animation on session switch so it never plays over the newly-loaded session.
+  React.useEffect(() => {
+    setWhipEffect(null)
+  }, [session?.id])
   // Reverse pagination: show last N turns initially, load more on scroll up
   const TURNS_PER_PAGE = 20
   const [visibleTurnCount, setVisibleTurnCount] = React.useState(TURNS_PER_PAGE)
@@ -1367,6 +1384,63 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
     })
   }
 
+  // Whip armed pointer tracking: container-scoped only (no document-level listener),
+  // feeds the dangling rope's anchor while the physics overlay is in its swing phase.
+  const handleWhipContainerPointerMove = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    const rect = e.currentTarget.getBoundingClientRect()
+    whipPointerRef.current = { x: e.clientX - rect.left, y: e.clientY - rect.top }
+  }, [])
+
+  // Whip left-click: only live while armed. Tease only — visual + funny toast, never cancels.
+  // Bails out for interactive targets and active text selections so links/chips/copy still work.
+  const handleWhipContainerClick = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
+    if (!canHandleWhipClick({
+      armed: whip.armed,
+      isInteractiveTarget: isInteractiveEventTarget(e.target),
+      hasTextSelection: hasActiveTextSelection(),
+    })) return
+
+    // Safe even if processing already ended: just disarm, no animation/toast/cancel.
+    if (!session?.isProcessing) {
+      whip.disarm()
+      return
+    }
+
+    const rect = e.currentTarget.getBoundingClientRect()
+    setWhipEffect({ id: Date.now(), x: e.clientX - rect.left, y: e.clientY - rect.top, strong: false })
+    toast(t(pickWhipMessageKey(WHIP_LEFT_HIT_MESSAGE_KEYS, Math.random())))
+    // Stay armed after a tease so the user can keep whipping until they cancel.
+  }, [whip, session, t])
+
+  // Whip right-click: only cancels while armed + still processing. One-shot guard applies
+  // only to this path. Non-interactive/no-selection valid hits also suppress the native
+  // context menu; interactive targets and text selections pass through untouched.
+  const handleWhipContainerContextMenu = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
+    if (!canHandleWhipClick({
+      armed: whip.armed,
+      isInteractiveTarget: isInteractiveEventTarget(e.target),
+      hasTextSelection: hasActiveTextSelection(),
+    })) return
+
+    e.preventDefault()
+
+    if (!session || !shouldCancelOnWhipRightClick({ isProcessing: !!session.isProcessing })) {
+      whip.disarm()
+      return
+    }
+    if (!whip.consume()) return
+
+    const rect = e.currentTarget.getBoundingClientRect()
+    setWhipEffect({ id: Date.now(), x: e.clientX - rect.left, y: e.clientY - rect.top, strong: true })
+    toast(t(pickWhipMessageKey(WHIP_RIGHT_HIT_MESSAGE_KEYS, Math.random())))
+    window.electronAPI.cancelProcessing(session.id, false).catch(error => {
+      console.error('[ChatDisplay] Whip: failed to cancel processing:', error)
+    })
+    // Don't force-disarm here: the one-shot guard already prevents a second cancel,
+    // and useWhip auto-disarms once processing actually ends. The whip stays visible
+    // through the strike; explicit cancel is the user's off-switch.
+  }, [whip, session, t])
+
   // Per-frame scroll compensation during input height animation
   // Only compensate when user is "stuck to bottom" - otherwise let them control their scroll position
   const handleAnimatedHeightChange = React.useCallback((delta: number) => {
@@ -1566,7 +1640,20 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
           {/* Content layer */}
           <div className="flex flex-1 flex-col min-h-0 min-w-0 relative z-10">
           {/* === MESSAGES AREA: Scrollable list of message bubbles === */}
-          <div className="relative flex-1 min-h-0">
+          <div
+            className="relative flex-1 min-h-0"
+            onClick={whip.armed ? handleWhipContainerClick : undefined}
+            onContextMenu={whip.armed ? handleWhipContainerContextMenu : undefined}
+            onPointerMove={whip.armed ? handleWhipContainerPointerMove : undefined}
+            style={whip.armed ? { cursor: WHIP_CURSOR_STYLE } : undefined}
+          >
+            <PhysicsWhipOverlay
+              armed={whip.armed}
+              effect={whipEffect}
+              onEffectComplete={() => setWhipEffect(null)}
+              onCancel={whip.disarm}
+              pointerRef={whipPointerRef}
+            />
             {/* Mask wrapper - fades content at top and bottom over transparent/image backgrounds */}
             <div
               className="h-full"
@@ -2032,7 +2119,11 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
             currentSessionStatus={session.sessionStatus || 'todo'}
             onSessionStatusChange={onSessionStatusChange}
             rightAccessory={(
-              <AnimatePresence initial={false}>
+              <>
+                {!compactMode && (
+                  <WhipButton isProcessing={!!session.isProcessing} armed={whip.armed} onArm={whip.arm} onDisarm={whip.disarm} />
+                )}
+                <AnimatePresence initial={false}>
                 {!compactMode && !isAtScrollBottom && !messagesLoading && !messagesLoadError && (
                   <motion.button
                     key="scroll-to-bottom"
@@ -2049,7 +2140,8 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
                     <ChevronDown className="h-3.5 w-3.5" />
                   </motion.button>
                 )}
-              </AnimatePresence>
+                </AnimatePresence>
+              </>
             )}
             inputProps={{
               placeholder,
