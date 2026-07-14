@@ -19,13 +19,57 @@ import { debug } from '../utils/debug.ts';
 
 const LABEL_CONFIG_DIR = 'labels';
 const LABEL_CONFIG_FILE = 'labels/config.json';
+const DEFAULT_ROLE_LABEL_IDS = ['executor', 'auditor', 'designer', 'tester'] as const;
+
+function cloneLabel(label: LabelConfig): LabelConfig {
+  return {
+    ...label,
+    color: typeof label.color === 'object' && label.color !== null ? { ...label.color } : label.color,
+    children: label.children?.map(cloneLabel),
+  };
+}
+
+function getDefaultWorkflowRoleLabels(): LabelConfig[] {
+  const workflow = findLabelById(getDefaultLabelConfig().labels, 'workflow');
+  if (!workflow?.children) return [];
+  return workflow.children
+    .filter(label => DEFAULT_ROLE_LABEL_IDS.includes(label.id as (typeof DEFAULT_ROLE_LABEL_IDS)[number]))
+    .map(cloneLabel);
+}
+
+/**
+ * Existing workspace configs predate some default role labels. Provision only
+ * those roles, preserving any user-authored labels, fields, and locations.
+ */
+function ensureDefaultRoleLabels(config: WorkspaceLabelConfig): boolean {
+  const existingIds = new Set(flattenLabels(config.labels).map(label => label.id));
+  const missingRoleLabels = getDefaultWorkflowRoleLabels().filter(label => !existingIds.has(label.id));
+
+  if (missingRoleLabels.length === 0) {
+    return false;
+  }
+
+  const workflow = findLabelById(config.labels, 'workflow');
+  if (workflow) {
+    workflow.children = [...(workflow.children ?? []), ...missingRoleLabels];
+  } else {
+    config.labels.push({
+      id: 'workflow',
+      name: 'Workflow',
+      color: { light: '#10B981', dark: '#34D399' },
+      children: missingRoleLabels,
+    });
+  }
+
+  return true;
+}
 
 /**
  * Get default label configuration.
  * Provides a starter set of labels organized into two complementary color families:
  * - Development (blue family): Code, Bug, Automation
  * - Content (purple family): Writing, Research, Design
- * - Workflow (green family): Orchestrator, Subagent, Status, Git, Worktree
+ * - Workflow (green family): Orchestrator, Subagent, Status, Git, Worktree, role labels
  * Plus flat valued labels: Priority (number), Project (string)
  *
  * Children use hue-shifted shades of their parent color to show visual hierarchy.
@@ -111,6 +155,26 @@ export function getDefaultLabelConfig(): WorkspaceLabelConfig {
             color: { light: '#65A30D', dark: '#A3E635' },
             valueType: 'string',
           },
+          {
+            id: 'executor',
+            name: 'Executor',
+            color: { light: '#15803D', dark: '#86EFAC' },
+          },
+          {
+            id: 'auditor',
+            name: 'Auditor',
+            color: { light: '#0F766E', dark: '#5EEAD4' },
+          },
+          {
+            id: 'designer',
+            name: 'Designer',
+            color: { light: '#047857', dark: '#6EE7B7' },
+          },
+          {
+            id: 'tester',
+            name: 'Tester',
+            color: { light: '#4D7C0F', dark: '#BEF264' },
+          },
         ],
       },
       {
@@ -150,10 +214,12 @@ export function loadLabelConfig(workspaceRootPath: string): WorkspaceLabelConfig
     const config = readJsonFileSync<WorkspaceLabelConfig>(configPath);
 
     // Auto-migrate old Tailwind class colors (e.g., "text-accent") to new EntityColor format.
-    // If migration occurs, write the updated config back to disk.
-    const migrated = migrateLabelColors(config);
-    if (migrated) {
-      debug('[loadLabelConfig] Migrated old color format, writing back');
+    // Ensure existing configs get the current default role labels without restoring all defaults.
+    // If either migration occurs, write the updated config back to disk once.
+    const migratedColors = migrateLabelColors(config);
+    const migratedRoles = ensureDefaultRoleLabels(config);
+    if (migratedColors || migratedRoles) {
+      debug('[loadLabelConfig] Migrated label config, writing back', { migratedColors, migratedRoles });
       saveLabelConfig(workspaceRootPath, config);
     }
 

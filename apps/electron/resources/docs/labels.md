@@ -10,9 +10,11 @@ Labels are additive tags that can be applied to sessions. Unlike statuses (which
 
 - Config: `~/.craft-agent/workspaces/{id}/labels/config.json`
 
-## No Defaults (Regular Labels)
+## Starter Defaults (Regular Labels)
 
-Unlike statuses, regular labels start empty. Users create whatever labels they need. There are no built-in or required regular labels.
+New workspaces are seeded with a starter label tree to make common workflows discoverable. The default set includes Development, Content, Workflow, Priority, and Project labels. The Workflow group includes agent/workflow labels such as Orchestrator, Subagent, Status, Git, Worktree, Executor, Auditor, Designer, and Tester.
+
+These are user-controlled regular labels, not fixed or required system labels. You can rename, recolor, move, or delete them like any other label. On update, existing workspaces may re-provision the four role labels `executor`, `auditor`, `designer`, and `tester` if those label IDs are missing; existing custom labels with those IDs are preserved in place.
 
 ## Visual Representation
 
@@ -341,8 +343,8 @@ Clicking a label filters the session list. Clicking a parent label includes sess
 - **Globally unique IDs**: Simple slugs, unique across the entire tree
 - **Color-only visual**: Labels use colored circles — no icons, keeping the UI clean and consistent
 - **No categories**: Labels don't affect inbox/archive filtering (that's what statuses are for)
-- **No defaults**: Workspaces start with zero labels
-- **No fixed labels**: All labels are fully user-controlled (deletable, renameable)
+- **Starter defaults**: New workspaces start with a helpful default label tree for development, content, workflow, priority, and project organization
+- **No fixed labels**: Starter/default labels are fully user-controlled (deletable, renameable, movable)
 - **Multi-select**: Sessions store `labels: string[]`, not a single value
 - **Delete cascade**: Deleting a label removes it and all descendants from sessions
 - **Max depth 5**: Prevents excessively deep hierarchies

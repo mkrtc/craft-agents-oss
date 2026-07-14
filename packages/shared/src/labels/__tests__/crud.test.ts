@@ -10,7 +10,7 @@ let workspaceRoot: string;
 
 beforeEach(() => {
   workspaceRoot = mkdtempSync(join(tmpdir(), 'labels-crud-test-'));
-  // Seed with a minimal config (no defaults — we control the tree)
+  // Seed with a minimal config. Loading it provisions default role labels.
   saveLabelConfig(workspaceRoot, { version: 1, labels: [] });
 });
 
@@ -25,9 +25,9 @@ describe('ensureLabelsExist', () => {
     const result = ensureLabelsExist(workspaceRoot, ['bug']);
     expect(result).toEqual(['bug']);
 
-    // No new labels created
+    // No duplicate labels created
     const all = flattenLabels(loadLabelConfig(workspaceRoot).labels);
-    expect(all).toHaveLength(1);
+    expect(all.filter(l => l.id === 'bug')).toHaveLength(1);
   });
 
   it('auto-creates missing labels with titlecased name', () => {
@@ -57,18 +57,18 @@ describe('ensureLabelsExist', () => {
     const result = ensureLabelsExist(workspaceRoot, ['priority::high']);
     expect(result).toEqual(['priority::high']);
 
-    // No new labels created
+    // No duplicate labels created
     const all = flattenLabels(loadLabelConfig(workspaceRoot).labels);
-    expect(all).toHaveLength(1);
+    expect(all.filter(l => l.id === 'priority')).toHaveLength(1);
   });
 
   it('passes through entries with invalid ID format unchanged', () => {
     const result = ensureLabelsExist(workspaceRoot, ['INVALID_FORMAT', '--bad']);
     expect(result).toEqual(['INVALID_FORMAT', '--bad']);
 
-    // No labels created
+    // No labels created for invalid entries
     const all = flattenLabels(loadLabelConfig(workspaceRoot).labels);
-    expect(all).toHaveLength(0);
+    expect(all.some(l => l.id === 'INVALID_FORMAT' || l.id === '--bad')).toBe(false);
   });
 
   it('handles mixed labels (existing, new, invalid)', () => {
@@ -78,7 +78,8 @@ describe('ensureLabelsExist', () => {
     expect(result).toEqual(['bug', 'new-label', 'INVALID']);
 
     const all = flattenLabels(loadLabelConfig(workspaceRoot).labels);
-    expect(all).toHaveLength(2); // bug + new-label
+    expect(all.filter(l => l.id === 'bug')).toHaveLength(1);
+    expect(all.filter(l => l.id === 'new-label')).toHaveLength(1);
     expect(all.find(l => l.id === 'new-label')!.name).toBe('New Label');
   });
 
