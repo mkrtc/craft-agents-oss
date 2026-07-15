@@ -14,4 +14,5 @@ export * from './contracts.ts';
 export * from './repository.ts';
 export * from './environment.ts';
 export * from './mappers.ts';
+export * from './service.ts';
 export { MEMORY_GLOBAL_SPACE_NAMESPACE } from './global-space.ts';

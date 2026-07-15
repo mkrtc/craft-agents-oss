@@ -61,6 +61,7 @@ import {
   type StoredMemorySpaceConfig,
   type UpdateMemoryConnectionInput,
   type UpdateMemorySpaceInput,
+  type MemoryCredentialMode,
 } from './types.ts';
 import {
   normalizeNameKey,
@@ -90,6 +91,12 @@ export interface MemoryConnectionRepositoryOptions {
   configDir?: string;
   /** Clock, overridable for tests. */
   now?: () => number;
+}
+
+/** Optional overrides for connection creation behavior. */
+export interface CreateMemoryConnectionOptions {
+  /** Credential strategy for the new connection. */
+  credentialMode?: MemoryCredentialMode;
 }
 
 /** Result of a space create/update mutation. */
@@ -306,13 +313,24 @@ export class MemoryConnectionRepository {
   // Connection CRUD (serialized). Create/delete guard on the ROOT revision.
   // -------------------------------------------------------------------------
 
-  createConnection(input: CreateMemoryConnectionInput, expectedRootRevision: number): Promise<MemoryConnectionConfig> {
+  createConnection(
+    input: CreateMemoryConnectionInput,
+    expectedRootRevision: number,
+    options?: CreateMemoryConnectionOptions,
+  ): Promise<MemoryConnectionConfig> {
     return this.runExclusive(async () => {
       const validation = validateCreateMemoryConnectionInput(input);
       if (!validation.valid || !validation.value) {
         throw new MemoryError('invalid_input', validation.errors.join('; '), validation.errors);
       }
       const value = validation.value;
+      const requestedMode = options?.credentialMode;
+      const credentialMode: MemoryCredentialMode = requestedMode === 'stored-api-key' || requestedMode === 'none'
+        ? requestedMode
+        : 'none';
+      if (requestedMode !== undefined && requestedMode !== credentialMode) {
+        throw new MemoryError('invalid_input', `invalid credential mode: ${requestedMode}`);
+      }
       const config = this.load();
       assertRootRevision(config, expectedRootRevision);
       if (config.connections.length >= MEMORY_LIMITS.MAX_CONNECTIONS) {
@@ -328,7 +346,7 @@ export class MemoryConnectionRepository {
         url: value.url,
         collection: value.collection,
         embedding: value.embedding,
-        credentialMode: 'none',
+        credentialMode,
         name: value.name,
         enabled: value.enabled ?? true,
         proactiveRemoteSearch: value.proactiveRemoteSearch ?? false,
