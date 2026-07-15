@@ -204,7 +204,6 @@ export function ProjectMemoryPanel({ projectIdOrSlug }: ProjectMemoryPanelProps)
   }, [loadConnections, loadStatus])
 
   const handleDeleteConnection = React.useCallback(async (connection: ProjectMemoryConnectionSummary) => {
-    if (!window.confirm(`Delete memory connection "${connection.name}"?`)) return
     setMutatingConnectionId(connection.connectionId)
     try {
       await window.electronAPI.deleteProjectMemoryConnection({
@@ -405,6 +404,13 @@ function MemoryConnectionsSection({
   onDelete: (connection: ProjectMemoryConnectionSummary) => void
 }) {
   const connections = snapshot?.connections ?? []
+  const [pendingDeleteConnectionId, setPendingDeleteConnectionId] = React.useState<string | null>(null)
+
+  React.useEffect(() => {
+    if (pendingDeleteConnectionId && !connections.some(connection => connection.connectionId === pendingDeleteConnectionId)) {
+      setPendingDeleteConnectionId(null)
+    }
+  }, [connections, pendingDeleteConnectionId])
 
   return (
     <section className="rounded-lg border border-border/60 bg-background/50">
@@ -484,12 +490,41 @@ function MemoryConnectionsSection({
                       </div>
                     </div>
                     <div className="flex gap-2">
-                      <Button size="sm" variant="outline" onClick={() => onToggle(connection)} disabled={connection.isEnvironment || mutating}>
-                        {connection.enabled ? 'Disable' : 'Enable'}
-                      </Button>
-                      <Button size="sm" variant="ghost" onClick={() => onDelete(connection)} disabled={connection.isEnvironment || mutating}>
-                        <Trash2 className="h-3.5 w-3.5" />
-                      </Button>
+                      {pendingDeleteConnectionId === connection.connectionId ? (
+                        <>
+                          <Button
+                            size="sm"
+                            variant="destructive"
+                            onClick={() => onDelete(connection)}
+                            disabled={connection.isEnvironment || mutating}
+                          >
+                            Delete
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            onClick={() => setPendingDeleteConnectionId(null)}
+                            disabled={mutating}
+                          >
+                            Cancel
+                          </Button>
+                        </>
+                      ) : (
+                        <>
+                          <Button size="sm" variant="outline" onClick={() => onToggle(connection)} disabled={connection.isEnvironment || mutating}>
+                            {connection.enabled ? 'Disable' : 'Enable'}
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            onClick={() => setPendingDeleteConnectionId(connection.connectionId)}
+                            disabled={connection.isEnvironment || mutating}
+                            title={`Delete ${connection.name}`}
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </Button>
+                        </>
+                      )}
                     </div>
                   </div>
                 </li>
