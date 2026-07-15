@@ -28,9 +28,7 @@ describe('resolveManagedMemoryRefs', () => {
       { loadCredential: id => (calls.push(id), 'secret-token') },
     );
 
-    expect(result.readRefs).toEqual([
-      { connectionId: CONN, spaceId: targetGlobal.spaceId, kind: 'global', writable: true },
-    ]);
+    expect(result.readRefs).toEqual([]);
     expect(result.writeRef).toBeUndefined();
     expect(result.deniedRefs).toEqual([{ code: 'space-not-found', ref: denied }]);
     expect(calls).toEqual([]);

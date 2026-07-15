@@ -60,7 +60,7 @@ describe('QdrantProjectMemoryStore', () => {
     expect(fetchCalled).toBe(false);
   });
 
-  test('enforces request body limits before second request', async () => {
+  test('enforces request body limits before point upsert request', async () => {
     let calls = 0;
     globalThis.fetch = (async () => {
       calls += 1;
@@ -75,11 +75,12 @@ describe('QdrantProjectMemoryStore', () => {
       });
     }) as unknown as typeof fetch;
 
-    const store = new QdrantProjectMemoryStore({ enabled: true });
+    const store = new QdrantProjectMemoryStore({ enabled: true, dimension: 384 });
     await expect(
-      store.search({
-        query: 'x'.repeat(QDRANT_MAX_REQUEST_BODY_BYTES + 1),
-        scopes: [{ scope: 'global' }],
+      store.add({
+        scope: 'global',
+        source: 'manual-note',
+        content: 'x'.repeat(QDRANT_MAX_REQUEST_BODY_BYTES + 1),
       }),
     ).rejects.toThrow('Qdrant request body exceeds');
     expect(calls).toBe(1);
