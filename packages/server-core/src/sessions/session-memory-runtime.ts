@@ -46,7 +46,7 @@ function toManagedDescriptorSpace(space: GlobalMemorySpaceConfig | StoredMemoryS
     kind: space.kind,
     writable: space.writable,
     workspaceId: space.workspaceId,
-    projectId: space.projectId,
+    ...(space.kind === 'project' || space.kind === 'custom' ? { projectId: space.projectId } : {}),
   }
 }
 
