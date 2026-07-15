@@ -4,17 +4,20 @@
  * Storage: `${CONFIG_DIR}/memory/connections.json` (+ `.bak` backup).
  *
  * Guarantees:
- * - **Serialized process-local mutation** — every write goes through a promise
- *   chain, so concurrent callers never interleave a read-modify-write.
+ * - **Process-local mutation queue + cross-process file lock** for serialized
+ *   writes. Writes are fenced by an exclusive sentinel file lock and an
+ *   in-process promise chain.
  * - **Durable, symlink-safe atomic writes** — data is written to a unique,
- *   same-dir, exclusive (`O_EXCL`) `0600` temp file, `fsync`ed, then renamed
+ *   same-dir exclusive (`O_EXCL`) `0600` temp file, `fsync`ed, then renamed
  *   directly over the target (no unlink gap); the directory is `fsync`ed where
  *   supported. Symlinked primary/backup/temp targets are refused, never
- *   followed. The backup goes through its own unique temp + fsync + rename.
+ *   followed.
  * - **No silent data loss** — a missing config is a fresh/empty config, but a
  *   *present-but-unreadable/corrupt* primary AND backup surface an explicit
  *   `invalid_config` error rather than silently resetting to empty. A corrupt
  *   primary with a good backup recovers from the backup.
+ * - **Fail-closed on bad reads and malformed state** — bounded file reads,
+ *   explicit EACCES/EPERM failures, and parse/schema failures are surfaced.
  * - **Restrictive permissions** — dir `0o700`, files `0o600`; existing dir/files
  *   are repaired toward those modes where POSIX-supported.
  * - **Root + per-connection revisions** — the root `revision` bumps on every
@@ -24,8 +27,22 @@
  * - **No secrets** — API keys are never read or written here.
  */
 
-import { chmodSync, closeSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeSync } from 'fs';
-import { basename, join } from 'path';
+import {
+  chmodSync,
+  closeSync,
+  existsSync,
+  fstatSync,
+  fsyncSync,
+  lstatSync,
+  mkdirSync,
+  openSync,
+  readSync,
+  renameSync,
+  statSync,
+  unlinkSync,
+  writeSync,
+} from 'fs';
+import { basename, dirname, join, resolve } from 'path';
 import { CONFIG_DIR } from '../../config/paths.ts';
 import { safeJsonParse } from '../../utils/files.ts';
 import { randomUuid } from '../../utils/uuid.ts';
@@ -61,6 +78,12 @@ export { deriveGlobalSpace, deriveGlobalSpaceId } from './global-space.ts';
 
 /** Upper bound on the config file size we will read (bounded reads). */
 const MAX_CONFIG_BYTES = 4 * 1024 * 1024;
+/** Upper bound for lock metadata, tiny and deterministic. */
+const MAX_LOCK_METADATA_BYTES = 4 * 1024;
+const MUTATION_LOCK_TIMEOUT_MS = 3_000;
+const MUTATION_LOCK_INITIAL_BACKOFF_MS = 8;
+const MUTATION_LOCK_MAX_BACKOFF_MS = 128;
+const MUTATION_LOCK_STALE_MS = 10_000;
 
 export interface MemoryConnectionRepositoryOptions {
   /** Root config dir (defaults to CONFIG_DIR). Overridable for tests. */
@@ -78,13 +101,26 @@ export interface MemorySpaceMutationResult {
 type ReadResult =
   | { status: 'ok'; config: MemoryConnectionsConfig }
   | { status: 'missing' }
-  | { status: 'error'; reason: string };
+  | { status: 'error'; reason: string; code?: string };
+
+type FileReadResult =
+  | { status: 'ok'; text: string }
+  | { status: 'missing' }
+  | { status: 'error'; reason: string; code?: string };
+
+interface MutationLockMetadata {
+  token: string;
+  pid: number;
+  createdAtMs: number;
+}
 
 export class MemoryConnectionRepository {
   private readonly dir: string;
   private readonly filePath: string;
   private readonly backupPath: string;
+  private readonly lockPath: string;
   private readonly now: () => number;
+  private readonly lockOwnerToken: string;
   private mutationChain: Promise<unknown> = Promise.resolve();
   /** Stable ephemeral installationId for a fresh (unwritten) config on this instance. */
   private pendingInstallationId: string | null = null;
@@ -93,7 +129,9 @@ export class MemoryConnectionRepository {
     this.dir = join(options.configDir ?? CONFIG_DIR, 'memory');
     this.filePath = join(this.dir, MEMORY_CONNECTIONS_FILE);
     this.backupPath = `${this.filePath}.bak`;
+    this.lockPath = `${this.filePath}.lock`;
     this.now = options.now ?? (() => Date.now());
+    this.lockOwnerToken = randomUuid();
   }
 
   getFilePath(): string {
@@ -138,7 +176,7 @@ export class MemoryConnectionRepository {
 
   /** Ensure the installationId is generated and persisted (stable across restarts). */
   ensureInstallationId(): Promise<string> {
-    return this.runExclusive(() => {
+    return this.runExclusive(async () => {
       const existed = existsSync(this.filePath);
       const config = this.load();
       if (!existed) this.persist(config);
@@ -154,7 +192,7 @@ export class MemoryConnectionRepository {
     return this.load().connections.find(c => c.connectionId === connectionId) ?? null;
   }
 
-  /** Spaces for a connection, with the derived read-only Global space first. */
+  /** Spaces for a connection, with the derived Read-only Global space first. */
   listSpaces(connectionId: string): MemorySpaceConfig[] {
     const connection = this.requireConnection(this.load(), connectionId);
     return [deriveGlobalSpace(connection), ...connection.spaces];
@@ -179,36 +217,89 @@ export class MemoryConnectionRepository {
   }
 
   private tryReadConfig(path: string): ReadResult {
-    let stat;
-    try {
-      stat = lstatSync(path);
-    } catch (error) {
-      const code = (error as NodeJS.ErrnoException).code;
-      if (code === 'ENOENT') return { status: 'missing' };
-      return { status: 'error', reason: `stat failed: ${code ?? 'unknown'}` };
-    }
-    if (stat.isSymbolicLink()) return { status: 'error', reason: 'target is a symlink' };
-    if (!stat.isFile()) return { status: 'error', reason: 'target is not a regular file' };
-    if (stat.size > MAX_CONFIG_BYTES) return { status: 'error', reason: 'file exceeds size limit' };
-
-    let raw: string;
-    try {
-      raw = readFileSync(path, 'utf8');
-    } catch (error) {
-      const code = (error as NodeJS.ErrnoException).code;
-      if (code === 'ENOENT') return { status: 'missing' };
-      return { status: 'error', reason: `read failed: ${code ?? 'unknown'}` };
-    }
+    const read = this.readTextFile(path, MAX_CONFIG_BYTES);
+    if (read.status === 'missing') return read;
+    if (read.status === 'error') return { status: 'error', reason: read.reason, code: read.code };
 
     let parsed: unknown;
     try {
-      parsed = safeJsonParse(raw);
+      parsed = safeJsonParse(read.text);
     } catch {
       return { status: 'error', reason: 'invalid JSON' };
     }
+
     const result = validateMemoryConnectionsConfig(parsed, { deriveGlobalSpaceId });
     if (!result.valid) return { status: 'error', reason: `invalid schema: ${result.errors[0] ?? 'unknown'}` };
     return { status: 'ok', config: result.config };
+  }
+
+  private readTextFile(path: string, maxBytes: number): FileReadResult {
+    this.assertNoSymlinkOnPath(path);
+
+    let fd: number | undefined;
+    let pathSize = 0;
+
+    try {
+      const stat = lstatSync(path);
+      if (stat.isSymbolicLink()) {
+        return { status: 'error', reason: 'target is a symlink' };
+      }
+      if (!stat.isFile()) {
+        return { status: 'error', reason: 'target is not a regular file' };
+      }
+      if (stat.size > maxBytes) {
+        return { status: 'error', reason: 'file exceeds size limit', code: 'EFBIG' };
+      }
+
+      fd = openSync(path, 'r');
+      const fileStat = fstatSync(fd);
+      if (!fileStat.isFile()) {
+        return { status: 'error', reason: 'opened file is not a regular file' };
+      }
+
+      pathSize = fileStat.size;
+      if (pathSize > maxBytes) {
+        return { status: 'error', reason: 'file exceeds size limit', code: 'EFBIG' };
+      }
+
+      const readBudget = Math.min(pathSize, maxBytes + 1);
+      const buffer = Buffer.alloc(readBudget);
+      const bytesRead = readSync(fd, buffer, 0, readBudget, 0);
+      const currentStat = fstatSync(fd);
+
+      if (currentStat.size !== pathSize || bytesRead !== pathSize) {
+        return { status: 'error', reason: 'file changed while reading' };
+      }
+      if (currentStat.size > maxBytes || bytesRead > maxBytes) {
+        return { status: 'error', reason: 'file exceeds size limit', code: 'EFBIG' };
+      }
+
+      return { status: 'ok', text: buffer.toString('utf8', 0, bytesRead) };
+    } catch (error) {
+      if (fd !== undefined) {
+        try {
+          closeSync(fd);
+        } catch {
+          // ignore
+        }
+        fd = undefined;
+      }
+
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === 'ENOENT') return { status: 'missing' };
+      if (code === 'EACCES' || code === 'EPERM') {
+        return { status: 'error', reason: `read failed: ${code ?? 'unknown'}`, code };
+      }
+      return { status: 'error', reason: `read failed: ${code ?? 'unknown'}`, code };
+    } finally {
+      if (fd !== undefined) {
+        try {
+          closeSync(fd);
+        } catch {
+          // ignore
+        }
+      }
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -216,7 +307,7 @@ export class MemoryConnectionRepository {
   // -------------------------------------------------------------------------
 
   createConnection(input: CreateMemoryConnectionInput, expectedRootRevision: number): Promise<MemoryConnectionConfig> {
-    return this.runExclusive(() => {
+    return this.runExclusive(async () => {
       const validation = validateCreateMemoryConnectionInput(input);
       if (!validation.valid || !validation.value) {
         throw new MemoryError('invalid_input', validation.errors.join('; '), validation.errors);
@@ -446,37 +537,224 @@ export class MemoryConnectionRepository {
     return connection;
   }
 
-  /** Serialize mutations process-locally via a promise chain. */
-  private runExclusive<T>(fn: () => T): Promise<T> {
-    const run = this.mutationChain.then(() => fn());
+  /** Serialize mutations in-process and across processes (lock + chain). */
+  private runExclusive<T>(fn: () => Promise<T> | T): Promise<T> {
+    const run = this.mutationChain.then(() => this.withMutationLock(fn));
     // Keep the chain alive even if a mutation rejects.
     this.mutationChain = run.then(() => undefined, () => undefined);
     return run;
   }
 
+  private async withMutationLock<T>(fn: () => Promise<T> | T): Promise<T> {
+    const releaseLock = await this.acquireMutationLock();
+    try {
+      return await fn();
+    } finally {
+      releaseLock();
+    }
+  }
+
+  private async acquireMutationLock(): Promise<() => void> {
+    const timeoutAt = Date.now() + MUTATION_LOCK_TIMEOUT_MS;
+    let backoffMs = MUTATION_LOCK_INITIAL_BACKOFF_MS;
+
+    while (true) {
+      this.ensureDirSecure();
+      const token = `${this.lockOwnerToken}-${Date.now()}-${randomUuid()}`;
+
+      try {
+        return this.createLockFile(token);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') {
+          const code = (error as NodeJS.ErrnoException).code;
+          throw new MemoryError('storage_error', `failed to acquire memory connection mutation lock: ${code ?? 'unknown'}`, { code, path: this.lockPath });
+        }
+
+        if (this.tryStealStaleLock()) {
+          continue;
+        }
+
+        if (Date.now() >= timeoutAt) {
+          throw new MemoryError('storage_error', 'timed out while waiting for memory connection mutation lock', { lockPath: this.lockPath });
+        }
+        await this.sleep(backoffMs);
+        backoffMs = Math.min(MUTATION_LOCK_MAX_BACKOFF_MS, backoffMs * 2);
+      }
+    }
+  }
+
+  private createLockFile(token: string): () => void {
+    this.assertNoSymlinkOnPath(this.lockPath);
+
+    const metadata: MutationLockMetadata = {
+      token,
+      pid: process.pid,
+      createdAtMs: Date.now(),
+    };
+
+    const payload = JSON.stringify(metadata);
+
+    let fd: number | undefined;
+    try {
+      fd = openSync(this.lockPath, 'wx', 0o600);
+      writeSync(fd, payload);
+      fsyncSync(fd);
+      closeSync(fd);
+      fd = undefined;
+      this.repairFileMode(this.lockPath);
+      return () => this.releaseMutationLock(token);
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (fd !== undefined) {
+        try {
+          closeSync(fd);
+        } catch {
+          // ignore
+        }
+        if (code !== 'EEXIST') {
+          try {
+            unlinkSync(this.lockPath);
+          } catch {
+            // ignore
+          }
+        }
+      }
+      throw error;
+    }
+  }
+
+  private tryStealStaleLock(): boolean {
+    const metadata = this.readMutationLockMetadata();
+
+    if (metadata) {
+      const processAlive = isProcessAlive(metadata.pid);
+      if (processAlive === undefined) {
+        if (Date.now() - metadata.createdAtMs < MUTATION_LOCK_STALE_MS) {
+          return false;
+        }
+      } else if (processAlive) {
+        return false;
+      }
+    } else {
+      try {
+        const stat = statSync(this.lockPath);
+        if (Date.now() - stat.mtimeMs < MUTATION_LOCK_STALE_MS) {
+          return false;
+        }
+      } catch {
+        return false;
+      }
+    }
+
+    try {
+      unlinkSync(this.lockPath);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  private readMutationLockMetadata(): MutationLockMetadata | null {
+    const read = this.readTextFile(this.lockPath, MAX_LOCK_METADATA_BYTES);
+    if (read.status !== 'ok') return null;
+
+    try {
+      const parsed = safeJsonParse(read.text);
+      if (!isPlainObject(parsed)) return null;
+      const raw = parsed as Record<string, unknown>;
+      if (typeof raw.token !== 'string' || raw.token.length < 16) return null;
+      if (typeof raw.pid !== 'number' || !Number.isInteger(raw.pid) || raw.pid <= 0) return null;
+      if (typeof raw.createdAtMs !== 'number' || !Number.isFinite(raw.createdAtMs)) return null;
+      return {
+        token: raw.token,
+        pid: raw.pid,
+        createdAtMs: raw.createdAtMs,
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  private releaseMutationLock(token: string): void {
+    try {
+      const metadata = this.readMutationLockMetadata();
+      if (!metadata || metadata.token !== token) {
+        return;
+      }
+      unlinkSync(this.lockPath);
+    } catch {
+      // ignore
+    }
+  }
+
+  private sleep(ms: number): Promise<void> {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
   private persist(config: MemoryConnectionsConfig): void {
     this.ensureDirSecure();
-    // Preserve the last-known-good primary as backup (never back up corrupt data).
+
     const current = this.tryReadConfig(this.filePath);
+    if (current.status === 'error') {
+      if (current.code === 'EACCES' || current.code === 'EPERM') {
+        throw new MemoryError('storage_error', `memory connections config is not readable: ${current.reason}`, {
+          path: this.filePath,
+          code: current.code,
+        });
+      }
+      if (current.reason === 'target is a symlink') {
+        throw new MemoryError('invalid_config', 'cannot write through a symlinked config file', { path: this.filePath });
+      }
+      // If unreadable/corrupt, continue from loaded in-memory config and do not
+      // promote a corrupt snapshot into backup.
+    }
+
     if (current.status === 'ok') {
       this.atomicWriteSecure(this.backupPath, serialize(current.config));
       this.repairFileMode(this.backupPath);
     }
+
     const canonical: MemoryConnectionsConfig = {
       version: MEMORY_CONNECTIONS_CONFIG_VERSION,
       revision: config.revision,
       installationId: config.installationId,
       connections: sortConnections(config.connections.map(c => ({ ...c, spaces: sortStoredSpaces(c.spaces) }))),
     };
+
     this.atomicWriteSecure(this.filePath, serialize(canonical));
     this.repairFileMode(this.filePath);
   }
 
   private ensureDirSecure(): void {
+    this.assertNoSymlinkOnPath(this.dir);
     if (!existsSync(this.dir)) {
       mkdirSync(this.dir, { recursive: true, mode: 0o700 });
     } else if (process.platform !== 'win32') {
       try { chmodSync(this.dir, 0o700); } catch { /* best effort */ }
+    }
+  }
+
+  private assertNoSymlinkOnPath(path: string): void {
+    const absolute = resolve(path);
+    let cursor = absolute;
+
+    while (true) {
+      try {
+        const stat = lstatSync(cursor);
+        if (stat.isSymbolicLink()) {
+          throw new MemoryError('invalid_config', `refusing to operate on symlink path: ${path}`);
+        }
+      } catch (error) {
+        if (error instanceof MemoryError) throw error;
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code !== 'ENOENT') {
+          throw new MemoryError('invalid_config', `cannot stat path ${path}: ${code ?? 'unknown'}`);
+        }
+      }
+
+      const parent = dirname(cursor);
+      if (parent === cursor) break;
+      cursor = parent;
     }
   }
 
@@ -485,28 +763,16 @@ export class MemoryConnectionRepository {
     try { chmodSync(path, 0o600); } catch { /* best effort */ }
   }
 
-  private assertNotSymlink(path: string): void {
-    try {
-      const stat = lstatSync(path);
-      if (stat.isSymbolicLink()) {
-        throw new MemoryError('invalid_config', `refusing to write through a symlink: ${path}`);
-      }
-    } catch (error) {
-      if (error instanceof MemoryError) throw error;
-      const code = (error as NodeJS.ErrnoException).code;
-      if (code === 'ENOENT') return; // target absent → safe to create
-      throw new MemoryError('invalid_config', `cannot stat ${path}: ${code ?? 'unknown'}`);
-    }
-  }
-
   /**
    * Write `data` to `path` durably and symlink-safely: unique same-dir exclusive
    * `0600` temp → fsync → direct atomic rename over the target (no unlink gap) →
    * fsync dir (where supported).
    */
   private atomicWriteSecure(path: string, data: string): void {
-    this.assertNotSymlink(path);
     const tmp = join(this.dir, `.${basename(path)}.${randomUuid()}.tmp`);
+    this.assertNoSymlinkOnPath(path);
+    this.assertNoSymlinkOnPath(tmp);
+
     let fd: number | undefined;
     try {
       fd = openSync(tmp, 'wx', 0o600); // O_CREAT | O_EXCL | O_WRONLY, mode 0600
@@ -518,6 +784,10 @@ export class MemoryConnectionRepository {
     } catch (error) {
       if (fd !== undefined) { try { closeSync(fd); } catch { /* ignore */ } }
       try { unlinkSync(tmp); } catch { /* ignore */ }
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === 'EACCES' || code === 'EPERM') {
+        throw new MemoryError('storage_error', `failed to write memory connections config: ${code}`, { path, code });
+      }
       throw error;
     }
     this.fsyncDir();
@@ -582,4 +852,20 @@ function assertSpaceNameAvailable(connection: MemoryConnectionConfig, name: stri
   }
   const clash = connection.spaces.some(s => s.spaceId !== exceptSpaceId && normalizeNameKey(s.name) === key);
   if (clash) throw new MemoryError('duplicate_name', `a space named "${name}" already exists in this connection`);
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function isProcessAlive(pid: number): boolean | undefined {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'ESRCH') return false;
+    if (code === 'EPERM') return true;
+    return undefined;
+  }
 }

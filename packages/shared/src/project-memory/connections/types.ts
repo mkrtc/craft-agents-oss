@@ -252,7 +252,8 @@ export type MemoryErrorCode =
   | 'immutable_field'
   | 'revision_conflict'
   | 'limit_exceeded'
-  | 'read_only';
+  | 'read_only'
+  | 'storage_error';
 
 /** Typed error for all Memory repository/validation failures. */
 export class MemoryError extends Error {
