@@ -1,5 +1,5 @@
 import * as React from 'react'
-import { AlertTriangle, ChevronDown, ChevronRight, Database, RefreshCw, Search } from 'lucide-react'
+import { AlertTriangle, ChevronDown, ChevronRight, Database, RefreshCw, Search, Trash2 } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
@@ -16,6 +16,8 @@ import type {
   ProjectMemoryUiPayload,
   ProjectMemoryUiSearchHit,
   ProjectMemoryUiSource,
+  ProjectMemoryConnectionSnapshot,
+  ProjectMemoryConnectionSummary,
   ProjectMemoryUiStatus,
 } from '@craft-agent/shared/protocol'
 
@@ -31,6 +33,15 @@ export function ProjectMemoryPanel({ projectIdOrSlug }: ProjectMemoryPanelProps)
   const [status, setStatus] = React.useState<ProjectMemoryUiStatus | null>(null)
   const [statusLoading, setStatusLoading] = React.useState(true)
   const [statusError, setStatusError] = React.useState<string | null>(null)
+
+  const [connectionsSnapshot, setConnectionsSnapshot] = React.useState<ProjectMemoryConnectionSnapshot | null>(null)
+  const [connectionsLoading, setConnectionsLoading] = React.useState(true)
+  const [connectionsError, setConnectionsError] = React.useState<string | null>(null)
+  const [connectionName, setConnectionName] = React.useState('')
+  const [connectionUrl, setConnectionUrl] = React.useState('')
+  const [connectionCollection, setConnectionCollection] = React.useState('craft_memory')
+  const [creatingConnection, setCreatingConnection] = React.useState(false)
+  const [mutatingConnectionId, setMutatingConnectionId] = React.useState<string | null>(null)
 
   const [source, setSource] = React.useState<ProjectMemoryUiSource>('manual-note')
   const [title, setTitle] = React.useState('')
@@ -58,9 +69,24 @@ export function ProjectMemoryPanel({ projectIdOrSlug }: ProjectMemoryPanelProps)
     }
   }, [])
 
+  const loadConnections = React.useCallback(async () => {
+    setConnectionsLoading(true)
+    setConnectionsError(null)
+    try {
+      setConnectionsSnapshot(await window.electronAPI.getProjectMemoryConnectionsSnapshot())
+    } catch (err) {
+      console.error('[ProjectMemoryPanel] Failed to load memory connections:', err)
+      setConnectionsSnapshot(null)
+      setConnectionsError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setConnectionsLoading(false)
+    }
+  }, [])
+
   React.useEffect(() => {
     loadStatus()
-  }, [loadStatus])
+    loadConnections()
+  }, [loadConnections, loadStatus])
 
   const ready = status?.state === 'ready'
   const sanitizedTags = React.useMemo(() => sanitizeTags(tags), [tags])
@@ -122,6 +148,75 @@ export function ProjectMemoryPanel({ projectIdOrSlug }: ProjectMemoryPanelProps)
     }
   }, [projectIdOrSlug, query, t])
 
+  const handleCreateConnection = React.useCallback(async () => {
+    const name = connectionName.trim()
+    const url = connectionUrl.trim()
+    const collection = connectionCollection.trim()
+    if (!name || !url || !collection) {
+      toast.error('Connection name, URL, and collection are required')
+      return
+    }
+
+    setCreatingConnection(true)
+    try {
+      await window.electronAPI.createProjectMemoryConnection({
+        expectedRootRevision: connectionsSnapshot?.revision ?? 0,
+        name,
+        url,
+        collection,
+        embedding: { model: 'craft-local-hash-v1', dimension: status?.dimension || 384 },
+        enabled: true,
+        proactiveRemoteSearch: false,
+      })
+      toast.success('Memory connection created')
+      setConnectionName('')
+      setConnectionUrl('')
+      setConnectionCollection('craft_memory')
+      await Promise.all([loadConnections(), loadStatus()])
+    } catch (err) {
+      console.error('[ProjectMemoryPanel] Failed to create memory connection:', err)
+      toast.error(err instanceof Error ? err.message : 'Failed to create memory connection')
+    } finally {
+      setCreatingConnection(false)
+    }
+  }, [connectionCollection, connectionName, connectionUrl, connectionsSnapshot?.revision, loadConnections, loadStatus, status?.dimension])
+
+  const handleToggleConnection = React.useCallback(async (connection: ProjectMemoryConnectionSummary) => {
+    setMutatingConnectionId(connection.connectionId)
+    try {
+      await window.electronAPI.updateProjectMemoryConnection({
+        connectionId: connection.connectionId,
+        expectedRevision: connection.revision,
+        enabled: !connection.enabled,
+      })
+      toast.success(connection.enabled ? 'Memory connection disabled' : 'Memory connection enabled')
+      await Promise.all([loadConnections(), loadStatus()])
+    } catch (err) {
+      console.error('[ProjectMemoryPanel] Failed to update memory connection:', err)
+      toast.error(err instanceof Error ? err.message : 'Failed to update memory connection')
+    } finally {
+      setMutatingConnectionId(null)
+    }
+  }, [loadConnections, loadStatus])
+
+  const handleDeleteConnection = React.useCallback(async (connection: ProjectMemoryConnectionSummary) => {
+    if (!window.confirm(`Delete memory connection "${connection.name}"?`)) return
+    setMutatingConnectionId(connection.connectionId)
+    try {
+      await window.electronAPI.deleteProjectMemoryConnection({
+        connectionId: connection.connectionId,
+        expectedRootRevision: connectionsSnapshot?.revision ?? 0,
+      })
+      toast.success('Memory connection deleted')
+      await Promise.all([loadConnections(), loadStatus()])
+    } catch (err) {
+      console.error('[ProjectMemoryPanel] Failed to delete memory connection:', err)
+      toast.error(err instanceof Error ? err.message : 'Failed to delete memory connection')
+    } finally {
+      setMutatingConnectionId(null)
+    }
+  }, [connectionsSnapshot?.revision, loadConnections, loadStatus])
+
   return (
     <div className="space-y-4 px-4 py-3">
       <StatusCard
@@ -141,6 +236,24 @@ export function ProjectMemoryPanel({ projectIdOrSlug }: ProjectMemoryPanelProps)
           {t('projectInfo.memory.disabledHint')}
         </div>
       )}
+
+      <MemoryConnectionsSection
+        snapshot={connectionsSnapshot}
+        loading={connectionsLoading}
+        error={connectionsError}
+        name={connectionName}
+        url={connectionUrl}
+        collection={connectionCollection}
+        creating={creatingConnection}
+        mutatingConnectionId={mutatingConnectionId}
+        onNameChange={setConnectionName}
+        onUrlChange={setConnectionUrl}
+        onCollectionChange={setConnectionCollection}
+        onRefresh={loadConnections}
+        onCreate={handleCreateConnection}
+        onToggle={handleToggleConnection}
+        onDelete={handleDeleteConnection}
+      />
 
       <section className="rounded-lg border border-border/60 bg-background/50">
         <div className="border-b border-border/50 px-4 py-3">
@@ -244,6 +357,135 @@ export function ProjectMemoryPanel({ projectIdOrSlug }: ProjectMemoryPanelProps)
         </div>
       </section>
     </div>
+  )
+}
+
+
+function MemoryConnectionsSection({
+  snapshot,
+  loading,
+  error,
+  name,
+  url,
+  collection,
+  creating,
+  mutatingConnectionId,
+  onNameChange,
+  onUrlChange,
+  onCollectionChange,
+  onRefresh,
+  onCreate,
+  onToggle,
+  onDelete,
+}: {
+  snapshot: ProjectMemoryConnectionSnapshot | null
+  loading: boolean
+  error: string | null
+  name: string
+  url: string
+  collection: string
+  creating: boolean
+  mutatingConnectionId: string | null
+  onNameChange: (value: string) => void
+  onUrlChange: (value: string) => void
+  onCollectionChange: (value: string) => void
+  onRefresh: () => void
+  onCreate: () => void
+  onToggle: (connection: ProjectMemoryConnectionSummary) => void
+  onDelete: (connection: ProjectMemoryConnectionSummary) => void
+}) {
+  const connections = snapshot?.connections ?? []
+
+  return (
+    <section className="rounded-lg border border-border/60 bg-background/50">
+      <div className="flex items-start justify-between gap-3 border-b border-border/50 px-4 py-3">
+        <div>
+          <h3 className="text-sm font-medium">Memory connections</h3>
+          <p className="mt-1 text-xs text-muted-foreground">
+            Manage Qdrant connections used by project memory. API keys are never shown here.
+          </p>
+        </div>
+        <Button size="sm" variant="ghost" onClick={onRefresh} disabled={loading}>
+          <RefreshCw className="mr-1.5 h-3.5 w-3.5" />
+          Refresh
+        </Button>
+      </div>
+
+      <div className="space-y-4 p-4">
+        {error && (
+          <div className="rounded-lg border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">
+            {error}
+          </div>
+        )}
+
+        <div className="grid gap-3 md:grid-cols-[1fr_1.4fr_1fr_auto]">
+          <Field label="Name">
+            <Input value={name} onChange={(e) => onNameChange(e.target.value)} placeholder="Primary Qdrant" disabled={creating} />
+          </Field>
+          <Field label="URL">
+            <Input value={url} onChange={(e) => onUrlChange(e.target.value)} placeholder="https://qdrant.example" disabled={creating} />
+          </Field>
+          <Field label="Collection">
+            <Input value={collection} onChange={(e) => onCollectionChange(e.target.value)} placeholder="craft_memory" disabled={creating} />
+          </Field>
+          <div className="flex items-end">
+            <Button onClick={onCreate} disabled={creating || !name.trim() || !url.trim() || !collection.trim()}>
+              {creating ? 'Creating…' : 'Create'}
+            </Button>
+          </div>
+        </div>
+
+        {loading && !snapshot ? (
+          <div className="rounded-lg border border-dashed border-border/70 px-4 py-6 text-center text-sm text-muted-foreground">
+            Loading memory connections…
+          </div>
+        ) : connections.length === 0 ? (
+          <div className="rounded-lg border border-dashed border-border/70 px-4 py-6 text-center text-sm text-muted-foreground">
+            No memory connections configured.
+          </div>
+        ) : (
+          <ul className="space-y-2">
+            {connections.map((connection) => {
+              const mutating = mutatingConnectionId === connection.connectionId
+              return (
+                <li key={connection.connectionId} className="rounded-lg border border-border/60 bg-background p-3">
+                  <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div className="min-w-0 flex-1">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <h4 className="truncate text-sm font-medium">{connection.name}</h4>
+                        <span className={connection.enabled ? 'rounded-full bg-emerald-500/10 px-2 py-0.5 text-[11px] text-emerald-700 dark:text-emerald-300' : 'rounded-full bg-foreground/5 px-2 py-0.5 text-[11px] text-foreground/60'}>
+                          {connection.enabled ? 'Enabled' : 'Disabled'}
+                        </span>
+                        {connection.isEnvironment && (
+                          <span className="rounded-full bg-foreground/5 px-2 py-0.5 text-[11px] text-foreground/60">Environment</span>
+                        )}
+                        <span className="rounded-full bg-foreground/5 px-2 py-0.5 text-[11px] text-foreground/60">
+                          {connection.hasApiKey ? 'API key stored' : 'No API key'}
+                        </span>
+                      </div>
+                      <div className="mt-2 grid gap-1 text-xs text-muted-foreground md:grid-cols-2">
+                        <span className="truncate">URL: {connection.url}</span>
+                        <span className="truncate">Collection: {connection.collection}</span>
+                        <span>Embedding: {connection.embedding.model}:{connection.embedding.dimension}</span>
+                        <span>Revision: {connection.revision} · Spaces: {connection.spaceCount}</span>
+                      </div>
+                    </div>
+                    <div className="flex gap-2">
+                      <Button size="sm" variant="outline" onClick={() => onToggle(connection)} disabled={connection.isEnvironment || mutating}>
+                        {connection.enabled ? 'Disable' : 'Enable'}
+                      </Button>
+                      <Button size="sm" variant="ghost" onClick={() => onDelete(connection)} disabled={connection.isEnvironment || mutating}>
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </Button>
+                    </div>
+                  </div>
+                </li>
+              )
+            })}
+          </ul>
+        )}
+      </div>
+    </section>
   )
 }
 

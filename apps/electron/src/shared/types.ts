@@ -232,6 +232,15 @@ import type {
   ProjectMemoryUiSearchHit,
   ProjectMemoryUiSearchRequest,
   ProjectMemoryUiStatus,
+  ProjectMemoryConnectionSnapshot,
+  ProjectMemoryConnectionSummary,
+  ProjectMemoryConnectionDetail,
+  ProjectMemoryConnectionCreateRequest,
+  ProjectMemoryConnectionUpdateRequest,
+  ProjectMemoryConnectionDeleteRequest,
+  ProjectMemorySpaceCreateRequest,
+  ProjectMemorySpaceUpdateRequest,
+  ProjectMemorySpaceDeleteRequest,
 } from '@craft-agent/shared/protocol'
 
 export interface ElectronAPI {
@@ -689,6 +698,14 @@ export interface ElectronAPI {
   getProjectMemoryStatus(): Promise<ProjectMemoryUiStatus>
   addProjectMemory(input: ProjectMemoryUiAddRequest): Promise<ProjectMemoryUiPayload>
   searchProjectMemory(input: ProjectMemoryUiSearchRequest): Promise<ProjectMemoryUiSearchHit[]>
+  getProjectMemoryConnectionsSnapshot(): Promise<ProjectMemoryConnectionSnapshot>
+  getProjectMemoryConnection(connectionId: string): Promise<ProjectMemoryConnectionDetail>
+  createProjectMemoryConnection(input: ProjectMemoryConnectionCreateRequest): Promise<ProjectMemoryConnectionSummary>
+  updateProjectMemoryConnection(input: ProjectMemoryConnectionUpdateRequest): Promise<ProjectMemoryConnectionSummary>
+  deleteProjectMemoryConnection(input: ProjectMemoryConnectionDeleteRequest): Promise<{ success: true }>
+  createProjectMemorySpace(input: ProjectMemorySpaceCreateRequest): Promise<ProjectMemoryConnectionDetail>
+  updateProjectMemorySpace(input: ProjectMemorySpaceUpdateRequest): Promise<ProjectMemoryConnectionDetail>
+  deleteProjectMemorySpace(input: ProjectMemorySpaceDeleteRequest): Promise<ProjectMemoryConnectionDetail>
   onProjectsChanged(callback: (workspaceId: string, projects: unknown) => void): () => void
 
   // Automations

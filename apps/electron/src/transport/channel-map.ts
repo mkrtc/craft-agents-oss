@@ -402,6 +402,14 @@ export const CHANNEL_MAP = {
   getProjectMemoryStatus: invoke(RPC_CHANNELS.projects.MEMORY_STATUS),
   addProjectMemory: invoke(RPC_CHANNELS.projects.MEMORY_ADD),
   searchProjectMemory: invoke(RPC_CHANNELS.projects.MEMORY_SEARCH),
+  getProjectMemoryConnectionsSnapshot: invoke(RPC_CHANNELS.projects.MEMORY_CONNECTIONS_SNAPSHOT),
+  getProjectMemoryConnection: invoke(RPC_CHANNELS.projects.MEMORY_CONNECTION_GET),
+  createProjectMemoryConnection: invoke(RPC_CHANNELS.projects.MEMORY_CONNECTION_CREATE),
+  updateProjectMemoryConnection: invoke(RPC_CHANNELS.projects.MEMORY_CONNECTION_UPDATE),
+  deleteProjectMemoryConnection: invoke(RPC_CHANNELS.projects.MEMORY_CONNECTION_DELETE),
+  createProjectMemorySpace: invoke(RPC_CHANNELS.projects.MEMORY_SPACE_CREATE),
+  updateProjectMemorySpace: invoke(RPC_CHANNELS.projects.MEMORY_SPACE_UPDATE),
+  deleteProjectMemorySpace: invoke(RPC_CHANNELS.projects.MEMORY_SPACE_DELETE),
   onProjectsChanged: listener(RPC_CHANNELS.projects.CHANGED),
 
   // Automations
