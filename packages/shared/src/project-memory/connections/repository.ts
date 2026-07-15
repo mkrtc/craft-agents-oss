@@ -43,7 +43,7 @@ import {
   writeSync,
 } from 'fs';
 import { basename, dirname, join, resolve } from 'path';
-import { CONFIG_DIR } from '../../config/paths.ts';
+import { getConfigDir } from '../../config/paths.ts';
 import { safeJsonParse } from '../../utils/files.ts';
 import { randomUuid } from '../../utils/uuid.ts';
 import { deriveGlobalSpace, deriveGlobalSpaceId } from './global-space.ts';
@@ -133,7 +133,7 @@ export class MemoryConnectionRepository {
   private pendingInstallationId: string | null = null;
 
   constructor(options: MemoryConnectionRepositoryOptions = {}) {
-    this.dir = join(options.configDir ?? CONFIG_DIR, 'memory');
+    this.dir = join(options.configDir ?? getConfigDir(), 'memory');
     this.filePath = join(this.dir, MEMORY_CONNECTIONS_FILE);
     this.backupPath = `${this.filePath}.bak`;
     this.lockPath = `${this.filePath}.lock`;

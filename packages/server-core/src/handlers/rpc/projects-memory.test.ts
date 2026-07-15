@@ -3,6 +3,8 @@ import { existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { RPC_CHANNELS } from '@craft-agent/shared/protocol'
+import type { ProjectMemoryConnectionSummary } from '@craft-agent/shared/protocol'
+import { __setConfigDirForTests } from '@craft-agent/shared/config/paths'
 import type { ProjectMemoryStore, ProjectMemoryPayload, ProjectMemorySearchInput, ProjectMemoryAddInput, ProjectMemoryStatus } from '@craft-agent/shared/project-memory'
 import type { HandlerFn, RequestContext, RpcServer } from '../../transport/types'
 import type { HandlerDeps } from '../handler-deps'
@@ -111,6 +113,7 @@ function handler(channel: string): HandlerFn {
 
 beforeAll(async () => {
   process.env.CRAFT_CONFIG_DIR = configDir
+  __setConfigDirForTests(configDir)
   mkdirSync(join(workspaceRoot, 'projects', projectSlug), { recursive: true })
   writeFileSync(join(configDir, 'config.json'), JSON.stringify({
     workspaces: [{
@@ -141,6 +144,7 @@ afterEach(() => {
 })
 
 afterAll(() => {
+  __setConfigDirForTests(null)
   rmSync(configDir, { recursive: true, force: true })
 })
 
@@ -258,8 +262,8 @@ describe('project memory RPC handlers', () => {
     expect(next.revision).toBe(1)
     expect(next.connections).toHaveLength(2)
 
-    const environment = next.connections.find((item) => item.isEnvironment)
-    const stored = next.connections.find((item) => item.isEnvironment === false)
+    const environment = next.connections.find((item: ProjectMemoryConnectionSummary) => item.isEnvironment)
+    const stored = next.connections.find((item: ProjectMemoryConnectionSummary) => item.isEnvironment === false)
 
     expect(typeof environment?.hasApiKey).toBe('boolean')
     expect(stored?.hasApiKey).toBe(true)
@@ -283,7 +287,7 @@ describe('project memory RPC handlers', () => {
     expect(storedDetail.spaces[0]!.readOnly).toBe(true)
     expect(storedDetail.spaceCount).toBe(1)
 
-    const envConnectionId = snapshotAfter.connections.find((item) => item.isEnvironment)?.connectionId
+    const envConnectionId = snapshotAfter.connections.find((item: ProjectMemoryConnectionSummary) => item.isEnvironment)?.connectionId
     if (!envConnectionId) {
       throw new Error('Expected environment connection in snapshot')
     }
@@ -333,7 +337,7 @@ describe('project memory RPC handlers', () => {
       projectId,
     })
 
-    const projectSpace = spaceDetail.spaces.find((item) => item.kind === 'project')
+    const projectSpace = spaceDetail.spaces.find((item: { kind: string }) => item.kind === 'project')
     expect(projectSpace?.spaceId).toBeTruthy()
 
     await expect(updateSpace(ctx(), {

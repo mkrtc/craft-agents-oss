@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'bun:test'
+import type { ManagedMemoryConnectionDescriptor } from '@craft-agent/shared/project-memory/contracts'
 import {
   formatSessionMemorySelectionDeniedReason,
   resolveSessionManagedMemorySelection,
@@ -13,7 +14,7 @@ const PROJECT = 'aaaaaaaa-1111-4000-8000-000000000003'
 
 describe('Session memory runtime selection helpers', () => {
   it('returns no resolution and no credential callbacks when no explicit refs are configured', () => {
-    const descriptors = [
+    const descriptors: ManagedMemoryConnectionDescriptor[] = [
       {
         connectionId: CONN,
         enabled: true,
@@ -42,7 +43,7 @@ describe('Session memory runtime selection helpers', () => {
   })
 
   it('rejects invalid write targets while still resolving allowed reads', () => {
-    const descriptors = [
+    const descriptors: ManagedMemoryConnectionDescriptor[] = [
       {
         connectionId: CONN,
         enabled: true,
@@ -90,7 +91,7 @@ describe('Session memory runtime selection helpers', () => {
   })
 
   it('rejects non-member references without invoking credential callbacks', () => {
-    const descriptors = [
+    const descriptors: ManagedMemoryConnectionDescriptor[] = [
       {
         connectionId: CONN,
         enabled: true,
