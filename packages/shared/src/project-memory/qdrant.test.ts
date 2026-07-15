@@ -88,7 +88,7 @@ describe('QdrantProjectMemoryStore', () => {
 
   test('rejects request with unsafe redirect/credential handling options', async () => {
     let lastRequest: RequestInit | undefined;
-    globalThis.fetch = ((_, init) => {
+    globalThis.fetch = ((_input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
       lastRequest = init;
       return Promise.resolve(
         jsonResponse({
