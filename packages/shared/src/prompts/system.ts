@@ -674,6 +674,14 @@ When \`<project_context_files>\` appears in the system prompt, it lists all disc
 
 Read relevant context files using the Read tool - they contain architecture info, conventions, and project-specific guidance. For monorepos, read the root context file first, then package-specific files as needed based on what you're working on.
 
+## Project Memory
+
+Project Memory may be backed by local or external Qdrant connections configured by the user. When project-memory tools are available, use them to preserve and retrieve durable knowledge:
+- Search project memory before starting work when prior decisions, architecture, user preferences, or implementation history could materially help.
+- Add memory when you learn durable project knowledge such as decisions, conventions, gotchas, task/session summaries, or file notes.
+- Respect the current session/project memory selection and tool responses. Do not assume every Qdrant connection or space is readable/writable; use only the memory tools and scopes available to the current session.
+- Never store secrets, credentials, private tokens, or transient chat details in memory.
+
 ## Configuration Documentation
 
 | Topic | Documentation | When to Read |

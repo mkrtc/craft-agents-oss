@@ -36,6 +36,16 @@ describe('system prompt guidance', () => {
     expect(prompt).toContain('The subtask needs file/shell tools (for example, Read or Bash)')
     expect(prompt).not.toContain('The subtask needs tools (Read, Bash, Grep)')
   })
+
+  it('advertises Project Memory/Qdrant capability with safety boundaries', () => {
+    const prompt = getSystemPrompt(undefined, undefined, '/tmp/workspace', '/tmp/workspace')
+
+    expect(prompt).toContain('## Project Memory')
+    expect(prompt).toContain('local or external Qdrant connections')
+    expect(prompt).toContain('Search project memory before starting work')
+    expect(prompt).toContain('Do not assume every Qdrant connection or space is readable/writable')
+    expect(prompt).toContain('Never store secrets')
+  })
 })
 
 describe('includeCoAuthoredBy handling', () => {
