@@ -7,16 +7,30 @@
 
 import type { CredentialBackend } from './backends/types.ts';
 import type { CredentialId, CredentialType, StoredCredential, CredentialHealthStatus, CredentialHealthIssue } from './types.ts';
+import { CredentialStoreError } from './types.ts';
 import type { LlmAuthType, LlmProviderType } from '../config/llm-connections.ts';
 import { SecureStorageBackend } from './backends/secure-storage.ts';
 import { debug } from '../utils/debug.ts';
 import { isUuid, toCanonicalUuid } from '../utils/uuid.ts';
 
+export interface CredentialManagerOptions {
+  /** Override the credential config directory (for tests and custom deployments). */
+  credentialsConfigDir?: string;
+
+  /** Optional injected backends for advanced test scenarios. */
+  backends?: CredentialBackend[];
+}
+
 export class CredentialManager {
+  private readonly options: Readonly<CredentialManagerOptions>;
   private backends: CredentialBackend[] = [];
   private writeBackend: CredentialBackend | null = null;
   private initialized = false;
   private initPromise: Promise<void> | null = null;
+
+  constructor(options: CredentialManagerOptions = {}) {
+    this.options = { ...options };
+  }
 
   /**
    * Explicitly initialize the credential manager.
@@ -53,22 +67,28 @@ export class CredentialManager {
       return;
     }
 
-    // SecureStorageBackend is always available and is currently the only
-    // credential backend. This sync path exists for sync callers such as
-    // saveSourceConfig(), where fire-and-forget cleanup can race immediate reloads.
-    const backend = new SecureStorageBackend();
-    this.backends = [backend];
-    this.writeBackend = backend;
+    const backends = this.options.backends?.length
+      ? this.options.backends
+      : [new SecureStorageBackend({ configDir: this.options.credentialsConfigDir })];
+
+    this.backends = [...backends].sort((a, b) => b.priority - a.priority);
+    this.writeBackend = this.backends[0] ?? null;
     this.initialized = true;
     this.initPromise = null;
-    debug(`[CredentialManager] Backend available: ${backend.name} (priority ${backend.priority})`);
-    debug(`[CredentialManager] Using backend: ${backend.name}`);
+
+    for (const backend of this.backends) {
+      debug(`[CredentialManager] Backend available: ${backend.name} (priority ${backend.priority})`);
+    }
+    if (this.writeBackend) {
+      debug(`[CredentialManager] Using backend: ${this.writeBackend.name}`);
+    }
   }
 
   private async _doInitialize(): Promise<void> {
-    const potentialBackends: CredentialBackend[] = [
-      new SecureStorageBackend(),
-    ];
+    const potentialBackends: CredentialBackend[] = this.options.backends?.length
+      ? [...this.options.backends]
+      : [new SecureStorageBackend({ configDir: this.options.credentialsConfigDir })];
+
     const availableBackends: CredentialBackend[] = [];
 
     // Check which backends are available
@@ -111,6 +131,11 @@ export class CredentialManager {
    */
   async get(id: CredentialId): Promise<StoredCredential | null> {
     await this.ensureInitialized();
+    return this.getInternal(id, { strict: false });
+  }
+
+  private async getInternal(id: CredentialId, options: { strict: boolean }): Promise<StoredCredential | null> {
+    let lastError: unknown = null;
 
     for (const backend of this.backends) {
       try {
@@ -120,8 +145,13 @@ export class CredentialManager {
           return cred;
         }
       } catch (err) {
+        lastError = err;
         debug(`[CredentialManager] Error reading from ${backend.name}:`, err);
       }
+    }
+
+    if (options.strict && lastError) {
+      throw lastError;
     }
 
     return null;
@@ -193,7 +223,14 @@ export class CredentialManager {
    */
   async list(filter?: Partial<CredentialId>): Promise<CredentialId[]> {
     await this.ensureInitialized();
+    return this.listInternal(filter, { strict: false });
+  }
 
+  private async listInternal(
+    filter?: Partial<CredentialId>,
+    options: { strict: boolean } = { strict: false }
+  ): Promise<CredentialId[]> {
+    let lastError: unknown = null;
     const seen = new Set<string>();
     const results: CredentialId[] = [];
 
@@ -208,8 +245,13 @@ export class CredentialManager {
           }
         }
       } catch (err) {
+        lastError = err;
         debug(`[CredentialManager] Error listing from ${backend.name}:`, err);
       }
+    }
+
+    if (options.strict && results.length === 0 && lastError) {
+      throw lastError;
     }
 
     return results;
@@ -418,8 +460,9 @@ export class CredentialManager {
 
   /** Get the API key for a Memory connection. */
   async getMemoryApiKey(connectionId: string): Promise<string | null> {
+    await this.ensureInitialized();
     this.assertMemoryConnectionId(connectionId);
-    const cred = await this.get({ type: 'memory_api_key', memoryConnectionId: connectionId });
+    const cred = await this.getInternal({ type: 'memory_api_key', memoryConnectionId: connectionId }, { strict: true });
     return cred?.value || null;
   }
 
@@ -444,7 +487,8 @@ export class CredentialManager {
 
   /** List the canonical (lowercase) connection ids that have a Memory API key stored. */
   async listMemoryApiKeyConnectionIds(): Promise<string[]> {
-    const ids = await this.list({ type: 'memory_api_key' });
+    await this.ensureInitialized();
+    const ids = await this.listInternal({ type: 'memory_api_key' }, { strict: true });
     const seen = new Set<string>();
     const result: string[] = [];
     for (const id of ids) {
@@ -688,32 +732,22 @@ export class CredentialManager {
     try {
       await this.ensureInitialized();
 
-      // 1. Try to list credentials - this triggers decryption
-      // If file is corrupted or can't be decrypted, this will throw
-      await this.list({});
-
+      // 1. Try to list credentials - this triggers decryption and validation.
+      await this.listInternal({}, { strict: true });
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : String(error);
-      const lowerMsg = errorMsg.toLowerCase();
+      const errorCode = error instanceof CredentialStoreError ? error.code : 'unknown';
 
-      // Detect decryption failures (usually means machine migration)
-      if (lowerMsg.includes('decrypt') || lowerMsg.includes('cipher') || lowerMsg.includes('authentication tag')) {
+      if (errorCode === 'decryption_failed') {
         issues.push({
           type: 'decryption_failed',
           message: 'Credentials from another machine detected. Please re-authenticate.',
           error: errorMsg,
         });
-      } else if (lowerMsg.includes('json') || lowerMsg.includes('parse') || lowerMsg.includes('unexpected')) {
+      } else {
         issues.push({
           type: 'file_corrupted',
           message: 'Credential file is corrupted. Please re-authenticate.',
-          error: errorMsg,
-        });
-      } else {
-        // Unknown error - treat as corruption
-        issues.push({
-          type: 'file_corrupted',
-          message: 'Failed to read credentials. Please re-authenticate.',
           error: errorMsg,
         });
       }

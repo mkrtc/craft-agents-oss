@@ -265,6 +265,28 @@ export interface CredentialHealthStatus {
   issues: CredentialHealthIssue[]
 }
 
+/** Typed backend failures for secure credential storage. */
+export type CredentialStoreErrorCode =
+  | 'file_corrupted'
+  | 'decryption_failed'
+  | 'permission_denied'
+  | 'io_error';
+
+/** Error shape for secure credential backend read/write failures. */
+export class CredentialStoreError extends Error {
+  readonly code: CredentialStoreErrorCode;
+  readonly path?: string;
+
+  constructor(code: CredentialStoreErrorCode, message: string, details?: { path?: string; cause?: unknown }) {
+    super(message, { cause: details?.cause });
+    this.name = 'CredentialStoreError';
+    this.code = code;
+    if (details?.path !== undefined) {
+      this.path = details.path;
+    }
+  }
+}
+
 /** Parse credential store account string back to CredentialId. Returns null if invalid. */
 export function accountToCredentialId(account: string): CredentialId | null {
   const parts = account.split(CREDENTIAL_DELIMITER);

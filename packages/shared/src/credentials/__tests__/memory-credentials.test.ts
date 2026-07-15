@@ -1,10 +1,23 @@
 import { describe, expect, test } from 'bun:test';
+import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { homedir, tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { CredentialManager } from '../manager.ts';
-import { accountToCredentialId, credentialIdToAccount, MEMORY_CREDENTIAL_TYPES } from '../types.ts';
+import { type CredentialBackend } from '../backends/types.ts';
+import { SecureStorageBackend } from '../backends/secure-storage.ts';
+import { CredentialStoreError, accountToCredentialId, credentialIdToAccount, MEMORY_CREDENTIAL_TYPES } from '../types.ts';
 import type { CredentialId, StoredCredential } from '../types.ts';
 
 const UUID = '123e4567-e89b-12d3-a456-426614174000';
 const OTHER_UUID = '00000000-1111-4222-8333-444444444444';
+
+function makeTempConfigDir(): string {
+  return mkdtempSync(join(tmpdir(), 'craft-agent-credentials-'));
+}
+
+function writeCorruptCredentialFile(path: string): void {
+  writeFileSync(path, 'not-valid-credential-bytes');
+}
 
 describe('memory_api_key credential conversion', () => {
   test('MEMORY_CREDENTIAL_TYPES lists memory_api_key', () => {
@@ -53,29 +66,40 @@ describe('memory_api_key credential conversion', () => {
 
 /**
  * Round-trip through the CredentialManager memory helpers, backed by an
- * in-memory store keyed via the REAL account converter. This exercises the full
+ * in-memory backend keyed via the REAL account converter. This exercises the full
  * helper → CredentialId → account plumbing (incl. UUID validation and list
  * filtering) deterministically, without touching the encrypted store on disk.
  */
 function fakeManager(): { manager: CredentialManager; store: Map<string, StoredCredential> } {
   const store = new Map<string, StoredCredential>();
-  const manager = new CredentialManager();
-  const api = manager as unknown as {
-    get: (id: CredentialId) => Promise<StoredCredential | null>;
-    set: (id: CredentialId, cred: StoredCredential) => Promise<void>;
-    delete: (id: CredentialId) => Promise<boolean>;
-    list: (filter?: Partial<CredentialId>) => Promise<CredentialId[]>;
+  const backend: CredentialBackend = {
+    name: 'memory-test-backend',
+    priority: 100,
+    async isAvailable(): Promise<boolean> {
+      return true;
+    },
+    async get(id: CredentialId): Promise<StoredCredential | null> {
+      return store.get(credentialIdToAccount(id)) ?? null;
+    },
+    async set(id: CredentialId, cred: StoredCredential): Promise<void> {
+      store.set(credentialIdToAccount(id), cred);
+    },
+    async delete(id: CredentialId): Promise<boolean> {
+      return store.delete(credentialIdToAccount(id));
+    },
+    deleteSync(id: CredentialId): boolean {
+      return store.delete(credentialIdToAccount(id));
+    },
+    async list(filter?: Partial<CredentialId>): Promise<CredentialId[]> {
+      const ids = [...store.keys()].map(accountToCredentialId).filter((x): x is CredentialId => x !== null);
+      if (!filter) return ids;
+      return ids.filter(id =>
+        (!filter.type || id.type === filter.type)
+        && (!filter.memoryConnectionId || id.memoryConnectionId === filter.memoryConnectionId));
+    },
   };
-  api.get = async (id) => store.get(credentialIdToAccount(id)) ?? null;
-  api.set = async (id, cred) => { store.set(credentialIdToAccount(id), cred); };
-  api.delete = async (id) => store.delete(credentialIdToAccount(id));
-  api.list = async (filter) => {
-    const ids = [...store.keys()].map(accountToCredentialId).filter((x): x is CredentialId => x !== null);
-    if (!filter) return ids;
-    return ids.filter(id =>
-      (!filter.type || id.type === filter.type)
-      && (!filter.memoryConnectionId || id.memoryConnectionId === filter.memoryConnectionId));
-  };
+
+  const manager = new CredentialManager({ backends: [backend] });
   return { manager, store };
 }
 
@@ -102,6 +126,36 @@ describe('CredentialManager memory helpers (round-trip)', () => {
     expect(await manager.getMemoryApiKey(OTHER_UUID)).toBe('sk-memory-def');
   });
 
+  test('memory API helper methods propagate typed backend errors', async () => {
+    const backend: CredentialBackend = {
+      name: 'failing-backend',
+      priority: 100,
+      async isAvailable(): Promise<boolean> {
+        return true;
+      },
+      async get(): Promise<null> {
+        throw new CredentialStoreError('decryption_failed', 'Cannot decrypt credentials from test backend.');
+      },
+      async set(): Promise<void> {
+        // no-op
+      },
+      async delete(): Promise<boolean> {
+        return false;
+      },
+      deleteSync(): boolean {
+        return false;
+      },
+      async list(): Promise<CredentialId[]> {
+        throw new CredentialStoreError('file_corrupted', 'Cannot list corrupted credentials from test backend.');
+      },
+    };
+
+    const manager = new CredentialManager({ backends: [backend] });
+
+    await expect(manager.getMemoryApiKey(UUID)).rejects.toMatchObject({ name: 'CredentialStoreError', code: 'decryption_failed' });
+    await expect(manager.listMemoryApiKeyConnectionIds()).rejects.toMatchObject({ name: 'CredentialStoreError', code: 'file_corrupted' });
+  });
+
   test('rejects a non-UUID connection id and empty/whitespace-only key', async () => {
     const { manager } = fakeManager();
     await expect(manager.setMemoryApiKey('not-a-uuid', 'x')).rejects.toThrow();
@@ -118,5 +172,109 @@ describe('CredentialManager memory helpers (round-trip)', () => {
     expect(await manager.getMemoryApiKey(UUID)).toBe('sk-canon');
     const ids = await manager.listMemoryApiKeyConnectionIds();
     expect(ids).toEqual([UUID]); // canonical lowercase, de-duplicated
+  });
+});
+
+describe('SecureStorageBackend behavior', () => {
+  test('respects injected config directory for test isolation', async () => {
+    const configDir = makeTempConfigDir();
+    try {
+      const backend = new SecureStorageBackend({ configDir });
+
+      expect(backend.getCredentialsFilePath()).toBe(join(configDir, 'credentials.enc'));
+      expect(backend.getCredentialsFilePath()).not.toBe(join(homedir(), '.craft-agent', 'credentials.enc'));
+
+      await backend.set({ type: 'memory_api_key', memoryConnectionId: UUID }, { value: 'isolated-token' });
+      expect(existsSync(backend.getCredentialsFilePath())).toBe(true);
+
+      const cred = await backend.get({ type: 'memory_api_key', memoryConnectionId: UUID });
+      expect(cred?.value).toBe('isolated-token');
+    } finally {
+      rmSync(configDir, { recursive: true, force: true });
+    }
+  });
+
+  test('throws in test mode when no override path is provided', () => {
+    const originalNodeEnv = process.env.NODE_ENV;
+    const originalConfigDir = process.env.CRAFT_CONFIG_DIR;
+
+    try {
+      process.env.NODE_ENV = 'test';
+      delete process.env.CRAFT_CONFIG_DIR;
+      expect(() => new SecureStorageBackend()).toThrow(/Refusing to initialize credential backend/);
+    } finally {
+      if (originalNodeEnv === undefined) {
+        delete process.env.NODE_ENV;
+      } else {
+        process.env.NODE_ENV = originalNodeEnv;
+      }
+      if (originalConfigDir === undefined) {
+        delete process.env.CRAFT_CONFIG_DIR;
+      } else {
+        process.env.CRAFT_CONFIG_DIR = originalConfigDir;
+      }
+    }
+  });
+
+  test('allows default path via CRAFT_CONFIG_DIR override', () => {
+    const tempDir = makeTempConfigDir();
+    const originalNodeEnv = process.env.NODE_ENV;
+    const originalConfigDir = process.env.CRAFT_CONFIG_DIR;
+
+    try {
+      process.env.NODE_ENV = 'test';
+      process.env.CRAFT_CONFIG_DIR = tempDir;
+
+      const backend = new SecureStorageBackend();
+      expect(backend.getCredentialsFilePath()).toBe(join(tempDir, 'credentials.enc'));
+      expect(backend.getCredentialsFilePath()).not.toBe(join(homedir(), '.craft-agent', 'credentials.enc'));
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+      if (originalNodeEnv === undefined) {
+        delete process.env.NODE_ENV;
+      } else {
+        process.env.NODE_ENV = originalNodeEnv;
+      }
+      if (originalConfigDir === undefined) {
+        delete process.env.CRAFT_CONFIG_DIR;
+      } else {
+        process.env.CRAFT_CONFIG_DIR = originalConfigDir;
+      }
+    }
+  });
+
+  test('preserves and quarantines a corrupted file without deleting it', async () => {
+    const configDir = makeTempConfigDir();
+    try {
+      const backend = new SecureStorageBackend({ configDir });
+      const filePath = backend.getCredentialsFilePath();
+
+      writeCorruptCredentialFile(filePath);
+
+      const failure = backend.get({ type: 'memory_api_key', memoryConnectionId: UUID });
+      await expect(failure).rejects.toMatchObject({ name: 'CredentialStoreError', code: 'file_corrupted' });
+
+      expect(existsSync(filePath)).toBe(true);
+      const hasQuarantine = readdirSync(configDir).some((name) => name.startsWith('credentials.enc.file_corrupted.'));
+      expect(hasQuarantine).toBe(true);
+    } finally {
+      rmSync(configDir, { recursive: true, force: true });
+    }
+  });
+
+  test('re-reads when another manager updates the same file', async () => {
+    const configDir = makeTempConfigDir();
+    try {
+      const managerA = new CredentialManager({ credentialsConfigDir: configDir });
+      const managerB = new CredentialManager({ credentialsConfigDir: configDir });
+
+      await managerA.setMemoryApiKey(UUID, 'alpha');
+      await managerB.setMemoryApiKey(OTHER_UUID, 'bravo');
+
+      const ids = await managerA.listMemoryApiKeyConnectionIds();
+      expect(ids.sort()).toEqual([UUID, OTHER_UUID].sort());
+    } finally {
+      rmSync(configDir, { recursive: true, force: true });
+    }
   });
 });
