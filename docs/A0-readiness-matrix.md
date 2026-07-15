@@ -89,5 +89,5 @@ Wave A matrix must include explicit Linux/macOS/Windows outcomes for FS/race cas
 ## Status notes for each area
 
 - **A1/A2/A3/A5/A6/A7 must not be marked PASS until their remediation implementation and tests are independently accepted.**
-- Any downstream executor prompt must use only PASS entries from this matrix and treat `A1` onward as non-dispatchable until status moves to PASS.
+- Downstream executor prompts must use predecessor-based dispatch semantics: a remediation worker may dispatch only when its documented predecessor gates are accepted. A remediation area remains non-PASS until that worker’s own implementation, tests, and independent review are accepted.
 - Repo-relative links are now preferred and used throughout this artifact set.

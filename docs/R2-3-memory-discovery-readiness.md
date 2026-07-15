@@ -54,7 +54,7 @@
 
 - **Disposition:** **BLOCKED**
 - **Current evidence:** ADR documents the resolver contract, but centralized deny-first behavior is still missing in product enforcement.
-- **Required next:** enforce policy in resolver + authorizer handlers and add contract tests before dispatch.
+- **Required next:** after A4a/A5 predecessor gates pass, dispatch the A6 remediation worker to enforce policy in resolver + authorizer handlers and add contract tests. Runtime use/downstream progression remains blocked until A6 implementation/tests are independently accepted.
 
 ### 1.8 Qdrant transport / SSRF / egress policy
 
@@ -134,7 +134,7 @@ For `startupRecovery`:
 - no callbacks/network/credential access on deny
 - secret-free output shape
 - no fallback from managed refs to raw legacy store
-- **Product enforcement status:** policy defined; dispatch remains BLOCKED until handlers/tests enforce it.
+- **Product enforcement status:** policy defined; A6 remediation dispatch is allowed only after A4a/A5 predecessor gates pass. Runtime use/downstream progression remains BLOCKED until handlers/tests enforce it and independent A6 review accepts it.
 
 ## 4) Verification outcomes snapshot (authoritative)
 
