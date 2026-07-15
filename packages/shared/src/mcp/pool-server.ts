@@ -21,6 +21,7 @@
  */
 
 import { createServer, type Server as HttpServer } from 'node:http';
+import type { Socket } from 'node:net';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import {
@@ -36,6 +37,9 @@ export class McpPoolServer {
   private transport: StreamableHTTPServerTransport | null = null;
   private debugFn: ((msg: string) => void) | undefined;
   private _port = 0;
+  private stopPromise: Promise<void> | null = null;
+  private stopped = false;
+  private httpSockets = new Set<Socket>();
 
   constructor(pool: McpClientPool, options?: { debug?: (msg: string) => void }) {
     this.pool = pool;
@@ -59,6 +63,9 @@ export class McpPoolServer {
    * Returns the URL clients should connect to.
    */
   async start(): Promise<string> {
+    if (this.stopped) {
+      throw new Error('McpPoolServer cannot be restarted after stop');
+    }
     if (this.httpServer) {
       return this.url;
     }
@@ -69,6 +76,7 @@ export class McpPoolServer {
     });
     this.mcpServer = this.createMcpServer();
     await this.mcpServer.connect(this.transport);
+    const transport = this.transport;
 
     this.httpServer = createServer(async (req, res) => {
       const url = new URL(req.url || '/', `http://127.0.0.1`);
@@ -78,8 +86,17 @@ export class McpPoolServer {
         return;
       }
 
-      // Route all methods (POST, GET, DELETE) through the Streamable HTTP transport
-      await this.transport!.handleRequest(req, res);
+      // Route all methods (POST, GET, DELETE) through the exact transport
+      // captured for this one-shot server generation. stop() clears the field
+      // synchronously, but an already accepted request must not dereference null.
+      await transport.handleRequest(req, res).catch(() => {
+        if (!res.headersSent) res.writeHead(503);
+        if (!res.writableEnded) res.end();
+      });
+    });
+    this.httpServer.on('connection', (socket) => {
+      this.httpSockets.add(socket);
+      socket.once('close', () => this.httpSockets.delete(socket));
     });
 
     await new Promise<void>((resolve, reject) => {
@@ -155,24 +172,69 @@ export class McpPoolServer {
   /**
    * Stop the HTTP server and close the transport.
    */
-  async stop(): Promise<void> {
-    if (this.transport) {
-      await this.transport.close().catch(() => {});
-      this.transport = null;
+  stop(): Promise<void> {
+    if (this.stopPromise) return this.stopPromise;
+    this.stopped = true;
+    this.stopPromise = this.stopInternal();
+    return this.stopPromise;
+  }
+
+  private async stopInternal(): Promise<void> {
+    // Fence new requests first and capture exact resources before awaiting.
+    const httpServer = this.httpServer;
+    const httpSockets = Array.from(this.httpSockets);
+    this.httpSockets.clear();
+    const transport = this.transport;
+    const mcpServer = this.mcpServer;
+    this.httpServer = null;
+    this.transport = null;
+    this.mcpServer = null;
+    this._port = 0;
+
+    if (httpServer) {
+      await this.closeHttpServerBounded(httpServer, httpSockets);
     }
 
-    if (this.mcpServer) {
-      await this.mcpServer.close().catch(() => {});
-      this.mcpServer = null;
-    }
+    // SDK close should be quick, but neither SDK component is allowed to hold
+    // the app shutdown indefinitely.
+    await this.withTimeout(transport?.close(), 1_000);
+    await this.withTimeout(mcpServer?.close(), 1_000);
+    this.debug('Stopped');
+  }
 
-    if (this.httpServer) {
-      await new Promise<void>((resolve) => {
-        this.httpServer!.close(() => resolve());
-      });
-      this.httpServer = null;
-      this._port = 0;
-      this.debug('Stopped');
-    }
+  private async closeHttpServerBounded(server: HttpServer, sockets: Socket[]): Promise<void> {
+    const closed = new Promise<void>((resolve) => {
+      server.close(() => resolve());
+    });
+    server.closeIdleConnections?.();
+
+    // Give active requests a short grace period, then destroy only sockets
+    // owned by this exact HTTP server. A final race bounds callback anomalies.
+    await this.waitAtMost(closed, 250);
+    // closeAllConnections does not consistently terminate partial request bodies
+    // across Node/Bun versions, so also destroy the exact sockets accepted by
+    // this server. No unrelated listener/process is touched.
+    for (const socket of sockets) socket.destroy();
+    server.closeAllConnections?.();
+    await this.waitAtMost(closed, 750);
+  }
+
+  private async withTimeout(work: Promise<unknown> | undefined, timeoutMs: number): Promise<void> {
+    if (!work) return;
+    await this.waitAtMost(work.catch(() => undefined), timeoutMs);
+  }
+
+  private waitAtMost(work: Promise<unknown>, timeoutMs: number): Promise<boolean> {
+    return new Promise((resolve) => {
+      let settled = false;
+      const finish = (completed: boolean) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(completed);
+      };
+      const timer = setTimeout(() => finish(false), timeoutMs);
+      void work.then(() => finish(true), () => finish(true));
+    });
   }
 }

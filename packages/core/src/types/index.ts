@@ -54,6 +54,24 @@ export type {
 } from './message.ts';
 export { generateMessageId } from './message.ts';
 
+// Runtime lifecycle and persistence contracts
+export * from './runtime-lifecycle.ts';
+export type {
+  OutboundJournalModelAttachmentV1,
+  OutboundJournalSendOptionsV1,
+  OutboundJournalItemState,
+  OutboundJournalClaimV1,
+  OutboundJournalRetryMetadataV1,
+  OutboundJournalItemV1,
+  OutboundJournalPauseReason,
+  OutboundJournalV1,
+  DurablePlanHandoffV1,
+  DurableAuthHandoffV1,
+  DurableHandoffRecordV1,
+  DurableHandoffStoreV1,
+  SessionRuntimePersistenceV1,
+} from './runtime-persistence.ts';
+
 // Message persistence mappers
 export { messageToStored, storedToMessage } from './message-mapper.ts';
 

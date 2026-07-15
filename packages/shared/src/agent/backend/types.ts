@@ -12,7 +12,13 @@
  * - AsyncGenerator for streaming: Consistent with existing CraftAgent API
  */
 
-import type { AgentEvent } from '@craft-agent/core/types';
+import type {
+  AgentEvent,
+  RuntimeDisposeOptions,
+  RuntimeDisposeResult,
+} from '@craft-agent/core/types';
+
+export type { RuntimeDisposeOptions, RuntimeDisposeResult } from '@craft-agent/core/types';
 import type { FileAttachment } from '../../utils/files.ts';
 import type { ThinkingLevel } from '../thinking-levels.ts';
 import type { PermissionMode } from '../mode-manager.ts';
@@ -420,6 +426,12 @@ export interface AgentBackend {
   setBackgroundEventSink?(sink: ((event: AgentEvent) => void) | null): void;
 
   /**
+   * Internal finite subprocess-exit signal. Session ownership code binds this to
+   * an exact runtime generation; providers must not include raw stderr/error text.
+   */
+  onRuntimeExit?: ((event: BackendRuntimeExitEvent) => void) | null;
+
+  /**
    * Interrupt the current turn because control is being handed to the UI.
    *
    * Used for pause points like plan submission and auth requests, where the
@@ -462,6 +474,13 @@ export interface AgentBackend {
    * Alias for destroy() for consistency.
    */
   dispose(): void;
+
+  /**
+   * Awaited lifecycle boundary for process-owning backends. Legacy structural
+   * implementations may omit it and rely on disposeBackendRuntime() to fall back
+   * through dispose()/destroy() with truthful limited observability.
+   */
+  disposeRuntime?(options: RuntimeDisposeOptions): Promise<RuntimeDisposeResult>;
 
   /**
    * Post-construction initialization.
@@ -678,6 +697,57 @@ export interface AgentBackend {
 
   /** Called when agent requests spawning a new session */
   onSpawnSession: ((request: import('../base-agent.ts').SpawnSessionRequest) => Promise<import('../base-agent.ts').SpawnSessionResult>) | null;
+}
+
+export interface BackendRuntimeExitEvent {
+  pid?: number;
+  exitCode: number | null;
+  signal?: 'SIGTERM' | 'SIGKILL' | 'SIGINT' | 'SIGHUP' | 'other';
+  unexpected: boolean;
+}
+
+export interface RuntimeDisposableLike {
+  disposeRuntime?(options: RuntimeDisposeOptions): Promise<RuntimeDisposeResult>;
+  dispose?(): void;
+  destroy?(): void;
+}
+
+/**
+ * Canonical awaited runtime disposal helper. It prefers the explicit awaited
+ * boundary when available and otherwise falls back to legacy synchronous cleanup
+ * with truthful limited observability.
+ */
+export async function disposeBackendRuntime(
+  backend: RuntimeDisposableLike,
+  options: RuntimeDisposeOptions,
+): Promise<RuntimeDisposeResult> {
+  if (typeof backend.disposeRuntime === 'function') {
+    return backend.disposeRuntime(options);
+  }
+
+  const startedAt = Date.now();
+  let errorCode: RuntimeDisposeResult['errorCode'];
+
+  try {
+    if (typeof backend.dispose === 'function') {
+      backend.dispose();
+    } else if (typeof backend.destroy === 'function') {
+      backend.destroy();
+    } else {
+      errorCode = 'runtime_dispose_failed';
+    }
+  } catch {
+    errorCode = 'runtime_dispose_failed';
+  }
+
+  return {
+    outcome: 'limited_observability',
+    observedExit: false,
+    attemptedGraceful: false,
+    forced: false,
+    durationMs: Math.max(0, Date.now() - startedAt),
+    ...(errorCode ? { errorCode } : {}),
+  };
 }
 
 /**

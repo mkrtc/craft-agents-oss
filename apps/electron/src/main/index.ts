@@ -68,7 +68,7 @@ Sentry.init({
 // the main process silently stayed at English — breaking session title language,
 // the system prompt's "Preferred language" line, and the native menu.
 import { setupI18n, i18n, SUPPORTED_LANGUAGE_CODES, type LanguageCode } from '@craft-agent/shared/i18n'
-import { getPersistedUiLanguage, setPersistedUiLanguage } from '@craft-agent/shared/config'
+import { getPersistedUiLanguage, setPersistedUiLanguage, resolveRuntimeLifecycleConfig } from '@craft-agent/shared/config'
 setupI18n()
 const persistedUiLanguage = getPersistedUiLanguage()
 if (persistedUiLanguage) {
@@ -1208,14 +1208,22 @@ function captureBeforeQuitWindowState(isUpdateQuit: boolean): void {
 async function flushPendingSessions(reason: 'before-quit' | 'pre-update', throwOnError: boolean): Promise<void> {
   if (!sessionManager) return
 
+  const timeoutMs = resolveRuntimeLifecycleConfig().flushTimeoutMs
+  let timer: ReturnType<typeof setTimeout> | undefined
   try {
-    await sessionManager.flushAllSessions()
+    await Promise.race([
+      sessionManager.flushAllSessions(),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`Session flush timed out after ${timeoutMs}ms`)), timeoutMs)
+        timer.unref?.()
+      }),
+    ])
     mainLog.info('Flushed all pending session writes', { reason })
   } catch (error) {
     mainLog.error('Failed to flush sessions:', error)
-    if (throwOnError) {
-      throw error
-    }
+    if (throwOnError) throw error
+  } finally {
+    if (timer) clearTimeout(timer)
   }
 }
 
@@ -1240,12 +1248,12 @@ async function cleanupPowerManager(): Promise<void> {
 
 async function runQuitCleanup(
   reason: 'before-quit' | 'pre-update',
-  options: { throwOnFlushError: boolean },
+  options: { skipSessionFlush?: boolean } = {},
 ): Promise<void> {
-  await flushPendingSessions(reason, options.throwOnFlushError)
+  const deadline = Date.now() + resolveRuntimeLifecycleConfig().shutdownTimeoutMs
 
-  // Clean up SessionManager resources (file watchers, timers, etc.).
-  sessionManager?.cleanup()
+  // Shared awaited cleanup closes admission and disposes all exact bundles in parallel.
+  await sessionManager?.cleanup({ deadline, skipFlush: options.skipSessionFlush })
 
   // Clean up browser pane instances.
   browserPaneManager?.destroyAll()
@@ -1267,24 +1275,24 @@ async function runQuitCleanup(
 }
 
 async function runPreUpdateQuitCleanup(): Promise<void> {
-  // Ensure updater-initiated app quit bypasses layered window close interception
-  // (Cmd+W behavior) once quitAndInstall starts closing windows.
-  windowManager?.setAppQuitting(true)
-
   // Snapshot first while BrowserWindows still exist. This is the critical state
   // save that must not be overwritten by an empty before-quit snapshot later.
   captureAndSaveWindowState('pre-update')
 
-  // A failed session flush is data-critical: abort install rather than silently
-  // skipping pending writes before electron-updater takes over process shutdown.
-  await runQuitCleanup('pre-update', { throwOnFlushError: true })
+  // Preflight flush is separate from terminal shutdown. On failure the updater
+  // aborts while runtime admission/window behavior remain fully open.
+  await flushPendingSessions('pre-update', true)
+
+  // Only a successful preflight may enter the terminal closing state.
+  windowManager?.setAppQuitting(true)
+  await runQuitCleanup('pre-update', { skipSessionFlush: true })
 }
 
 const quitLifecycle = createQuitLifecycle({
   isUpdating,
   setAppQuitting: () => windowManager?.setAppQuitting(true),
   captureBeforeQuitWindowState,
-  runNormalQuitCleanup: () => runQuitCleanup('before-quit', { throwOnFlushError: false }),
+  runNormalQuitCleanup: () => runQuitCleanup('before-quit'),
   appQuit: () => app.quit(),
   mainLog,
   autoUpdateLog,

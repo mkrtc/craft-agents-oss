@@ -218,6 +218,8 @@ export class McpClientPool {
     this.toolCache.clear();
     this.proxyTools.clear();
     this.activeConfigs.clear();
+    this.onToolsChanged = undefined;
+    this.summarizeCallback = undefined;
     this.debug('Disconnected all MCP clients');
   }
 

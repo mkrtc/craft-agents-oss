@@ -39,8 +39,10 @@ import type {
   PostInitResult,
   BridgeUpdateContext,
   RecoveryMessage,
+  RuntimeDisposeOptions,
+  RuntimeDisposeResult,
 } from './backend/types.ts';
-import { AbortReason } from './backend/types.ts';
+import { AbortReason, disposeBackendRuntime } from './backend/types.ts';
 import type { AuthRequest } from './session-scoped-tools.ts';
 import type { Workspace } from '../config/storage.ts';
 
@@ -887,6 +889,18 @@ ${formattedMessages}
    */
   dispose(): void {
     this.destroy();
+  }
+
+  /**
+   * Compatibility adapter for backends that only implement legacy synchronous cleanup.
+   * It cannot prove child exit, so it must report limited observability. Provider-specific
+   * exact-child teardown is intentionally deferred to the runtime ownership stage.
+   */
+  async disposeRuntime(_options: RuntimeDisposeOptions): Promise<RuntimeDisposeResult> {
+    return disposeBackendRuntime({
+      dispose: () => this.dispose(),
+      destroy: () => this.destroy(),
+    }, _options);
   }
 
   /**

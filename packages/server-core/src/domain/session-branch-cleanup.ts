@@ -1,6 +1,6 @@
 export interface BranchRollbackManagedSession {
   agent?: { destroy?: () => void } | null
-  poolServer?: { stop?: () => void }
+  poolServer?: { stop?: () => void | Promise<void> }
 }
 
 interface RollbackParams {
@@ -9,6 +9,8 @@ interface RollbackParams {
   sessionId: string
   deleteFromRuntimeSessions: (sessionId: string) => void
   deleteStoredSession: (workspaceRootPath: string, sessionId: string) => void | boolean | Promise<void | boolean>
+  /** Preferred exact awaited bundle owner supplied by SessionManager. */
+  disposeRuntime?: () => Promise<void>
 }
 
 /**
@@ -18,20 +20,30 @@ interface RollbackParams {
 export async function rollbackFailedBranchCreation(params: RollbackParams): Promise<void> {
   const { managed, workspaceRootPath, sessionId, deleteFromRuntimeSessions, deleteStoredSession } = params
 
-  try {
-    managed.agent?.destroy?.()
-  } catch {
-    // Best-effort cleanup
-  }
-  managed.agent = null
-
-  if (managed.poolServer) {
+  if (params.disposeRuntime) {
     try {
-      managed.poolServer.stop?.()
+      await params.disposeRuntime()
+    } catch {
+      // Best-effort rollback continues to remove the failed child session.
+    }
+  } else {
+    // Compatibility fallback for isolated callers/tests. Production SessionManager
+    // always supplies the exact awaited bundle owner above.
+    try {
+      managed.agent?.destroy?.()
     } catch {
       // Best-effort cleanup
     }
-    managed.poolServer = undefined
+    managed.agent = null
+
+    if (managed.poolServer) {
+      try {
+        await managed.poolServer.stop?.()
+      } catch {
+        // Best-effort cleanup
+      }
+      managed.poolServer = undefined
+    }
   }
 
   deleteFromRuntimeSessions(sessionId)

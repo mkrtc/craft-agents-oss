@@ -546,7 +546,7 @@ export class PiEventAdapter extends BaseEventAdapter {
           this.overflowState = 'compacting';
         }
         // Use "Compacting" keyword so session handler detects statusType: 'compacting'
-        yield { type: 'status', message: 'Compacting context...' };
+        yield { type: 'status', message: 'Compacting context...', runtimeActivity: 'compaction_start' };
         break;
 
       case 'compaction_end': {
@@ -560,7 +560,7 @@ export class PiEventAdapter extends BaseEventAdapter {
             this.heldOverflowError = null;
           }
           // Use "Compacted" keyword so session handler detects statusType: 'compaction_complete'
-          yield { type: 'info', message: 'Compacted context to fit within limits' };
+          yield { type: 'info', message: 'Compacted context to fit within limits', runtimeActivity: 'compaction_end' };
         } else if (compactionEvent.errorMessage) {
           // Defensive handler for the Pi SDK auto-compaction race (cause A
           // in plans/fix-pi-gpt-compaction.md). The raw stack

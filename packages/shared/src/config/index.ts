@@ -9,6 +9,7 @@ export * from './storage.ts';
 export * from './theme.ts';
 export * from './validators.ts';
 export * from './cli-domains.ts';
+export * from './runtime-lifecycle.ts';
 export {
   ConfigWatcher,
   createConfigWatcher,

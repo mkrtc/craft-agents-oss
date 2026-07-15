@@ -8,6 +8,7 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 import type { Tool } from '@modelcontextprotocol/sdk/types.js';
+import { OwnedStdioClientTransport } from './owned-stdio-transport.ts';
 
 /**
  * HTTP transport config for remote MCP servers
@@ -73,6 +74,7 @@ export class CraftMcpClient {
   private client: Client;
   private transport: Transport;
   private connected = false;
+  private closePromise: Promise<void> | null = null;
 
   constructor(config: McpClientConfig) {
     this.client = new Client({
@@ -90,11 +92,17 @@ export class CraftMcpClient {
           processEnv[key] = value;
         }
       }
-      this.transport = new StdioClientTransport({
+      const stdioConfig = {
         command: config.command,
         args: config.args,
         env: { ...processEnv, ...config.env },
-      });
+      };
+      // Unix descendants inherit a private process group so eviction/delete/
+      // shutdown can tear down the exact wrapper tree. Keep the SDK transport
+      // on Windows until Job Object containment is implemented.
+      this.transport = process.platform === 'win32'
+        ? new StdioClientTransport(stdioConfig)
+        : new OwnedStdioClientTransport(stdioConfig);
     } else {
       // HTTP transport for remote MCP servers
       this.transport = new StreamableHTTPClientTransport(
@@ -111,7 +119,13 @@ export class CraftMcpClient {
   async connect(): Promise<void> {
     if (this.connected) return;
 
-    await this.client.connect(this.transport);
+    try {
+      await this.client.connect(this.transport);
+    } catch (error) {
+      // A failed initialize can still have spawned a stdio wrapper.
+      await this.transport.close().catch(() => {});
+      throw error;
+    }
 
     // Verify connection works by listing tools
     try {
@@ -154,10 +168,17 @@ export class CraftMcpClient {
     return result;
   }
 
-  async close(): Promise<void> {
-    if (this.connected) {
-      await this.client.close();
-      this.connected = false;
-    }
+  close(): Promise<void> {
+    if (this.closePromise) return this.closePromise;
+    this.closePromise = (async () => {
+      if (this.connected) {
+        await this.client.close();
+        this.connected = false;
+      } else {
+        // Also closes a transport whose initialize failed after spawning.
+        await this.transport.close();
+      }
+    })();
+    return this.closePromise;
   }
 }

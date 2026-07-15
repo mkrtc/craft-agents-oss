@@ -2,7 +2,7 @@ import { writeFileSync, readFileSync, unlinkSync, existsSync } from 'node:fs'
 import { uptime as osUptime } from 'node:os'
 import { join } from 'node:path'
 import { OAuthFlowStore } from '@craft-agent/shared/auth'
-import { ensureConfigDir, loadStoredConfig, saveConfig } from '@craft-agent/shared/config'
+import { ensureConfigDir, loadStoredConfig, saveConfig, resolveRuntimeLifecycleConfig } from '@craft-agent/shared/config'
 import { CONFIG_DIR } from '@craft-agent/shared/config/paths'
 import { setBundledAssetsRoot } from '@craft-agent/shared/utils'
 import { WsRpcServer, type WsRpcTlsOptions } from '../transport/server'
@@ -38,7 +38,7 @@ export interface ServerBootstrapOptions<TSessionManager, THandlerDeps> {
    */
   bindRpcServer?: (sessionManager: TSessionManager, server: RpcServer) => void
   initModelRefreshService: () => ModelRefreshServiceLike
-  cleanupSessionManager?: (sessionManager: TSessionManager) => Promise<void> | void
+  cleanupSessionManager?: (sessionManager: TSessionManager, context: { deadline: number }) => Promise<void> | void
   cleanupClientResources?: (clientId: string) => void
   onClientConnected?: (info: { clientId: string; webContentsId: number | null; workspaceId: string | null; capabilities: string[] }) => void
   serverId?: string
@@ -59,6 +59,19 @@ export interface ServerHandlerContext {
   getConnectedClientCount: () => number
   serverId: string
   startedAt: number
+}
+
+export function createSharedShutdown(run: () => Promise<void>): () => Promise<void> {
+  let shutdownPromise: Promise<void> | null = null
+  return () => {
+    if (shutdownPromise) return shutdownPromise
+    try {
+      shutdownPromise = run()
+    } catch (error) {
+      shutdownPromise = Promise.reject(error)
+    }
+    return shutdownPromise
+  }
 }
 
 export interface ServerInstance<TSessionManager> {
@@ -350,12 +363,9 @@ export async function bootstrapServer<TSessionManager, THandlerDeps>(
 
   platform.logger.info(`Craft Agent server listening on ${wsServer.protocol}://${rpcHost}:${wsServer.port}`)
 
-  let stopped = false
-  const stop = async (): Promise<void> => {
-    if (stopped) return
-    stopped = true
-
+  const stop = createSharedShutdown(async () => {
     platform.logger.info('Shutting down...')
+    const deadline = Date.now() + resolveRuntimeLifecycleConfig().shutdownTimeoutMs
 
     // Notify connected clients before closing connections
     try {
@@ -364,8 +374,8 @@ export async function bootstrapServer<TSessionManager, THandlerDeps>(
         graceMs: 2000,
         timestamp: Date.now(),
       })
-      // Brief drain period so clients receive the notification
-      await new Promise(resolve => setTimeout(resolve, 2000))
+      // Brief bounded drain; it shares the one absolute shutdown deadline.
+      await new Promise(resolve => setTimeout(resolve, Math.min(500, Math.max(0, deadline - Date.now()))))
     } catch (error) {
       platform.logger.error('[bootstrap] Failed to send shutdown notification:', error)
     }
@@ -377,7 +387,7 @@ export async function bootstrapServer<TSessionManager, THandlerDeps>(
     }
 
     try {
-      await options.cleanupSessionManager?.(sessionManager)
+      await options.cleanupSessionManager?.(sessionManager, { deadline })
     } catch (error) {
       platform.logger.error('[bootstrap] Failed to clean up session manager:', error)
     }
@@ -395,7 +405,7 @@ export async function bootstrapServer<TSessionManager, THandlerDeps>(
     }
 
     releaseServerLock()
-  }
+  })
 
   return {
     platform,

@@ -23,6 +23,26 @@ export type {
 // Field constants
 export { SESSION_PERSISTENT_FIELDS } from './types.ts';
 
+// Versioned runtime persistence foundation (not wired to live queue behavior yet)
+export type {
+  OutboundJournalV1,
+  OutboundJournalItemV1,
+  OutboundJournalItemState,
+  OutboundJournalModelAttachmentV1,
+  OutboundJournalSendOptionsV1,
+  DurableHandoffRecordV1,
+  DurableHandoffStoreV1,
+  SessionRuntimePersistenceV1,
+} from '@craft-agent/core/types';
+export type {
+  LegacyQueuedMessageMigrationInput,
+  LegacyQueuedMessageMigrationResult,
+} from './runtime-persistence.ts';
+export {
+  createEmptyOutboundJournalV1,
+  migrateLegacyQueuedMessages,
+} from './runtime-persistence.ts';
+
 // Storage functions
 export {
   // Directory utilities

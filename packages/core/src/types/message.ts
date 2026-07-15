@@ -414,7 +414,12 @@ export interface StoredMessage {
   authError?: string;
   authEmail?: string;
   authWorkspace?: string;
-  // Queued: user message that is waiting to be processed (persisted for recovery)
+  /** Hidden system-generated turn driver (persisted for replay fidelity). */
+  hidden?: boolean;
+  /**
+   * @deprecated Legacy queue recovery marker. New persistence uses OutboundJournalV1,
+   * but this remains readable until all stored sessions have migrated.
+   */
   isQueued?: boolean;
 }
 
@@ -475,6 +480,8 @@ export type ErrorCode =
   | 'queued_message_replay_failed'  // A message queued during an active turn could not be auto-replayed (#616)
   | 'sdk_binary_missing'     // SDK subprocess binary not present on disk (incomplete bundle)
   | 'sdk_cwd_missing'        // SDK subprocess cwd not present on disk (stale cross-machine import)
+  | 'runtime_backend_crashed' // Managed backend subprocess exited unexpectedly
+  | 'runtime_watchdog_timeout' // Managed turn exceeded its typed inactivity deadline
   | 'unknown_error';
 
 /**
@@ -548,8 +555,16 @@ export interface AgentEventUsage {
  * turnId: Correlation ID from the API's message.id, groups all events in an assistant turn
  */
 export type AgentEvent =
-  | { type: 'status'; message: string }
-  | { type: 'info'; message: string }
+  | {
+      type: 'status';
+      message: string;
+      runtimeActivity?: 'compaction_start' | 'compaction_end' | 'compaction_failure';
+    }
+  | {
+      type: 'info';
+      message: string;
+      runtimeActivity?: 'compaction_start' | 'compaction_end' | 'compaction_failure';
+    }
   | { type: 'text_delta'; text: string; turnId?: string; parentToolUseId?: string }
   | { type: 'text_complete'; text: string; isIntermediate?: boolean; turnId?: string; parentToolUseId?: string; sdkMessageId?: string }
   | { type: 'pi_turn_anchor'; sdkMessageId: string; sdkTurnAnchor: string }

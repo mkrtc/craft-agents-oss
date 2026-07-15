@@ -15,7 +15,11 @@
 
 import { spawn, type ChildProcess } from 'node:child_process';
 import { createInterface, type Interface as ReadlineInterface } from 'node:readline';
-import type { AgentEvent } from '@craft-agent/core/types';
+import type {
+  AgentEvent,
+  RuntimeDisposeOptions,
+  RuntimeDisposeResult,
+} from '@craft-agent/core/types';
 import type { FileAttachment } from '../utils/files.ts';
 import { getProxyEnvVars } from '../config/proxy-env.ts';
 
@@ -24,6 +28,7 @@ import type {
   BackendRuntimeUpdate,
   ChatOptions,
   SdkMcpServerConfig,
+  BackendRuntimeExitEvent,
 } from './backend/types.ts';
 import { AbortReason } from './backend/types.ts';
 import { getBackendRuntime } from './backend/internal/driver-types.ts';
@@ -169,6 +174,10 @@ export class PiAgent extends BaseAgent {
   private readline: ReadlineInterface | null = null;
   private subprocessReady: Promise<void> | null = null;
   private subprocessReadyResolve: (() => void) | null = null;
+  /** Exact children intentionally retired by this backend (never reported as crashes). */
+  private intentionalSubprocessExits = new WeakSet<ChildProcess>();
+  /** Finite crash signal bound to a SessionManager runtime generation. */
+  onRuntimeExit: ((event: BackendRuntimeExitEvent) => void) | null = null;
 
   // Pi session ID (managed by subprocess, reported back)
   private piSessionId: string | null = null;
@@ -487,6 +496,9 @@ export class PiAgent extends BaseAgent {
     const child = spawn(nodePath, args, {
       cwd,
       stdio: ['pipe', 'pipe', 'pipe'],
+      // Own an exact Unix process group so awaited disposal can terminate only
+      // this backend and descendants (never broad-match unrelated processes).
+      detached: process.platform !== 'win32',
       env: {
         ...process.env,
         ...getProxyEnvVars(),
@@ -525,10 +537,13 @@ export class PiAgent extends BaseAgent {
 
     // Handle subprocess exit
     child.on('exit', (code, signal) => {
-      this.handleSubprocessExit(code, signal);
+      this.handleSubprocessExit(child, code, signal);
     });
 
     child.on('error', (error) => {
+      // A late/intentional error from a retired child must not poison its replacement
+      // or enqueue a false crash during awaited restart/shutdown.
+      if (this.subprocess !== child || this.intentionalSubprocessExits.has(child)) return;
       this.debug(`Subprocess error: ${error.message}`);
       this.resetSubprocessErrorDedup();
       this.eventQueue.enqueue({ type: 'error', message: `Pi subprocess error: ${error.message}` });
@@ -1726,14 +1741,51 @@ export class PiAgent extends BaseAgent {
   /**
    * Handle subprocess exit.
    */
-  private handleSubprocessExit(code: number | null, signal: string | null): void {
+  private handleSubprocessExit(
+    childOrCode: ChildProcess | number | null,
+    codeOrSignal: number | string | null,
+    maybeSignal?: string | null,
+  ): void {
+    // Two-argument form is retained only for existing direct unit fixtures.
+    // Production listeners always pass the exact child handle + code + signal.
+    const hasExactChild = typeof childOrCode === 'object' && childOrCode !== null;
+    const child = hasExactChild ? childOrCode : null;
+    const code = hasExactChild ? codeOrSignal as number | null : childOrCode as number | null;
+    const signal = hasExactChild ? (maybeSignal ?? null) : codeOrSignal as string | null;
+    const intentional = child ? this.intentionalSubprocessExits.has(child) : false;
+    if (child) this.intentionalSubprocessExits.delete(child);
+
+    // Exact-child fence: an old child's late exit cannot clear a replacement.
+    if (child && this.subprocess !== child) {
+      this.debug(`Ignoring stale Pi subprocess exit: pid=${child.pid ?? 'unknown'}, code=${code}, signal=${signal}`);
+      return;
+    }
+
     this.debug(`Pi subprocess exited: code=${code}, signal=${signal}`);
 
     this.subprocess = null;
-    this.readline = null;
+    if (this.readline) {
+      try { this.readline.close(); } catch { /* stdout may already be closed */ }
+      this.readline = null;
+    }
     this.resetSubprocessErrorDedup();
     this.subprocessReady = null;
     this.subprocessReadyResolve = null;
+
+    if (!intentional) {
+      const normalizedSignal: BackendRuntimeExitEvent['signal'] =
+        signal === 'SIGTERM' || signal === 'SIGKILL' || signal === 'SIGINT' || signal === 'SIGHUP'
+          ? signal
+          : signal
+            ? 'other'
+            : undefined;
+      this.onRuntimeExit?.({
+        ...(child?.pid ? { pid: child.pid } : {}),
+        exitCode: code,
+        ...(normalizedSignal ? { signal: normalizedSignal } : {}),
+        unexpected: true,
+      });
+    }
 
     // If we were processing, emit error + complete
     if (this._isProcessing) {
@@ -2390,6 +2442,10 @@ export class PiAgent extends BaseAgent {
   }
 
   async disposeForRestart(): Promise<void> {
+    await this.disposeRuntime({ reason: 'replacement' });
+  }
+
+  override async disposeRuntime(options: RuntimeDisposeOptions): Promise<RuntimeDisposeResult> {
     this.stopConfigWatcher();
 
     if (this.config.session?.id) {
@@ -2397,8 +2453,10 @@ export class PiAgent extends BaseAgent {
     }
 
     this._sessionToolContext = null;
-    await this.killSubprocessGracefully();
-    this.debug('PiAgent disposed for restart');
+    this.onRuntimeExit = null;
+    const result = await this.killSubprocessGracefully(options);
+    this.debug(`PiAgent runtime disposed: ${result.outcome}`);
+    return result;
   }
 
   /**
@@ -2413,14 +2471,23 @@ export class PiAgent extends BaseAgent {
    * Gracefully stop the subprocess and wait briefly for the child to exit.
    * Used before an idle runtime restart so we don't leave transient children behind.
    */
-  private async killSubprocessGracefully(timeoutMs = 2_000): Promise<void> {
+  private async killSubprocessGracefully(options: RuntimeDisposeOptions): Promise<RuntimeDisposeResult> {
+    const startedAt = Date.now();
     const child = this.subprocess;
     if (!child) {
       this.killSubprocess();
-      return;
+      return {
+        outcome: 'no_child',
+        observedExit: true,
+        attemptedGraceful: false,
+        forced: false,
+        durationMs: Math.max(0, Date.now() - startedAt),
+        provider: 'pi',
+      };
     }
 
     const pid = child.pid;
+    this.intentionalSubprocessExits.add(child);
     const waitForExit = new Promise<{ code: number | null; signal: string | null }>((resolve) => {
       if (child.exitCode !== null || child.signalCode) {
         resolve({ code: child.exitCode, signal: child.signalCode });
@@ -2429,28 +2496,32 @@ export class PiAgent extends BaseAgent {
       child.once('exit', (code, signal) => resolve({ code, signal }));
     });
 
+    const remaining = () => Math.max(0, (options.deadline ?? (Date.now() + 3_000)) - Date.now());
+    const waitBounded = async (ms: number) => Promise.race([
+      waitForExit,
+      new Promise<null>(resolve => setTimeout(() => resolve(null), Math.max(0, Math.min(ms, remaining())))),
+    ]);
+
     try {
       this.send({ type: 'shutdown' });
     } catch {
       // stdin may already be closed
     }
 
-    child.kill('SIGTERM');
-    let result = await Promise.race([
-      waitForExit,
-      new Promise<null>(resolve => setTimeout(() => resolve(null), timeoutMs)),
-    ]);
+    this.signalExactSubprocess(child, 'SIGTERM');
+    let result = await waitBounded(2_000);
+    let forced = false;
 
-    if (!result && this.subprocess === child) {
-      this.debug(`Pi subprocess ${pid ?? '(unknown pid)'} did not exit after ${timeoutMs}ms; sending SIGKILL`);
-      child.kill('SIGKILL');
-      result = await Promise.race([
-        waitForExit,
-        new Promise<null>(resolve => setTimeout(() => resolve(null), 1_000)),
-      ]);
+    if (!result) {
+      forced = true;
+      this.debug(`Pi subprocess ${pid ?? '(unknown pid)'} did not exit after SIGTERM; sending SIGKILL`);
+      // Always send the exact-group hard kill even when the observation deadline
+      // is exhausted; the deadline bounds waiting, not containment.
+      this.signalExactSubprocess(child, 'SIGKILL');
+      result = await waitBounded(1_000);
     }
 
-    if (this.readline) {
+    if (this.readline && this.subprocess === child) {
       this.readline.close();
       this.readline = null;
     }
@@ -2463,10 +2534,33 @@ export class PiAgent extends BaseAgent {
     this.preToolMetadataByCallId.clear();
     this.adapter.resetOverflowState();
 
-    if (result) {
-      this.debug(`Pi subprocess ${pid ?? '(unknown pid)'} stopped for restart: code=${result.code}, signal=${result.signal}`);
-    } else {
-      this.debug(`Pi subprocess ${pid ?? '(unknown pid)'} stop timed out after SIGKILL`);
+    return {
+      outcome: result ? (forced ? 'forced' : 'graceful') : 'timed_out',
+      observedExit: result !== null,
+      ...(pid ? { pid } : {}),
+      attemptedGraceful: true,
+      forced,
+      durationMs: Math.max(0, Date.now() - startedAt),
+      provider: 'pi',
+      ...(!result ? { errorCode: 'runtime_dispose_timed_out' as const } : {}),
+    };
+  }
+
+  private signalExactSubprocess(child: ChildProcess, signal: NodeJS.Signals): boolean {
+    const pid = child.pid;
+    if (process.platform !== 'win32' && pid) {
+      try {
+        process.kill(-pid, signal);
+        return true;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ESRCH') return false;
+        // Fall back to the exact child handle if group signaling is unavailable.
+      }
+    }
+    try {
+      return child.kill(signal);
+    } catch {
+      return false;
     }
   }
 
@@ -2480,13 +2574,16 @@ export class PiAgent extends BaseAgent {
     }
 
     if (this.subprocess) {
-      // Try graceful shutdown first
+      const child = this.subprocess;
+      this.intentionalSubprocessExits.add(child);
+      // Try graceful shutdown first. Legacy callers remain synchronous, but still
+      // target the exact owned process group and cannot report a false crash.
       try {
         this.send({ type: 'shutdown' });
       } catch {
         // stdin may already be closed
       }
-      this.subprocess.kill('SIGTERM');
+      this.signalExactSubprocess(child, 'SIGTERM');
       this.subprocess = null;
     }
 

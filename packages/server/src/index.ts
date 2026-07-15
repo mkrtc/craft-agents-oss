@@ -36,6 +36,7 @@ import type { WebuiHandler } from '@craft-agent/server-core/webui'
 import { getCredentialManager } from '@craft-agent/shared/credentials'
 import { getWorkspaces } from '@craft-agent/shared/config'
 import { createMessagingBootstrap, type MessagingBootstrapHandle } from '@craft-agent/messaging-gateway'
+import { createServerShutdown } from './shutdown.ts'
 
 // --generate-token: print a crypto-random token and exit
 if (process.argv.includes('--generate-token')) {
@@ -239,12 +240,8 @@ const instance = await (async () => {
       initializeSessionManager: async (sessionManager) => {
         await sessionManager.initialize()
       },
-      cleanupSessionManager: async (sessionManager) => {
-        try {
-          await sessionManager.flushAllSessions()
-        } finally {
-          sessionManager.cleanup()
-        }
+      cleanupSessionManager: async (sessionManager, { deadline }) => {
+        await sessionManager.cleanup({ deadline })
       },
       cleanupClientResources: cleanupSessionFileWatchForClient,
     })
@@ -340,19 +337,14 @@ if (!isLocalBind && instance.protocol === 'ws') {
   }
 }
 
-const shutdown = async () => {
-  webuiHandler?.dispose()
-  healthServer?.stop()
-  if (messagingHandle) {
-    try {
-      await messagingHandle.dispose()
-    } catch (error) {
-      console.error('[messaging] dispose failed:', error)
-    }
-  }
-  await instance.stop()
-  process.exit(0)
-}
+const shutdown = createServerShutdown({
+  disposeWebui: () => webuiHandler?.dispose(),
+  stopHealth: () => healthServer?.stop(),
+  disposeMessaging: () => messagingHandle?.dispose(),
+  stopServer: () => instance.stop(),
+  exit: (code) => process.exit(code),
+  logError: (message, error) => console.error(`${message}:`, error),
+})
 
 process.on('SIGINT', shutdown)
 process.on('SIGTERM', shutdown)

@@ -16,13 +16,14 @@ import {
   createBackendFromResolvedContext,
   cleanupSourceRuntimeArtifacts,
   providerTypeToAgentProvider,
+  disposeBackendRuntime,
   type AgentBackend,
   type BackendHostRuntimeContext,
   type PostInitResult,
   type LabelSkillBootstrapChatEntry,
   type LabelSkillBootstrapRegisteredEvent,
 } from '@craft-agent/shared/agent/backend'
-import { getLlmConnection, getLlmConnections, getDefaultLlmConnection, getDefaultThinkingLevel, resetManagedAnthropicAuthEnvVars, resolveMidStreamBehavior, getPersistedUiLanguage, resolveTitleLanguageName } from '@craft-agent/shared/config'
+import { getLlmConnection, getLlmConnections, getDefaultLlmConnection, getDefaultThinkingLevel, resetManagedAnthropicAuthEnvVars, resolveMidStreamBehavior, getPersistedUiLanguage, resolveTitleLanguageName, resolveRuntimeLifecycleConfig, type RuntimeLifecycleConfig } from '@craft-agent/shared/config'
 import { PrivilegedExecutionBroker } from '@craft-agent/server-core/services'
 import { isValidWorkingDirectory } from '../utils/path-validation'
 import { InitGate } from '@craft-agent/server-core/domain'
@@ -39,7 +40,7 @@ import {
   type Workspace,
   type WorkspaceInfo,
 } from '@craft-agent/shared/config'
-import type { ActiveSessionInfo, SessionProcessingStatus } from '@craft-agent/core/types'
+import type { ActiveSessionInfo, SessionProcessingStatus, RuntimeDisposeReason, RuntimeDisposeResult } from '@craft-agent/core/types'
 import { loadWorkspaceConfig } from '@craft-agent/shared/workspaces'
 import { getProjectMemoryStore } from '@craft-agent/shared/project-memory'
 import {
@@ -778,6 +779,40 @@ async function resolveToolDisplayMeta(
 /** Agent type - unified backend interface for all providers */
 type AgentInstance = AgentBackend
 
+type ManagedRuntimeState = 'creating' | 'ready' | 'draining' | 'disposed'
+
+/** Exact immutable resource identity for one session runtime generation. */
+interface ManagedRuntimeGeneration {
+  epoch: number
+  token: string
+  state: ManagedRuntimeState
+  agent?: AgentInstance
+  mcpPool?: McpClientPool
+  poolServer?: McpPoolServer
+  envOverrides?: Record<string, string>
+  readyPromise?: Promise<AgentInstance>
+  disposePromise?: Promise<RuntimeDisposeResult | undefined>
+  createdAt: number
+}
+
+type TurnWatchdogPhase = 'startup' | 'streaming' | 'tool' | 'compaction' | 'permission' | 'background'
+
+/** Minimum generation/identity fence required by the production hotfix. */
+interface ManagedTurnContext {
+  generation: number
+  token: string
+  runtimeEpoch: number
+  agent?: AgentInstance
+  phase: TurnWatchdogPhase
+  lastActivityAt: number
+  protectedUntil?: number
+  activeToolIds: Set<string>
+  terminalClaimed: boolean
+  terminalPromise?: Promise<void>
+  watchdogTimer?: ReturnType<typeof setTimeout>
+  retireRuntimeAfterTurn?: RuntimeDisposeReason
+}
+
 /**
  * Status of a background task in the main-process registry.
  * - `running`   — backgrounded and no terminal notification seen yet.
@@ -816,6 +851,19 @@ interface ManagedSession {
   id: string
   workspace: Workspace
   agent: AgentInstance | null  // Lazy-loaded - null until first message
+  /** Exact currently-owned runtime generation (partial resources stay private here while creating). */
+  runtimeGeneration?: ManagedRuntimeGeneration
+  nextRuntimeEpoch: number
+  /** Queue-empty timestamp used by the global retained-runtime reaper. */
+  runtimeIdleSince?: number
+  /** Current turn identity; stale events/timers must match this object before mutation. */
+  activeTurn?: ManagedTurnContext
+  /** Watchdog/crash pauses FIFO replay until an explicit later send/retry. */
+  runtimeQueuePaused?: boolean
+  /** Tombstone closes per-session runtime admission before delete teardown awaits. */
+  deleting?: boolean
+  /** Generation-owned stop fallback timer. */
+  stopTimer?: ReturnType<typeof setTimeout>
   messages: Message[]
   isProcessing: boolean
   /** Set when user requests stop - allows event loop to drain before clearing isProcessing */
@@ -1102,6 +1150,7 @@ export function createManagedSession(
     // Runtime-only defaults (not persisted)
     workspace,
     agent: null,
+    nextRuntimeEpoch: 0,
     messages: [],
     isProcessing: false,
     lastMessageAt: (s.lastMessageAt ?? s.lastUsedAt ?? Date.now()) as number,
@@ -1370,6 +1419,13 @@ export class SessionManager implements ISessionManager {
    * subprocess can race the resulting `chat` against the still-pending update.
    */
   private agentRefreshLocks: Map<string, Promise<void>> = new Map()
+  /** Audited environment-driven hotfix bounds (resolved per manager instance). */
+  private readonly runtimeLifecycleConfig: RuntimeLifecycleConfig = resolveRuntimeLifecycleConfig()
+  /** Exact generations remain tracked until their own awaited disposal finishes. */
+  private runtimeRegistry = new Map<string, { managed: ManagedSession; generation: ManagedRuntimeGeneration }>()
+  private idleReaperTimer?: ReturnType<typeof setInterval>
+  private closing = false
+  private cleanupPromise?: Promise<void>
   /** Monotonic clock to ensure strictly increasing message timestamps */
   private lastTimestamp = 0
 
@@ -1399,6 +1455,189 @@ export class SessionManager implements ISessionManager {
     } else if (was && !processing) {
       sessionRuntimeHooks.onSessionStopped()
     }
+  }
+
+  private beginTurn(managed: ManagedSession): ManagedTurnContext {
+    const turn: ManagedTurnContext = {
+      generation: managed.processingGeneration,
+      token: randomUUID(),
+      runtimeEpoch: managed.runtimeGeneration?.epoch ?? 0,
+      agent: managed.agent ?? undefined,
+      phase: managed.agent ? 'streaming' : 'startup',
+      lastActivityAt: Date.now(),
+      activeToolIds: new Set(),
+      terminalClaimed: false,
+    }
+    if (managed.activeTurn?.watchdogTimer) clearTimeout(managed.activeTurn.watchdogTimer)
+    managed.activeTurn = turn
+    managed.runtimeIdleSince = undefined
+    this.scheduleTurnWatchdog(managed, turn)
+    return turn
+  }
+
+  private isCurrentTurn(managed: ManagedSession, turn: ManagedTurnContext, agent?: AgentInstance): boolean {
+    const generationMatches = !turn.agent || (
+      managed.runtimeGeneration?.epoch === turn.runtimeEpoch
+      && managed.runtimeGeneration.agent === turn.agent
+    )
+    return managed.activeTurn === turn
+      && managed.processingGeneration === turn.generation
+      && !turn.terminalClaimed
+      && generationMatches
+      && (!agent || turn.agent === agent)
+      && !managed.deleting
+      && !this.closing
+  }
+
+  private scheduleTurnWatchdog(managed: ManagedSession, turn: ManagedTurnContext): void {
+    if (turn.watchdogTimer) clearTimeout(turn.watchdogTimer)
+    turn.watchdogTimer = undefined
+    if (!this.runtimeLifecycleConfig.watchdogEnabled || turn.terminalClaimed || !this.isCurrentTurn(managed, turn)) return
+
+    const now = Date.now()
+    let deadline: number
+    switch (turn.phase) {
+      case 'startup':
+        deadline = turn.lastActivityAt + this.runtimeLifecycleConfig.startupTimeoutMs
+        break
+      case 'tool':
+        deadline = turn.protectedUntil ?? (turn.lastActivityAt + this.runtimeLifecycleConfig.toolTimeoutMs)
+        break
+      case 'compaction':
+      case 'permission':
+      case 'background':
+        deadline = turn.protectedUntil ?? (now + this.runtimeLifecycleConfig.protectedLeaseMs)
+        break
+      default:
+        deadline = turn.lastActivityAt + this.runtimeLifecycleConfig.silenceTimeoutMs
+    }
+
+    turn.watchdogTimer = setTimeout(() => {
+      if (!this.isCurrentTurn(managed, turn) || turn.terminalClaimed) return
+      void this.handleRuntimeFailure(
+        managed,
+        managed.runtimeGeneration,
+        turn.agent,
+        'watchdog',
+        turn,
+      )
+    }, Math.max(1, deadline - now))
+    turn.watchdogTimer.unref?.()
+  }
+
+  private protectTurn(managed: ManagedSession, phase: Extract<TurnWatchdogPhase, 'permission' | 'compaction' | 'background'>): void {
+    const turn = managed.activeTurn
+    if (!turn || !this.isCurrentTurn(managed, turn)) return
+    turn.phase = phase
+    turn.protectedUntil = Date.now() + this.runtimeLifecycleConfig.protectedLeaseMs
+    turn.lastActivityAt = Date.now()
+    this.scheduleTurnWatchdog(managed, turn)
+  }
+
+  private resolvePermissionProtection(managed: ManagedSession): void {
+    if (this.hasPendingPermissionForSession(managed.id)) return
+    const turn = managed.activeTurn
+    if (!turn || !this.isCurrentTurn(managed, turn) || turn.phase !== 'permission') return
+    turn.phase = turn.activeToolIds.size > 0 ? 'tool' : 'streaming'
+    turn.protectedUntil = turn.activeToolIds.size > 0
+      ? Date.now() + this.runtimeLifecycleConfig.toolTimeoutMs
+      : undefined
+    turn.lastActivityAt = Date.now()
+    this.scheduleTurnWatchdog(managed, turn)
+  }
+
+  private noteTurnActivity(managed: ManagedSession, turn: ManagedTurnContext, event: AgentEvent): void {
+    if (!this.isCurrentTurn(managed, turn)) return
+    const now = Date.now()
+    turn.lastActivityAt = now
+
+    if ((event.type === 'status' || event.type === 'info') && event.runtimeActivity === 'compaction_start') {
+      turn.phase = 'compaction'
+      turn.protectedUntil = now + this.runtimeLifecycleConfig.protectedLeaseMs
+    } else if ((event.type === 'status' || event.type === 'info') && event.runtimeActivity && event.runtimeActivity !== 'compaction_start') {
+      turn.phase = turn.activeToolIds.size > 0 ? 'tool' : 'streaming'
+      turn.protectedUntil = turn.activeToolIds.size > 0 ? turn.protectedUntil : undefined
+    } else if (event.type === 'tool_start') {
+      turn.activeToolIds.add(event.toolUseId)
+      turn.phase = 'tool'
+      // Foreground tool ceiling is absolute, not renewed by ordinary progress.
+      if (turn.activeToolIds.size === 1) turn.protectedUntil = now + this.runtimeLifecycleConfig.toolTimeoutMs
+    } else if (event.type === 'tool_result') {
+      turn.activeToolIds.delete(event.toolUseId)
+      if (turn.activeToolIds.size === 0) {
+        turn.phase = 'streaming'
+        turn.protectedUntil = undefined
+      }
+    } else if (event.type === 'task_backgrounded' || event.type === 'shell_backgrounded') {
+      turn.phase = 'background'
+      turn.protectedUntil = now + this.runtimeLifecycleConfig.protectedLeaseMs
+    } else if (turn.phase === 'startup') {
+      turn.phase = 'streaming'
+    }
+
+    this.scheduleTurnWatchdog(managed, turn)
+  }
+
+  private appendRuntimeTerminalError(managed: ManagedSession, kind: 'crash' | 'watchdog'): void {
+    const code = kind === 'crash' ? 'runtime_backend_crashed' : 'runtime_watchdog_timeout'
+    const title = kind === 'crash' ? 'Agent runtime stopped' : 'Agent became unresponsive'
+    const content = kind === 'crash'
+      ? 'The agent backend exited unexpectedly. Retry to continue with a fresh runtime.'
+      : 'The agent did not make progress before the safety deadline. Retry to continue with a fresh runtime.'
+    const timestamp = this.monotonic()
+    const errorMessage: Message = {
+      id: generateMessageId(),
+      role: 'error',
+      content,
+      timestamp,
+      errorCode: code,
+      errorTitle: title,
+      errorCanRetry: true,
+    }
+    managed.messages.push(errorMessage)
+    this.sendEvent({
+      type: 'typed_error',
+      sessionId: managed.id,
+      error: {
+        code,
+        title,
+        message: content,
+        actions: [{ key: 'r', label: 'Retry', action: 'retry' }],
+        canRetry: true,
+      },
+    }, managed.workspace.id)
+  }
+
+  private async handleRuntimeFailure(
+    managed: ManagedSession,
+    generation: ManagedRuntimeGeneration | undefined,
+    agent: AgentInstance | undefined,
+    kind: 'crash' | 'watchdog',
+    expectedTurn?: ManagedTurnContext,
+  ): Promise<void> {
+    if (!generation || managed.runtimeGeneration !== generation) return
+    const turn = expectedTurn ?? managed.activeTurn
+
+    if (!turn || !this.isCurrentTurn(managed, turn, agent)) {
+      // Idle unexpected exit: retire the dead exact bundle without fabricating a turn error.
+      await this.disposeManagedAgentRuntime(managed, kind === 'crash' ? 'backend_crash' : 'watchdog', generation)
+      return
+    }
+    if (turn.terminalClaimed) return
+
+    this.clearPendingPermissionRequestsForSession(managed.id)
+    this.appendRuntimeTerminalError(managed, kind)
+    managed.runtimeQueuePaused = true
+    turn.retireRuntimeAfterTurn = kind === 'crash' ? 'backend_crash' : 'watchdog'
+    try {
+      agent?.forceAbort(AbortReason.UserStop)
+    } catch {
+      // Exact disposal below is the hard backstop.
+    }
+
+    const terminal = this.onProcessingStopped(managed.id, 'timeout', turn)
+    await this.disposeManagedAgentRuntime(managed, turn.retireRuntimeAfterTurn, generation)
+    await terminal
   }
 
   /** Wait until initialize() has completed (sessions loaded from disk).
@@ -1733,6 +1972,11 @@ export class SessionManager implements ISessionManager {
   private clearPendingPermissionRequestsForSession(sessionId: string): void {
     for (const [requestId, metadata] of this.pendingPermissionRequests.entries()) {
       if (metadata.sessionId === sessionId) {
+        if (metadata.type === 'admin_approval') {
+          this.privilegedExecutionBroker.resolveApproval(requestId, false, {
+            expectedCommandHash: metadata.commandHash,
+          })
+        }
         this.pendingPermissionRequests.delete(requestId)
       }
     }
@@ -2472,6 +2716,7 @@ export class SessionManager implements ISessionManager {
 
       // Load existing sessions from disk
       this.loadSessionsFromDisk()
+      this.startIdleReaper()
 
       // Signal that initialization is complete — IPC handlers waiting on initGate will proceed
       this.initGate.markReady()
@@ -3121,6 +3366,7 @@ export class SessionManager implements ISessionManager {
     // `{ emitCreatedEvent: false }` to avoid a redundant hydrate.
     internal?: { emitCreatedEvent?: boolean },
   ): Promise<Session> {
+    this.assertRuntimeAdmission()
     const workspace = getWorkspaceByNameOrId(workspaceId)
     if (!workspace) {
       throw new Error(`Workspace ${workspaceId} not found`)
@@ -3565,6 +3811,9 @@ export class SessionManager implements ISessionManager {
               this.sessions.delete(id)
             },
             deleteStoredSession,
+            disposeRuntime: async () => {
+              await this.disposeManagedAgentRuntime(managed, 'construction_failed')
+            },
           })
 
           throw new Error(
@@ -3638,46 +3887,177 @@ export class SessionManager implements ISessionManager {
     return this.sessions.get(sessionId)?.workingDirectory
   }
 
-  private async disposeManagedAgentRuntime(managed: ManagedSession, reason: string): Promise<void> {
-    const sessionId = managed.id
+  private assertRuntimeAdmission(): void {
+    if (this.closing) {
+      throw new Error('Session runtime manager is shutting down')
+    }
+  }
 
-    if (managed.agent) {
-      try {
-        if (managed.agent.disposeForRestart) {
-          await managed.agent.disposeForRestart()
-        } else {
-          managed.agent.dispose()
-        }
-      } catch (error) {
-        sessionLog.warn(`Failed to dispose agent for ${sessionId} during ${reason}: ${error instanceof Error ? error.message : error}`)
+  /** Adopt legacy/test-injected fields into one exact bundle before disposal. */
+  private ensureRuntimeGeneration(managed: ManagedSession): ManagedRuntimeGeneration | undefined {
+    if (managed.runtimeGeneration) return managed.runtimeGeneration
+    if (!managed.agent && !managed.poolServer && !managed.mcpPool) return undefined
+
+    const generation: ManagedRuntimeGeneration = {
+      epoch: ++managed.nextRuntimeEpoch,
+      token: randomUUID(),
+      state: 'ready',
+      ...(managed.agent ? { agent: managed.agent } : {}),
+      ...(managed.poolServer ? { poolServer: managed.poolServer } : {}),
+      ...(managed.mcpPool ? { mcpPool: managed.mcpPool } : {}),
+      ...(managed.envOverrides ? { envOverrides: managed.envOverrides } : {}),
+      createdAt: Date.now(),
+    }
+    managed.runtimeGeneration = generation
+    this.runtimeRegistry.set(generation.token, { managed, generation })
+    return generation
+  }
+
+  private isCurrentRuntime(managed: ManagedSession, generation: ManagedRuntimeGeneration, agent?: AgentInstance): boolean {
+    return managed.runtimeGeneration === generation
+      && generation.state === 'ready'
+      && (!agent || generation.agent === agent)
+      && this.sessions.get(managed.id) === managed
+      && !this.closing
+  }
+
+  private async disposeRuntimeGeneration(
+    managed: ManagedSession,
+    generation: ManagedRuntimeGeneration,
+    reason: RuntimeDisposeReason,
+    deadline = Date.now() + this.runtimeLifecycleConfig.shutdownTimeoutMs,
+  ): Promise<RuntimeDisposeResult | undefined> {
+    if (generation.disposePromise) return generation.disposePromise
+
+    generation.state = 'draining'
+    generation.agent?.setBackgroundEventSink?.(null)
+    if (generation.agent) generation.agent.onRuntimeExit = null
+
+    const work = (async (): Promise<RuntimeDisposeResult | undefined> => {
+      const [agentResult] = await Promise.all([
+        generation.agent
+          ? disposeBackendRuntime(generation.agent, { reason, deadline }).catch((error) => {
+              sessionLog.warn(`Failed to dispose agent for ${managed.id} during ${reason}: ${error instanceof Error ? error.message : error}`)
+              return undefined
+            })
+          : Promise.resolve(undefined),
+        generation.poolServer?.stop().catch((error) => {
+          sessionLog.warn(`Failed to stop pool server for ${managed.id} during ${reason}: ${error instanceof Error ? error.message : error}`)
+        }),
+        generation.mcpPool?.disconnectAll().catch((error) => {
+          sessionLog.warn(`Failed to disconnect MCP pool for ${managed.id} during ${reason}: ${error instanceof Error ? error.message : error}`)
+        }),
+      ])
+      generation.state = 'disposed'
+      generation.agent = undefined
+      generation.poolServer = undefined
+      generation.mcpPool = undefined
+      generation.envOverrides = undefined
+      this.runtimeRegistry.delete(generation.token)
+      return agentResult
+    })()
+
+    generation.disposePromise = work
+    return work
+  }
+
+  /**
+   * Single idempotent awaited ownership path for agent + model child + pool server
+   * + MCP transports. Fields are fenced synchronously before any external await.
+   */
+  private async disposeManagedAgentRuntime(
+    managed: ManagedSession,
+    reason: RuntimeDisposeReason,
+    expectedGeneration?: ManagedRuntimeGeneration,
+    deadline?: number,
+  ): Promise<RuntimeDisposeResult | undefined> {
+    const generation = expectedGeneration ?? this.ensureRuntimeGeneration(managed)
+    if (!generation) return undefined
+
+    if (expectedGeneration && managed.runtimeGeneration !== expectedGeneration) {
+      return this.disposeRuntimeGeneration(managed, expectedGeneration, reason, deadline)
+    }
+
+    if (managed.runtimeGeneration === generation) {
+      managed.runtimeGeneration = undefined
+      managed.agent = null
+      managed.poolServer = undefined
+      managed.mcpPool = undefined
+      managed.envOverrides = undefined
+      managed.runtimeIdleSince = undefined
+      managed.agentReadyResolve?.()
+      managed.agentReady = undefined
+      managed.agentReadyResolve = undefined
+      managed.backendRuntimeSignature = undefined
+      managed.backendRestartSignature = undefined
+      unregisterSessionScopedToolCallbacks(managed.id)
+    }
+
+    return this.disposeRuntimeGeneration(managed, generation, reason, deadline)
+  }
+
+  private hasPendingPermissionForSession(sessionId: string): boolean {
+    for (const request of this.pendingPermissionRequests.values()) {
+      if (request.sessionId === sessionId) return true
+    }
+    return false
+  }
+
+  private hasRunningBackgroundWork(managed: ManagedSession): boolean {
+    for (const task of managed.backgroundTaskRegistry.values()) {
+      if (task.status === 'running') return true
+    }
+    return false
+  }
+
+  private canEvictRuntime(managed: ManagedSession, generation: ManagedRuntimeGeneration): boolean {
+    return managed.runtimeGeneration === generation
+      && generation.state === 'ready'
+      && !managed.isProcessing
+      && !managed.activeTurn
+      && managed.messageQueue.length === 0
+      && !managed.authRetryInProgress
+      && !this.hasPendingPermissionForSession(managed.id)
+      && !this.hasRunningBackgroundWork(managed)
+  }
+
+  /** Global (cross-workspace) TTL/cap reaper plus exact-registry reconciliation. */
+  async reapIdleRuntimes(now = Date.now()): Promise<void> {
+    if (this.closing || !this.runtimeLifecycleConfig.idleEvictionEnabled) return
+
+    const orphanDisposals: Promise<unknown>[] = []
+    for (const { managed, generation } of this.runtimeRegistry.values()) {
+      if (this.sessions.get(managed.id) !== managed || managed.runtimeGeneration !== generation) {
+        orphanDisposals.push(this.disposeRuntimeGeneration(managed, generation, 'eviction'))
       }
     }
 
-    if (managed.poolServer) {
-      try {
-        await managed.poolServer.stop()
-      } catch (error) {
-        sessionLog.warn(`Failed to stop pool server for ${sessionId} during ${reason}: ${error instanceof Error ? error.message : error}`)
-      }
-    }
+    const candidates = [...this.sessions.values()]
+      .map((managed) => ({ managed, generation: this.ensureRuntimeGeneration(managed) }))
+      .filter((entry): entry is { managed: ManagedSession; generation: ManagedRuntimeGeneration } =>
+        !!entry.generation && entry.managed.runtimeIdleSince !== undefined && this.canEvictRuntime(entry.managed, entry.generation))
+      .sort((a, b) => (a.managed.runtimeIdleSince ?? 0) - (b.managed.runtimeIdleSince ?? 0))
 
-    if (managed.mcpPool) {
-      try {
-        await managed.mcpPool.disconnectAll()
-      } catch (error) {
-        sessionLog.warn(`Failed to disconnect MCP pool for ${sessionId} during ${reason}: ${error instanceof Error ? error.message : error}`)
-      }
-    }
+    const overCap = Math.max(0, candidates.length - this.runtimeLifecycleConfig.retainedCap)
+    const disposals = candidates
+      .filter((entry, index) =>
+        index < overCap || now - (entry.managed.runtimeIdleSince ?? now) >= this.runtimeLifecycleConfig.idleTtlMs)
+      .map(({ managed, generation }) => {
+        // Revalidate immediately before fencing the exact bundle.
+        if (!this.canEvictRuntime(managed, generation)) return Promise.resolve(undefined)
+        return this.disposeManagedAgentRuntime(managed, 'eviction', generation)
+      })
 
-    managed.agent = null
-    managed.poolServer = undefined
-    managed.mcpPool = undefined
-    managed.envOverrides = undefined
-    managed.agentReady = undefined
-    managed.agentReadyResolve = undefined
-    managed.backendRuntimeSignature = undefined
-    managed.backendRestartSignature = undefined
-    unregisterSessionScopedToolCallbacks(sessionId)
+    await Promise.allSettled([...orphanDisposals, ...disposals])
+  }
+
+  private startIdleReaper(): void {
+    if (this.idleReaperTimer || !this.runtimeLifecycleConfig.idleEvictionEnabled || this.closing) return
+    const intervalMs = Math.max(1_000, Math.min(60_000, Math.floor(this.runtimeLifecycleConfig.idleTtlMs / 2)))
+    this.idleReaperTimer = setInterval(() => {
+      void this.reapIdleRuntimes()
+    }, intervalMs)
+    this.idleReaperTimer.unref?.()
   }
 
   /**
@@ -3703,7 +4083,11 @@ export class SessionManager implements ISessionManager {
    *     `agent.updateRuntimeConfig` and falls back to dispose if the backend
    *     can't apply the update.
    */
-  private async tryRefreshAgentRuntime(managed: ManagedSession, reason: string): Promise<void> {
+  private async tryRefreshAgentRuntime(
+    managed: ManagedSession,
+    reason: string,
+    allowCurrentSendStartup = false,
+  ): Promise<void> {
     // Serialize against any in-flight refresh on this session. The waiter
     // doesn't propagate the prior call's errors — those are logged at the
     // origin call site.
@@ -3741,7 +4125,10 @@ export class SessionManager implements ISessionManager {
 
     if (!restartRequired && !runtimeChanged) return
 
-    if (managed.agent.isProcessing()) {
+    if (
+      managed.agent.isProcessing()
+      || (!allowCurrentSendStartup && managed.activeTurn?.agent === managed.agent)
+    ) {
       sessionLog.info(`Runtime config changed for ${managed.id}; deferring refresh until session is idle (${reason})`)
       return
     }
@@ -3781,7 +4168,7 @@ export class SessionManager implements ISessionManager {
   ): Promise<void> {
     if (restartRequired) {
       sessionLog.info(`Restart-required field changed for session ${managed.id}; recreating backend runtime (${reason})`)
-      await this.disposeManagedAgentRuntime(managed, 'restart-required runtime change')
+      await this.disposeManagedAgentRuntime(managed, 'replacement')
       return
     }
 
@@ -3822,7 +4209,7 @@ export class SessionManager implements ISessionManager {
       sessionLog.info(`Refreshed runtime config for session ${managed.id} (${reason})`)
     } else {
       sessionLog.info(`Recreating backend runtime for session ${managed.id} after config change (${reason})`)
-      await this.disposeManagedAgentRuntime(managed, 'runtime config refresh')
+      await this.disposeManagedAgentRuntime(managed, 'replacement')
     }
   }
 
@@ -3854,10 +4241,11 @@ export class SessionManager implements ISessionManager {
    * 4. fallback: no connection configured
    */
   private async getOrCreateAgent(managed: ManagedSession): Promise<AgentInstance> {
+    this.assertRuntimeAdmission()
     // Refresh runtime config in-place when the connection has drifted since
     // the agent was created. May null out `managed.agent` if the in-place
     // refresh fails, in which case the create branch below rebuilds it.
-    await this.tryRefreshAgentRuntime(managed, 'send-path refresh')
+    await this.tryRefreshAgentRuntime(managed, 'send-path refresh', true)
 
     const workspaceConfig = loadWorkspaceConfig(managed.workspace.rootPath)
     const backendContext = resolveBackendContext({
@@ -3875,8 +4263,31 @@ export class SessionManager implements ISessionManager {
     const runtimeSignature = buildBackendRuntimeSignature(sigInput)
     const restartSignature = buildRestartRequiredSignature(sigInput)
 
-    if (!managed.agent) {
+    const existingGeneration = this.ensureRuntimeGeneration(managed)
+    if (managed.agent && existingGeneration?.state === 'ready') {
+      managed.runtimeIdleSince = undefined
+      return managed.agent
+    }
+    if (existingGeneration?.state === 'creating' && existingGeneration.readyPromise) {
+      return existingGeneration.readyPromise
+    }
+
+    const generation: ManagedRuntimeGeneration = {
+      epoch: ++managed.nextRuntimeEpoch,
+      token: randomUUID(),
+      state: 'creating',
+      createdAt: Date.now(),
+    }
+    managed.runtimeGeneration = generation
+    managed.runtimeIdleSince = undefined
+    this.runtimeRegistry.set(generation.token, { managed, generation })
+
+    const construction = (async (): Promise<AgentInstance> => {
       const end = perf.start('agent.create', { sessionId: managed.id })
+      let agent: AgentInstance | undefined
+      let mcpPool: McpClientPool | undefined
+      let poolServer: McpPoolServer | undefined
+      try {
 
       // Lock the connection after first resolution
       // This ensures the session always uses the same provider
@@ -3925,17 +4336,34 @@ export class SessionManager implements ISessionManager {
 
       // Build server configs for enabled sources
       const { mcpServers, apiServers } = await buildServersFromSources(enabledSources, sessionPath, managed.tokenRefreshManager)
+      if (generation.state !== 'creating' || managed.runtimeGeneration !== generation || this.closing) {
+        throw new Error('Runtime construction cancelled')
+      }
 
       // Create centralized MCP client pool (all backends use it)
-      managed.mcpPool = new McpClientPool({ debug: (msg) => sessionLog.debug(msg), workspaceRootPath: managed.workspace.rootPath, sessionPath })
+      mcpPool = new McpClientPool({ debug: (msg) => sessionLog.debug(msg), workspaceRootPath: managed.workspace.rootPath, sessionPath })
+      generation.mcpPool = mcpPool
 
       // Backends that run as external subprocesses need an HTTP pool server
       let poolServerUrl: string | undefined
       if (backendContext.capabilities.needsHttpPoolServer) {
-        managed.poolServer = new McpPoolServer(managed.mcpPool, { debug: (msg) => sessionLog.debug(msg) })
-        managed.mcpPool.onToolsChanged = () => managed.poolServer?.notifyToolsChanged()
-        poolServerUrl = await managed.poolServer.start()
-        await managed.mcpPool.sync(mcpServers) // Ensure pool has tools before SDK connects
+        poolServer = new McpPoolServer(mcpPool, { debug: (msg) => sessionLog.debug(msg) })
+        generation.poolServer = poolServer
+        mcpPool.onToolsChanged = () => poolServer?.notifyToolsChanged()
+        poolServerUrl = await poolServer.start()
+        if (generation.state !== 'creating' || managed.runtimeGeneration !== generation || this.closing) {
+          await poolServer.stop().catch(() => undefined)
+          await mcpPool.disconnectAll().catch(() => undefined)
+          throw new Error('Runtime construction cancelled')
+        }
+        await mcpPool.sync(mcpServers) // Ensure pool has tools before SDK connects
+        if (generation.state !== 'creating' || managed.runtimeGeneration !== generation || this.closing) {
+          // A dispose may have raced start/sync. Sweep again after the awaited
+          // construction step so no late HTTP/MCP child can resurrect.
+          await poolServer.stop().catch(() => undefined)
+          await mcpPool.disconnectAll().catch(() => undefined)
+          throw new Error('Runtime construction cancelled')
+        }
       }
 
       // Per-session env overrides
@@ -3972,7 +4400,12 @@ export class SessionManager implements ISessionManager {
         projectId: managed.projectId,
       }
 
+      const ownsGeneration = () => managed.runtimeGeneration === generation
+        && (generation.state === 'creating' || generation.state === 'ready')
+        && !this.closing
+
       const onSdkSessionIdUpdate = (sdkSessionId: string) => {
+        if (!ownsGeneration()) return
         managed.sdkSessionId = sdkSessionId
         // Retire branch-only fork metadata now that child session is established
         if (managed.branchFromSdkSessionId) {
@@ -3988,6 +4421,7 @@ export class SessionManager implements ISessionManager {
       }
 
       const onSdkSessionIdCleared = () => {
+        if (!ownsGeneration()) return
         managed.sdkSessionId = undefined
         sessionLog.info(`SDK session ID cleared for ${managed.id} (resume recovery)`)
         this.persistSession(managed)
@@ -3995,6 +4429,7 @@ export class SessionManager implements ISessionManager {
       }
 
       const onBranchForkInvalidated = () => {
+        if (!ownsGeneration()) return
         managed.sdkSessionId = undefined
         managed.branchFromSdkSessionId = undefined
         managed.branchFromSdkCwd = undefined
@@ -4041,6 +4476,7 @@ export class SessionManager implements ISessionManager {
       }
 
       const markBranchSeedApplied = () => {
+        if (!ownsGeneration()) return
         if (managed.branchContextStrategy !== 'seeded-fresh-session') return
         if (managed.branchSeedApplied) return
         managed.branchSeedApplied = true
@@ -4057,6 +4493,7 @@ export class SessionManager implements ISessionManager {
       }
 
       const markTransferredSessionSummaryApplied = () => {
+        if (!ownsGeneration()) return
         if (managed.transferredSessionSummaryApplied || !managed.transferredSessionSummary) return
         managed.transferredSessionSummaryApplied = true
         this.persistSession(managed)
@@ -4069,7 +4506,15 @@ export class SessionManager implements ISessionManager {
       // Construct backend via factory
       // ============================================================
 
-      managed.agent = createBackendFromResolvedContext({
+      const { getEnable1MContext } = await import('@craft-agent/shared/config/storage')
+      const enable1MContext = getEnable1MContext()
+      if (generation.state !== 'creating' || managed.runtimeGeneration !== generation || this.closing) {
+        await poolServer?.stop().catch(() => undefined)
+        await mcpPool.disconnectAll().catch(() => undefined)
+        throw new Error('Runtime construction cancelled')
+      }
+
+      agent = createBackendFromResolvedContext({
         context: backendContext,
         hostRuntime: buildBackendHostRuntimeContext(),
         coreConfig: {
@@ -4086,7 +4531,7 @@ export class SessionManager implements ISessionManager {
         markBranchSeedApplied,
         getTransferredSessionSummary,
         markTransferredSessionSummaryApplied,
-        mcpPool: managed.mcpPool,
+        mcpPool: mcpPool,
         poolServerUrl,
         envOverrides,
         // Claude-specific
@@ -4095,7 +4540,7 @@ export class SessionManager implements ISessionManager {
         automationSystem: this.automationSystems.get(managed.workspace.rootPath),
         systemPromptPreset: managed.systemPromptPreset,
         debugMode: _platform?.isDebugMode ? { enabled: true, logFilePath: _platform.getLogFilePath?.() } : undefined,
-        enable1MContext: await (async () => { const { getEnable1MContext } = await import('@craft-agent/shared/config/storage'); return getEnable1MContext(); })(),
+        enable1MContext,
         // Image resize callback — prevents oversized images from entering conversation history
         onImageResize: async (filePath: string, maxSizeBytes: number): Promise<string | null> => {
           try {
@@ -4126,6 +4571,7 @@ export class SessionManager implements ISessionManager {
         },
         },
       }) as AgentInstance
+      generation.agent = agent
 
       sessionLog.info(`Created ${provider} agent for session ${managed.id} (model: ${backendContext.resolvedModel})${managed.sdkSessionId ? ' (resuming)' : ''}`)
 
@@ -4133,7 +4579,7 @@ export class SessionManager implements ISessionManager {
       // Post-construction: debug callback, auth callback, postInit()
       // ============================================================
 
-      managed.agent.onDebug = (msg: string) => {
+      agent.onDebug = (msg: string) => {
         const marker = '__PERMISSION_BLOCK__'
         if (msg.includes(marker)) {
           const idx = msg.indexOf(marker)
@@ -4159,7 +4605,8 @@ export class SessionManager implements ISessionManager {
       }
 
       // Unified auth callback — replaces per-backend onChatGptAuthRequired/onGithubAuthRequired
-      managed.agent.onBackendAuthRequired = (reason: string) => {
+      agent.onBackendAuthRequired = (reason: string) => {
+        if (!ownsGeneration()) return
         sessionLog.warn(`Backend auth required for session ${managed.id}: ${reason}`)
         this.sendEvent({
           type: 'info',
@@ -4170,7 +4617,15 @@ export class SessionManager implements ISessionManager {
       }
 
       // Run post-init (auth injection) — each backend handles its own
-      const postInitResult = await managed.agent.postInit()
+      const postInitResult = await agent.postInit()
+      if (generation.state !== 'creating' || managed.runtimeGeneration !== generation || this.closing) {
+        // Awaited postInit may have raced disposal. Re-sweep the exact agent
+        // after it unwinds so it cannot publish a late child.
+        await disposeBackendRuntime(agent, { reason: 'construction_failed' }).catch(() => undefined)
+        await poolServer?.stop().catch(() => undefined)
+        await mcpPool.disconnectAll().catch(() => undefined)
+        throw new Error('Runtime construction cancelled')
+      }
       if (postInitResult.authWarning) {
         sessionLog.warn(`Auth warning for session ${managed.id}: ${postInitResult.authWarning}`)
         this.sendEvent({
@@ -4182,8 +4637,8 @@ export class SessionManager implements ISessionManager {
       }
 
       // Wire up large response handling in the MCP pool (all backends)
-      if (managed.mcpPool && managed.agent) {
-        managed.mcpPool.setSummarizeCallback(managed.agent.getSummarizeCallback())
+      if (mcpPool && agent) {
+        mcpPool.setSummarizeCallback(agent.getSummarizeCallback())
       }
 
       // Wire up browser pane tools — merge BrowserPaneFns into session callbacks
@@ -4501,11 +4956,8 @@ export class SessionManager implements ISessionManager {
         })
       }
 
-      // Signal that the agent instance is ready (unblocks title generation)
-      managed.agentReadyResolve?.()
-
       // Set up permission handler to forward requests to renderer
-      managed.agent.onPermissionRequest = (request: {
+      agent.onPermissionRequest = (request: {
         requestId: string;
         toolName: string;
         command?: string;
@@ -4519,6 +4971,8 @@ export class SessionManager implements ISessionManager {
         commandHash?: string;
         approvalTtlSeconds?: number;
       }) => {
+        if (!ownsGeneration()) return
+        this.protectTurn(managed, 'permission')
         sessionLog.info(`Permission request for session ${managed.id}:`, request.command)
         let brokerMetadata: {
           commandHash?: string
@@ -4562,7 +5016,7 @@ export class SessionManager implements ISessionManager {
               requestId: request.requestId,
               commandHash: effectiveCommandHash,
             })
-            const liveAgent = managed.agent
+            const liveAgent = agent
             if (liveAgent) {
               liveAgent.respondToPermission(request.requestId, true, false)
               return
@@ -4589,7 +5043,7 @@ export class SessionManager implements ISessionManager {
       // which destroys/recreates the agent to get fresh credentials
 
       // Set up mode change handlers
-      managed.agent.onPermissionModeChange = (mode) => {
+      agent.onPermissionModeChange = (mode) => {
         if (managed.permissionMode === mode) {
           return
         }
@@ -4617,11 +5071,13 @@ export class SessionManager implements ISessionManager {
       }
 
       // Wire up onPlanSubmitted to add plan message to conversation
-      managed.agent.onPlanSubmitted = async (planPath) => {
+      agent.onPlanSubmitted = async (planPath) => {
+        if (!ownsGeneration()) return
         sessionLog.info(`Plan submitted for session ${managed.id}:`, planPath)
         try {
           // Read the plan file content
           const planContent = await readFile(planPath, 'utf-8')
+          if (!ownsGeneration()) return
 
           // Mark the SubmitPlan tool message as completed (it won't get a tool_result due to forceAbort)
           const submitPlanMsg = managed.messages.find(
@@ -4657,9 +5113,10 @@ export class SessionManager implements ISessionManager {
 
           // Interrupt execution - plan presentation is a stopping point
           // The user needs to review and respond before continuing
-          if (managed.isProcessing && managed.agent) {
+          if (managed.isProcessing && agent) {
             sessionLog.info(`Interrupting for plan submission in session ${managed.id}`)
-            managed.agent.interruptForHandoff(AbortReason.PlanSubmitted)
+            if (managed.activeTurn?.agent === agent) managed.activeTurn.retireRuntimeAfterTurn = 'manual'
+            agent.interruptForHandoff(AbortReason.PlanSubmitted)
             this.setProcessing(managed, false)
 
             // Release browser overlay + session binding because the agent is no longer running.
@@ -4681,7 +5138,8 @@ export class SessionManager implements ISessionManager {
       }
 
       // Wire up onAuthRequest to add auth message to conversation and pause execution
-      managed.agent.onAuthRequest = (request) => {
+      agent.onAuthRequest = (request) => {
+        if (!ownsGeneration()) return
         sessionLog.info(`Auth request for session ${managed.id}:`, request.type, request.sourceSlug)
 
         // Create auth-request message
@@ -4716,9 +5174,10 @@ export class SessionManager implements ISessionManager {
         managed.pendingAuthRequest = request
 
         // Interrupt execution (like SubmitPlan)
-        if (managed.isProcessing && managed.agent) {
+        if (managed.isProcessing && agent) {
           sessionLog.info(`Interrupting for auth request in session ${managed.id}`)
-          managed.agent.interruptForHandoff(AbortReason.AuthRequest)
+          if (managed.activeTurn?.agent === agent) managed.activeTurn.retireRuntimeAfterTurn = 'manual'
+          agent.interruptForHandoff(AbortReason.AuthRequest)
           this.setProcessing(managed, false)
 
           // Release browser overlay + session binding because the agent is paused awaiting user auth.
@@ -4747,7 +5206,7 @@ export class SessionManager implements ISessionManager {
       }
 
       // Wire up onSpawnSession to create independent sessions from agent tool calls
-      managed.agent.onSpawnSession = async (request) => {
+      agent.onSpawnSession = async (request) => {
         sessionLog.info(`Spawn session request from session ${managed.id}:`, request.name || '(unnamed)')
 
         const session = await this.createSession(managed.workspace.id, {
@@ -4954,7 +5413,7 @@ export class SessionManager implements ISessionManager {
           }
         },
         activateSourceInSessionFn: async (sourceSlug: string) => {
-          const cb = managed.agent?.onSourceActivationRequest
+          const cb = agent?.onSourceActivationRequest
           if (!cb) {
             return { ok: false, reason: 'Agent has no activation callback wired' }
           }
@@ -4973,9 +5432,9 @@ export class SessionManager implements ISessionManager {
           // `source_activated` handler in this class then schedules a server-side
           // resend of the original user message with a "[{slug} activated]" suffix —
           // landing in a fresh turn with tools live (craft-agents-oss#804).
-          const userMessage = managed.agent?.getCurrentTurnUserMessage?.() ?? ''
+          const userMessage = agent?.getCurrentTurnUserMessage?.() ?? ''
           if (userMessage) {
-            managed.agent?.setPendingSourceActivationRestart({ sourceSlug, userMessage })
+            agent?.setPendingSourceActivationRestart({ sourceSlug, userMessage })
           }
           return { ok: true, availability: 'next-turn' as const }
         },
@@ -4987,12 +5446,18 @@ export class SessionManager implements ISessionManager {
       // it lands while the session is idle. During a turn these events flow through
       // the chat() generator as usual; this only covers the idle gap. No-op unless
       // the backend supports a persistent cross-turn query (Claude keep-alive).
-      managed.agent.setBackgroundEventSink?.((event: AgentEvent) => {
-        void this.processEvent(managed, event)
+      agent.setBackgroundEventSink?.((event: AgentEvent) => {
+        if (!this.isCurrentRuntime(managed, generation, agent)) return
+        void this.processEvent(managed, event, undefined, generation)
       })
+      agent.onRuntimeExit = (event) => {
+        if (!event.unexpected || !this.isCurrentRuntime(managed, generation, agent)) return
+        void this.handleRuntimeFailure(managed, generation, agent, 'crash')
+      }
 
       // Wire up onSourceActivationRequest to auto-enable sources when agent tries to use them
-      managed.agent.onSourceActivationRequest = async (sourceSlug: string): Promise<boolean> => {
+      agent.onSourceActivationRequest = async (sourceSlug: string): Promise<boolean> => {
+        if (!ownsGeneration()) return false
         sessionLog.info(`Source activation request for session ${managed.id}:`, sourceSlug)
 
         const workspaceRootPath = managed.workspace.rootPath
@@ -5033,7 +5498,7 @@ export class SessionManager implements ISessionManager {
         const allEnabledSources = getSourcesBySlugs(workspaceRootPath, managed.enabledSourceSlugs || [])
         // Pass session path so large API responses can be saved to session folder
         const sessionPath = getSessionStoragePath(workspaceRootPath, managed.id)
-        const { mcpServers, apiServers, errors } = await buildServersFromSources(allEnabledSources, sessionPath, managed.tokenRefreshManager, managed.agent?.getSummarizeCallback())
+        const { mcpServers, apiServers, errors } = await buildServersFromSources(allEnabledSources, sessionPath, managed.tokenRefreshManager, agent?.getSummarizeCallback())
 
         if (errors.length > 0) {
           sessionLog.warn(`Source build errors during auto-enable:`, errors)
@@ -5051,15 +5516,17 @@ export class SessionManager implements ISessionManager {
           return false
         }
 
+        if (!ownsGeneration()) return false
+
         // Apply source servers to the agent
         const intendedSlugs = allEnabledSources
           .filter(isSourceUsable)
           .map(s => s.config.slug)
 
         // Update bridge-mcp-server config/credentials for backends that need it
-        await applyBridgeUpdates(managed.agent!, sessionPath, allEnabledSources, mcpServers, managed.id, workspaceRootPath, 'source enable', managed.poolServer?.url)
+        await applyBridgeUpdates(agent!, sessionPath, allEnabledSources, mcpServers, managed.id, workspaceRootPath, 'source enable', poolServer?.url)
 
-        await managed.agent!.setSourceServers(mcpServers, apiServers, intendedSlugs)
+        await agent!.setSourceServers(mcpServers, apiServers, intendedSlugs)
 
         sessionLog.info(`Auto-enabled source ${sourceSlug} for session ${managed.id}`)
 
@@ -5087,7 +5554,7 @@ export class SessionManager implements ISessionManager {
         if (managed.previousPermissionMode) {
           hydratePreviousPermissionMode(managed.id, managed.previousPermissionMode)
         }
-        managed.agent!.setPermissionMode(managed.permissionMode)
+        agent!.setPermissionMode(managed.permissionMode)
         const diagnostics = getPermissionModeDiagnostics(managed.id)
         sessionLog.info('Applied permission mode to agent', {
           sessionId: managed.id,
@@ -5097,11 +5564,40 @@ export class SessionManager implements ISessionManager {
           changedAt: diagnostics.lastChangedAt,
         })
       }
+      if (!agent || generation.state !== 'creating' || managed.runtimeGeneration !== generation || this.closing) {
+        throw new Error('Runtime construction cancelled')
+      }
+
+      // Publish the exact bundle atomically only after all construction succeeds.
+      generation.state = 'ready'
+      generation.agent = agent
+      generation.mcpPool = mcpPool
+      generation.poolServer = poolServer
+      generation.envOverrides = envOverrides
+      managed.agent = agent
+      managed.mcpPool = mcpPool
+      managed.poolServer = poolServer
+      managed.envOverrides = envOverrides
       managed.backendRuntimeSignature = runtimeSignature
       managed.backendRestartSignature = restartSignature
+      managed.agentReadyResolve?.()
+      managed.agentReadyResolve = undefined
+      if (!managed.isProcessing) {
+        managed.runtimeIdleSince = Date.now()
+        void this.reapIdleRuntimes()
+      }
       end()
-    }
-    return managed.agent
+      return agent
+      } catch (error) {
+        managed.agentReadyResolve?.()
+        end()
+        await this.disposeManagedAgentRuntime(managed, 'construction_failed', generation)
+        throw error
+      }
+    })()
+
+    generation.readyPromise = construction
+    return construction
   }
 
   async flagSession(sessionId: string): Promise<void> {
@@ -5758,6 +6254,7 @@ export class SessionManager implements ISessionManager {
    * Automatically uses the same provider as the session (Claude or OpenAI).
    */
   async refreshTitle(sessionId: string): Promise<{ success: boolean; title?: string; error?: string }> {
+    if (this.closing) return { success: false, error: 'Session runtime manager is shutting down' }
     sessionLog.info(`refreshTitle called for session ${sessionId}`)
     const managed = this.sessions.get(sessionId)
     if (!managed) {
@@ -5820,10 +6317,11 @@ export class SessionManager implements ISessionManager {
           },
           isHeadless: true,
         }, buildBackendHostRuntimeContext()) as AgentInstance
-        await agent.postInit()
         isTemporary = true
+        await agent.postInit()
         sessionLog.info(`refreshTitle: Created temporary agent for session ${sessionId}`)
       } catch (error) {
+        if (isTemporary && agent) await disposeBackendRuntime(agent, { reason: 'construction_failed' })
         sessionLog.error(`refreshTitle: Failed to create temporary agent:`, error)
         return { success: false, error: 'Failed to create agent for title generation' }
       }
@@ -5866,7 +6364,7 @@ export class SessionManager implements ISessionManager {
     } finally {
       // Clean up temporary agent
       if (isTemporary && agent) {
-        agent.destroy()
+        await disposeBackendRuntime(agent, { reason: 'manual' })
       }
       // Signal async operation end
       managed.isAsyncOperationOngoing = false
@@ -6165,6 +6663,9 @@ export class SessionManager implements ISessionManager {
       return
     }
 
+    // Tombstone first so concurrent sends cannot recreate children during teardown.
+    managed.deleting = true
+
     // Get workspace slug before deleting
     const workspaceRootPath = managed.workspace.rootPath
 
@@ -6219,17 +6720,17 @@ export class SessionManager implements ISessionManager {
     this.remoteBpms.delete(sessionId)
     this.browserHostByCanvas.delete(sessionId)
 
-    // Dispose agent to clean up ConfigWatchers, event listeners, MCP connections
-    if (managed.agent) {
-      managed.agent.dispose()
+    if (managed.stopTimer) {
+      clearTimeout(managed.stopTimer)
+      managed.stopTimer = undefined
     }
+    if (managed.activeTurn?.watchdogTimer) {
+      clearTimeout(managed.activeTurn.watchdogTimer)
+    }
+    managed.activeTurn = undefined
 
-    // Stop pool server (HTTP MCP server for external SDK subprocesses)
-    if (managed.poolServer) {
-      managed.poolServer.stop().catch(err => {
-        sessionLog.warn(`Failed to stop pool server for ${sessionId}: ${err instanceof Error ? err.message : err}`)
-      })
-    }
+    // Exact awaited bundle teardown includes agent/model child, pool server, and MCP transports.
+    await this.disposeManagedAgentRuntime(managed, 'delete')
 
     // Cancel any pending source-activation auto-retry timer (craft-agents-oss#804).
     if (managed.autoRetryTimer) {
@@ -6281,10 +6782,17 @@ export class SessionManager implements ISessionManager {
      */
     rpcContext?: { callerClientId?: string },
   ): Promise<void> {
+    this.assertRuntimeAdmission()
     const managed = this.sessions.get(sessionId)
     if (!managed) {
       throw new Error(`Session ${sessionId} not found`)
     }
+    if (managed.deleting) {
+      throw new Error(`Session ${sessionId} is being deleted`)
+    }
+    // An explicit send/retry resumes FIFO after crash/watchdog/auth pause. Existing
+    // queued message identities remain intact and are never silently discarded.
+    if (!existingMessageId && managed.runtimeQueuePaused) managed.runtimeQueuePaused = false
     this.setLastMessageClientId(sessionId, rpcContext?.callerClientId)
 
     // Source-activation auto-retry dedup (craft-agents-oss#804). When the server
@@ -6537,6 +7045,7 @@ export class SessionManager implements ISessionManager {
     this.setProcessing(managed, true)
     managed.streamingText = ''
     managed.processingGeneration++
+    const turnContext = this.beginTurn(managed)
     managed.turnStartFinalMessageId = this.getLastFinalAssistantMessageId(managed.messages)
 
     // Reset auth retry flag for this new message (allows one retry per message)
@@ -6557,7 +7066,7 @@ export class SessionManager implements ISessionManager {
 
     // Capture the generation to detect if a new request supersedes this one.
     // This prevents the finally block from clobbering state when a follow-up message arrives.
-    const myGeneration = managed.processingGeneration
+    const myGeneration = turnContext.generation
 
     // Pre-enable sources required by invoked skills (Issue #249)
     // This eliminates the two-turn penalty where the agent discovers missing sources at runtime.
@@ -6696,11 +7205,28 @@ export class SessionManager implements ISessionManager {
       }
     }
 
-    // Get or create the agent (lazy loading). Its internal cold-session build at
-    // ~L2956 now sees fresh tokens (or correctly-needs_auth failed sources, since
-    // ensureFreshToken mirrors the disk write to source.config in-memory).
-    const agent = await this.getOrCreateAgent(managed)
-    sendSpan.mark('agent.ready')
+    // Get or create the exact runtime bundle. Setup failures must clear thinking
+    // immediately instead of escaping before the streaming try/finally begins.
+    let agent: AgentInstance
+    try {
+      agent = await this.getOrCreateAgent(managed)
+      const generation = this.ensureRuntimeGeneration(managed)
+      if (
+        !generation
+        || generation.state !== 'ready'
+        || generation.agent !== agent
+        || managed.activeTurn !== turnContext
+        || managed.processingGeneration !== turnContext.generation
+        || turnContext.terminalClaimed
+      ) {
+        throw new Error('Runtime generation changed during turn startup')
+      }
+      turnContext.runtimeEpoch = generation.epoch
+      turnContext.agent = agent
+      turnContext.phase = 'streaming'
+      turnContext.lastActivityAt = Date.now()
+      this.scheduleTurnWatchdog(managed, turnContext)
+      sendSpan.mark('agent.ready')
 
     // Always set all sources for context (even if none are enabled), including built-ins
     const allSources = loadAllSources(workspaceRootPath)
@@ -6726,6 +7252,21 @@ export class SessionManager implements ISessionManager {
         sessionLog.info(`Applied ${mcpCount} MCP + ${apiCount} API sources to session ${sessionId} (${allSources.length} total)`)
       }
       sendSpan.mark('servers.applied')
+    }
+    } catch (error) {
+      if (this.isCurrentTurn(managed, turnContext)) {
+        this.appendRuntimeTerminalError(managed, 'crash')
+        managed.runtimeQueuePaused = true
+        turnContext.retireRuntimeAfterTurn = 'construction_failed'
+        await this.onProcessingStopped(sessionId, 'error', turnContext)
+        const failedGeneration = managed.runtimeGeneration
+        if (failedGeneration) {
+          await this.disposeManagedAgentRuntime(managed, 'construction_failed', failedGeneration)
+        }
+      }
+      sendSpan.mark('runtime.setup.error')
+      sendSpan.end()
+      throw error
     }
 
     try {
@@ -6822,8 +7363,11 @@ export class SessionManager implements ISessionManager {
           }
         }
 
-        // Process the event first
-        await this.processEvent(managed, event)
+        // Process only events from the exact current turn/runtime. A late old
+        // completion/error cannot mutate or terminalize a replacement turn.
+        if (!this.isCurrentTurn(managed, turnContext, agent)) break
+        await this.processEvent(managed, event, turnContext)
+        if (!this.isCurrentTurn(managed, turnContext, agent)) break
 
         // Fallback: Capture SDK session ID if the onSdkSessionIdUpdate callback didn't fire.
         // Primary capture happens in getOrCreateAgent() via onSdkSessionIdUpdate callback,
@@ -6919,7 +7463,11 @@ export class SessionManager implements ISessionManager {
 
           sendSpan.mark('chat.complete')
           sendSpan.end()
-          this.onProcessingStopped(sessionId, 'complete')
+          await this.onProcessingStopped(
+            sessionId,
+            turnContext.retireRuntimeAfterTurn ? 'error' : 'complete',
+            turnContext,
+          )
           return  // Exit function, skip finally block (onProcessingStopped handles cleanup)
         }
 
@@ -6936,7 +7484,7 @@ export class SessionManager implements ISessionManager {
         sendSpan.end()
       } else if (managed.stopRequested) {
         sessionLog.info('Chat loop completed after stop request - events drained successfully')
-        this.onProcessingStopped(sessionId, 'interrupted')
+        await this.onProcessingStopped(sessionId, 'interrupted', turnContext)
       } else {
         sessionLog.info('Chat loop exited unexpectedly')
       }
@@ -6970,7 +7518,7 @@ export class SessionManager implements ISessionManager {
         // by setting isProcessing = false directly. All other abort reasons route
         // through onProcessingStopped for queue draining.
         if (reason === AbortReason.UserStop || reason === AbortReason.Redirect || reason === undefined) {
-          this.onProcessingStopped(sessionId, 'interrupted')
+          await this.onProcessingStopped(sessionId, 'interrupted', turnContext)
         }
       } else {
         sessionLog.error('Error in chat:', error)
@@ -6989,17 +7537,37 @@ export class SessionManager implements ISessionManager {
           error: error instanceof Error ? error.message : 'Unknown error'
         }, managed.workspace.id)
         // Handle error via centralized handler
-        this.onProcessingStopped(sessionId, 'error')
+        await this.onProcessingStopped(sessionId, 'error', turnContext)
       }
     } finally {
       // Only handle cleanup for unexpected exits (loop break without complete event)
       // Normal completion returns early after calling onProcessingStopped
       // Errors are handled in catch block
-      if (managed.isProcessing && managed.processingGeneration === myGeneration) {
-        sessionLog.info('Finally block cleanup - unexpected exit')
+      if (managed.isProcessing && managed.processingGeneration === myGeneration && !turnContext.terminalClaimed) {
+        sessionLog.info('Finally block cleanup - unexpected runtime exit')
         sendSpan.mark('chat.unexpected_exit')
         sendSpan.end()
-        this.onProcessingStopped(sessionId, 'interrupted')
+        await this.handleRuntimeFailure(
+          managed,
+          managed.runtimeGeneration,
+          agent,
+          'crash',
+          turnContext,
+        )
+      }
+
+      // Handoff/auth/error/cancel retirement happens only after the stream's
+      // async iterator has unwound through this finally block.
+      if (turnContext.retireRuntimeAfterTurn) {
+        const generation = managed.runtimeGeneration
+        if (generation && turnContext.runtimeEpoch === generation.epoch) {
+          await this.disposeManagedAgentRuntime(managed, turnContext.retireRuntimeAfterTurn, generation)
+        }
+      }
+      if (managed.activeTurn === turnContext && !managed.isProcessing) {
+        if (turnContext.watchdogTimer) clearTimeout(turnContext.watchdogTimer)
+        managed.activeTurn = undefined
+        this.persistSession(managed)
       }
     }
   }
@@ -7029,9 +7597,11 @@ export class SessionManager implements ISessionManager {
       managed.messages = managed.messages.filter(m => !queuedMessageIds.has(m.id))
     }
 
-    // Signal intent to stop - let the event loop drain remaining events before clearing isProcessing
-    // This prevents losing in-flight messages after soft interrupt
+    // Signal intent to stop - let the event loop drain remaining events before clearing isProcessing.
+    // Bind retirement and fallback timer to this exact turn generation.
     managed.stopRequested = true
+    const turn = managed.activeTurn
+    if (turn) turn.retireRuntimeAfterTurn = 'manual'
 
     // Track interruption so the next user message gets a context note
     // telling the LLM the previous response was cut short
@@ -7069,109 +7639,60 @@ export class SessionManager implements ISessionManager {
       }, managed.workspace.id)
     }
 
-    // Safety timeout: if event loop doesn't complete within 5 seconds, force cleanup
-    // This handles cases where the generator gets stuck
-    setTimeout(() => {
-      if (managed.stopRequested && managed.isProcessing) {
-        sessionLog.warn('Generator did not complete after stop request, forcing cleanup')
-        this.onProcessingStopped(sessionId, 'timeout')
-      }
+    // Safety timeout: exact-turn fenced so an old stop timer can never kill a newer turn.
+    if (managed.stopTimer) clearTimeout(managed.stopTimer)
+    managed.stopTimer = setTimeout(() => {
+      managed.stopTimer = undefined
+      if (!turn || !this.isCurrentTurn(managed, turn) || !managed.stopRequested || !managed.isProcessing) return
+      sessionLog.warn('Generator did not complete after stop request, forcing exact runtime cleanup')
+      const generation = managed.runtimeGeneration
+      const terminal = this.onProcessingStopped(sessionId, 'timeout', turn)
+      if (generation) void this.disposeManagedAgentRuntime(managed, 'manual', generation)
+      void terminal
     }, 5000)
+    managed.stopTimer.unref?.()
 
     // NOTE: We don't clear isProcessing or send complete event here anymore.
     // The event loop will drain remaining events and call onProcessingStopped when done.
   }
 
   /**
-   * Attempt auth retry: refresh token, destroy agent, resend last message.
-   * Shared by both typed_error and plain error auth-retry paths.
-   * Returns true if retry was initiated, false if conditions not met.
+   * Post-dispatch auth failures have no typed proof that the prompt was never
+   * committed. Refresh credentials for the next explicit retry, fence the exact
+   * runtime for disposal after stream unwind, and never auto-replay side effects.
    */
   private attemptAuthRetry(
     sessionId: string,
     managed: ManagedSession,
     workspaceId: string,
-    failureErrorCode?: string,
+    _failureErrorCode?: string,
   ): boolean {
-    if (managed.authRetryAttempted || !managed.lastSentMessage) return false
+    if (managed.authRetryAttempted) return false
 
-    sessionLog.info(`Auth error detected, attempting token refresh and retry for session ${sessionId}`)
     managed.authRetryAttempted = true
-    managed.authRetryInProgress = true
+    managed.authRetryInProgress = false
+    managed.runtimeQueuePaused = true
+    const turn = managed.activeTurn
+    if (turn) turn.retireRuntimeAfterTurn = 'replacement'
 
-    // Emit lightweight info so the user sees progress instead of a scary red error
+    resetSummarizationClient()
+    if (!this.closing) {
+      void this.reinitializeAuth().catch((error) => {
+        sessionLog.warn(`[auth-retry] Credential refresh failed for ${sessionId}: ${error instanceof Error ? error.message : error}`)
+      })
+    }
+
     this.sendEvent({
       type: 'info',
       sessionId,
-      message: 'Token expired, refreshing session…',
+      message: 'Authentication expired. Credentials will refresh; retry this message explicitly.',
+      level: 'warning',
       timestamp: this.monotonic(),
     }, workspaceId)
 
-    setImmediate(async () => {
-      try {
-        // 1. Reset summarization client so it picks up fresh credentials
-        sessionLog.info(`[auth-retry] Resetting summarization client for session ${sessionId}`)
-        resetSummarizationClient()
-
-        // 2. Destroy the agent — the new agent's postInit() will refresh auth
-        sessionLog.info(`[auth-retry] Destroying agent for session ${sessionId}`)
-        managed.agent = null
-
-        // 3. Retry the message
-        const retryMessage = managed.lastSentMessage
-        const retryAttachments = managed.lastSentAttachments
-        const retryStoredAttachments = managed.lastSentStoredAttachments
-        const retryOptions = managed.lastSentOptions
-
-        if (retryMessage) {
-          sessionLog.info(`[auth-retry] Retrying message for session ${sessionId}`)
-          this.setProcessing(managed, false)
-
-          // Remove the user message that was added for this failed attempt
-          // so we don't get duplicate messages when retrying
-          const lastUserMsgIndex = managed.messages.findLastIndex(m => m.role === 'user')
-          if (lastUserMsgIndex !== -1) {
-            managed.messages.splice(lastUserMsgIndex, 1)
-          }
-
-          managed.authRetryInProgress = false
-
-          await this.sendMessage(
-            sessionId,
-            retryMessage,
-            retryAttachments,
-            retryStoredAttachments,
-            retryOptions,
-            undefined,  // existingMessageId
-            true        // _isAuthRetry - prevents infinite retry loop
-          )
-          sessionLog.info(`[auth-retry] Retry completed for session ${sessionId}`)
-        } else {
-          managed.authRetryInProgress = false
-        }
-      } catch (retryError) {
-        managed.authRetryInProgress = false
-        sessionLog.error(`[auth-retry] Failed to retry after auth refresh for session ${sessionId}:`, retryError)
-        sessionRuntimeHooks.captureException(retryError, { errorSource: 'auth-retry', sessionId })
-        const failedMessage: Message = {
-          id: generateMessageId(),
-          role: 'error',
-          content: 'Authentication failed. Please check your credentials.',
-          timestamp: this.monotonic(),
-          errorCode: failureErrorCode,
-        }
-        managed.messages.push(failedMessage)
-        this.sendEvent({
-          type: 'error',
-          sessionId,
-          error: 'Authentication failed. Please check your credentials.',
-          timestamp: failedMessage.timestamp,
-        }, workspaceId)
-        this.onProcessingStopped(sessionId, 'error')
-      }
-    })
-
-    return true
+    // False deliberately lets the original typed/plain auth error persist and
+    // remain retryable. Automatic replay is unsafe after backend invocation.
+    return false
   }
 
   /**
@@ -7209,25 +7730,52 @@ export class SessionManager implements ISessionManager {
    * @param sessionId - The session that stopped processing
    * @param reason - Why processing stopped ('complete' | 'interrupted' | 'error')
    */
-  private async onProcessingStopped(
+  private onProcessingStopped(
     sessionId: string,
-    reason: 'complete' | 'interrupted' | 'error' | 'timeout'
+    reason: 'complete' | 'interrupted' | 'error' | 'timeout',
+    expectedTurn?: ManagedTurnContext,
   ): Promise<void> {
     const managed = this.sessions.get(sessionId)
-    if (!managed) return
+    if (!managed) return Promise.resolve()
+    const turn = expectedTurn ?? managed.activeTurn
+    if (expectedTurn && managed.activeTurn !== expectedTurn) return Promise.resolve()
+    if (turn?.terminalClaimed) return turn.terminalPromise ?? Promise.resolve()
 
+    if (turn) {
+      turn.terminalClaimed = true
+      if (turn.watchdogTimer) clearTimeout(turn.watchdogTimer)
+      turn.watchdogTimer = undefined
+    }
+    const terminalPromise = this.finalizeProcessingStopped(managed, reason, turn)
+    if (turn) turn.terminalPromise = terminalPromise
+    return terminalPromise
+  }
+
+  private async finalizeProcessingStopped(
+    managed: ManagedSession,
+    reason: 'complete' | 'interrupted' | 'error' | 'timeout',
+    turn?: ManagedTurnContext,
+  ): Promise<void> {
+    const sessionId = managed.id
     sessionLog.info(`Processing stopped for session ${sessionId}: ${reason}`)
 
     // 1. Cleanup state
     this.setProcessing(managed, false)
     managed.stopRequested = false  // Reset for next turn
+    if (managed.stopTimer) {
+      clearTimeout(managed.stopTimer)
+      managed.stopTimer = undefined
+    }
 
     // 1b. Orphan backstop: with the default per-turn subprocess model, any
     // background sub-agent still marked `running` dies when this turn's
     // subprocess is torn down. Flip those registry entries to `orphaned` so a
     // later "status?" query never reports a dead task as running. Suppressed
     // when WS2 keep-alive keeps the query alive across turns.
-    this.markOrphanedBackgroundTasks(sessionId)
+    this.markOrphanedBackgroundTasks(
+      sessionId,
+      turn?.retireRuntimeAfterTurn === 'watchdog' || turn?.retireRuntimeAfterTurn === 'backend_crash',
+    )
 
     const turnStartFinalMessageId = managed.turnStartFinalMessageId
     managed.turnStartFinalMessageId = undefined
@@ -7285,9 +7833,9 @@ export class SessionManager implements ISessionManager {
       this.applyExternalSessionMetadata(managed, pendingHeader)
     }
 
-    // 5. Check queue and process or complete
-    if (managed.messageQueue.length > 0) {
-      // Has queued messages - process next
+    // 5. Check queue and process or complete. Crash/watchdog paths preserve
+    // queued identities but pause automatic replay until explicit user action.
+    if (managed.messageQueue.length > 0 && !managed.runtimeQueuePaused && !this.closing) {
       this.processNextQueuedMessage(sessionId)
     } else {
       // Session is truly done — release browser ownership.
@@ -7335,8 +7883,13 @@ export class SessionManager implements ISessionManager {
       })
     }
 
-    // 6. Always persist
+    // 6. Always persist, then mark the queue-empty/inactive runtime idle.
     this.persistSession(managed)
+    if (managed.activeTurn === turn) managed.activeTurn = undefined
+    if (!turn?.retireRuntimeAfterTurn && !managed.isProcessing && managed.runtimeGeneration?.state === 'ready') {
+      managed.runtimeIdleSince = Date.now()
+      void this.reapIdleRuntimes()
+    }
   }
 
   /**
@@ -7345,7 +7898,7 @@ export class SessionManager implements ISessionManager {
    */
   private processNextQueuedMessage(sessionId: string): void {
     const managed = this.sessions.get(sessionId)
-    if (!managed || managed.messageQueue.length === 0) return
+    if (!managed || managed.messageQueue.length === 0 || managed.runtimeQueuePaused || managed.deleting || this.closing) return
 
     const next = managed.messageQueue.shift()!
     sessionLog.info('replay queued', {
@@ -7374,6 +7927,7 @@ export class SessionManager implements ISessionManager {
 
     // Process message (use setImmediate to allow current stack to clear)
     setImmediate(() => {
+      if (this.closing || managed.deleting) return
       this.sendMessage(
         sessionId,
         next.message,
@@ -7403,8 +7957,9 @@ export class SessionManager implements ISessionManager {
             originalError: err instanceof Error ? err.message : String(err),
           },
         }, managed.workspace.id)
-        // Call onProcessingStopped to handle cleanup and check for more queued messages
-        this.onProcessingStopped(sessionId, 'error')
+        // sendMessage setup/stream paths own terminalization; only backstop a
+        // still-active turn here to avoid duplicate complete/error finalizers.
+        if (managed.isProcessing) void this.onProcessingStopped(sessionId, 'error', managed.activeTurn)
       })
     })
   }
@@ -7513,8 +8068,8 @@ export class SessionManager implements ISessionManager {
    * No-op once WS2 keep-alive is enabled: with a persistent query the tasks
    * genuinely outlive the turn, so `keepBackgroundTasksAlive` short-circuits this.
    */
-  private markOrphanedBackgroundTasks(sessionId: string): void {
-    if (this.keepBackgroundTasksAlive) return
+  private markOrphanedBackgroundTasks(sessionId: string, forceRuntimeRetired = false): void {
+    if (this.keepBackgroundTasksAlive && !forceRuntimeRetired) return
     const managed = this.sessions.get(sessionId)
     if (!managed) return
     const now = Date.now()
@@ -7611,6 +8166,7 @@ export class SessionManager implements ISessionManager {
           sessionLog.warn(`Admin approval rejected by broker for ${requestId}: ${brokerResult.reason}`)
           // Broker rejection should fail closed.
           managed.agent.respondToPermission(requestId, false, false)
+          this.resolvePermissionProtection(managed)
           return false
         }
 
@@ -7621,6 +8177,7 @@ export class SessionManager implements ISessionManager {
 
       sessionLog.info(`Permission response for ${requestId}: allowed=${allowed}, alwaysAllow=${alwaysAllow}`)
       managed.agent.respondToPermission(requestId, allowed, alwaysAllow)
+      this.resolvePermissionProtection(managed)
       return true
     } else {
       sessionLog.warn(`Cannot respond to permission - no agent for session ${sessionId}`)
@@ -8115,6 +8672,7 @@ export class SessionManager implements ISessionManager {
    * If no agent exists, creates a temporary one using the session's connection.
    */
   private async generateTitle(managed: ManagedSession, userMessage: string): Promise<void> {
+    if (this.closing || managed.deleting) return
     sessionLog.info(`[generateTitle] Starting for session ${managed.id}`)
 
     // Use existing agent or create temporary one
@@ -8124,10 +8682,11 @@ export class SessionManager implements ISessionManager {
     // Wait briefly for agent to be created (it's created concurrently)
     if (!agent) {
       let attempts = 0
-      while (!managed.agent && attempts < 10) {
+      while (!managed.agent && attempts < 10 && !this.closing && !managed.deleting) {
         await new Promise(resolve => setTimeout(resolve, 100))
         attempts++
       }
+      if (this.closing || managed.deleting) return
       agent = managed.agent
     }
 
@@ -8148,10 +8707,11 @@ export class SessionManager implements ISessionManager {
           },
           isHeadless: true,
         }, buildBackendHostRuntimeContext()) as AgentInstance
-        await agent.postInit()
         isTemporary = true
+        await agent.postInit()
         sessionLog.info(`[generateTitle] Created temporary agent for session ${managed.id}`)
       } catch (error) {
+        if (isTemporary && agent) await disposeBackendRuntime(agent, { reason: 'construction_failed' })
         sessionLog.error(`[generateTitle] Failed to create temporary agent:`, error)
         return
       }
@@ -8206,12 +8766,21 @@ export class SessionManager implements ISessionManager {
     } finally {
       // Clean up temporary agent
       if (isTemporary && agent) {
-        agent.destroy()
+        await disposeBackendRuntime(agent, { reason: 'manual' })
       }
     }
   }
 
-  private async processEvent(managed: ManagedSession, event: AgentEvent): Promise<void> {
+  private async processEvent(
+    managed: ManagedSession,
+    event: AgentEvent,
+    expectedTurn?: ManagedTurnContext,
+    expectedRuntime?: ManagedRuntimeGeneration,
+  ): Promise<void> {
+    if (expectedTurn && !this.isCurrentTurn(managed, expectedTurn, expectedTurn.agent)) return
+    if (expectedRuntime && !this.isCurrentRuntime(managed, expectedRuntime, expectedRuntime.agent)) return
+    if (expectedTurn) this.noteTurnActivity(managed, expectedTurn, event)
+
     const sessionId = managed.id
     const workspaceId = managed.workspace.id
 
@@ -8624,7 +9193,32 @@ export class SessionManager implements ISessionManager {
           lowerErr.includes('please try signing in again') ||
           (lowerErr.includes('401') && (lowerErr.includes('unauthorized') || lowerErr.includes('auth')))
 
-        if (isPlainAuthError && this.attemptAuthRetry(sessionId, managed, workspaceId)) {
+        if (isPlainAuthError) {
+          this.attemptAuthRetry(sessionId, managed, workspaceId)
+          const timestamp = this.monotonic()
+          const content = 'Authentication expired. Credentials were refreshed; retry this message explicitly.'
+          const errorMessage: Message = {
+            id: generateMessageId(),
+            role: 'error',
+            content,
+            timestamp,
+            errorCode: 'expired_oauth_token',
+            errorTitle: 'Session Expired',
+            errorCanRetry: true,
+          }
+          managed.messages.push(errorMessage)
+          this.sendEvent({
+            type: 'typed_error',
+            sessionId,
+            error: {
+              code: 'expired_oauth_token',
+              title: 'Session Expired',
+              message: content,
+              actions: [{ key: 'r', label: 'Retry', action: 'retry' }],
+              canRetry: true,
+            },
+            timestamp,
+          }, workspaceId)
           break
         }
 
@@ -8656,19 +9250,15 @@ export class SessionManager implements ISessionManager {
         // Typed errors have structured information - send both formats for compatibility
         sessionLog.info('typed_error:', JSON.stringify(event.error, null, 2))
 
-        // Check for auth errors that can be retried by refreshing the token
-        // The SDK subprocess caches the token at startup, so if it expires mid-session,
-        // we get invalid_api_key errors. We can fix this by:
-        // 1. Resetting the summarization client cache
-        // 2. Destroying the agent (new agent's postInit() refreshes the token)
-        // 3. Retrying the message
+        // Post-dispatch auth has no safe replay proof. Refresh for the next
+        // explicit retry and make the persisted terminal error retryable.
         const isAuthError = event.error.code === 'invalid_api_key' ||
           event.error.code === 'expired_oauth_token'
-
-        if (isAuthError && this.attemptAuthRetry(sessionId, managed, workspaceId, event.error.code)) {
-          // Don't add error message or send to renderer - we're handling it via retry
-          break
-        }
+        if (isAuthError) this.attemptAuthRetry(sessionId, managed, workspaceId, event.error.code)
+        const errorCanRetry = isAuthError ? true : event.error.canRetry
+        const errorActions = isAuthError
+          ? [{ key: 'r', label: 'Retry', action: 'retry' as const }]
+          : event.error.actions
 
         // Build rich error message with all diagnostic fields for persistence and UI display
         const typedErrorMessage: Message = {
@@ -8682,7 +9272,7 @@ export class SessionManager implements ISessionManager {
           errorTitle: event.error.title,
           errorDetails: event.error.details,
           errorOriginal: event.error.originalError,
-          errorCanRetry: event.error.canRetry,
+          errorCanRetry,
         }
         managed.messages.push(typedErrorMessage)
         // Send typed_error event with full structure for renderer to handle
@@ -8693,8 +9283,8 @@ export class SessionManager implements ISessionManager {
             code: event.error.code,
             title: event.error.title,
             message: event.error.message,
-            actions: event.error.actions,
-            canRetry: event.error.canRetry,
+            actions: errorActions,
+            canRetry: errorCanRetry,
             details: event.error.details,
             originalError: event.error.originalError,
           },
@@ -8924,6 +9514,10 @@ export class SessionManager implements ISessionManager {
           const current = this.sessions.get(sessionId)
           if (!current) return
           current.autoRetryTimer = undefined
+          if (this.closing || current.deleting) {
+            current.autoRetryPending = undefined
+            return
+          }
 
           // If a user follow-up arrived in the 100ms window, skip — they preempted us.
           if (current.messages.length > messageCountAtSchedule) {
@@ -9222,6 +9816,7 @@ export class SessionManager implements ISessionManager {
   // ============================================
 
   private async generateRemoteTransferSummary(managed: ManagedSession): Promise<string | null> {
+    if (this.closing || managed.deleting) return null
     await this.ensureMessagesLoaded(managed)
 
     const messages = managed.messages
@@ -9279,7 +9874,7 @@ export class SessionManager implements ISessionManager {
     try {
       return await generateConversationSummary(messages, agent.runMiniCompletion.bind(agent))
     } finally {
-      agent.destroy()
+      await disposeBackendRuntime(agent, { reason: 'manual' })
     }
   }
 
@@ -9595,47 +10190,122 @@ export class SessionManager implements ISessionManager {
   }
 
   /**
-   * Clean up all resources held by the SessionManager.
-   * Should be called on app shutdown to prevent resource leaks.
+   * Awaited, idempotent, bounded shutdown. Admission closes synchronously;
+   * flush cannot prevent exact parallel runtime teardown in the finally path.
    */
-  cleanup(): void {
-    sessionLog.info('Cleaning up resources...')
+  cleanup(options?: { deadline?: number; skipFlush?: boolean }): Promise<void> {
+    if (this.cleanupPromise) return this.cleanupPromise
+    this.closing = true
+    const deadline = options?.deadline ?? (Date.now() + this.runtimeLifecycleConfig.shutdownTimeoutMs)
 
-    // Stop all ConfigWatchers (file system watchers)
-    for (const [path, watcher] of this.configWatchers) {
-      watcher.stop()
-      sessionLog.info(`Stopped config watcher for ${path}`)
-    }
-    this.configWatchers.clear()
-
-    // Dispose all AutomationSystems (includes scheduler, handlers, and event loggers)
-    for (const [workspacePath, automationSystem] of this.automationSystems) {
+    const waitUntil = async <T>(promise: Promise<T>, until: number): Promise<T | undefined> => {
+      const remaining = Math.max(0, until - Date.now())
+      if (remaining === 0) return undefined
+      let timer: ReturnType<typeof setTimeout> | undefined
       try {
-        automationSystem.dispose()
-        sessionLog.info(`Disposed AutomationSystem for ${workspacePath}`)
-      } catch (error) {
-        sessionLog.error(`Failed to dispose AutomationSystem for ${workspacePath}:`, error)
+        return await Promise.race([
+          promise,
+          new Promise<undefined>((resolve) => {
+            timer = setTimeout(() => resolve(undefined), remaining)
+            timer.unref?.()
+          }),
+        ])
+      } finally {
+        if (timer) clearTimeout(timer)
       }
     }
-    this.automationSystems.clear()
 
-    // Clear all pending delta flush timers
-    for (const [sessionId, timer] of this.deltaFlushTimers) {
-      clearTimeout(timer)
-    }
-    this.deltaFlushTimers.clear()
-    this.pendingDeltas.clear()
+    this.cleanupPromise = (async () => {
+      sessionLog.info('Cleaning up resources...')
 
-    // Clear pending credential resolvers (they won't be resolved, but prevents memory leak)
-    this.pendingCredentialResolvers.clear()
-    this.pendingPermissionRequests.clear()
-    this.adminRememberApprovals.clear()
+      if (this.idleReaperTimer) {
+        clearInterval(this.idleReaperTimer)
+        this.idleReaperTimer = undefined
+      }
 
-    // Clean up session-scoped tool callbacks for all sessions
-    for (const sessionId of this.sessions.keys()) {
-      unregisterSessionScopedToolCallbacks(sessionId)
-    }
+      // Close every deferred producer before the first await.
+      for (const managed of this.sessions.values()) {
+        managed.deleting = true
+        if (managed.autoRetryTimer) {
+          clearTimeout(managed.autoRetryTimer)
+          managed.autoRetryTimer = undefined
+        }
+        managed.autoRetryPending = undefined
+        if (managed.stopTimer) {
+          clearTimeout(managed.stopTimer)
+          managed.stopTimer = undefined
+        }
+        if (managed.activeTurn?.watchdogTimer) clearTimeout(managed.activeTurn.watchdogTimer)
+        if (managed.activeTurn) managed.activeTurn.terminalClaimed = true
+        try {
+          if (managed.isProcessing) managed.agent?.forceAbort(AbortReason.UserStop)
+        } catch {
+          // Exact disposal is the hard backstop.
+        }
+        try {
+          this.setProcessing(managed, false)
+        } catch (error) {
+          sessionLog.warn(`Failed to update processing state during shutdown for ${managed.id}: ${error instanceof Error ? error.message : error}`)
+          managed.isProcessing = false
+        }
+        this.persistSession(managed)
+      }
 
-    sessionLog.info('Cleanup complete')
+      for (const [, timer] of this.deltaFlushTimers) clearTimeout(timer)
+      this.deltaFlushTimers.clear()
+      this.pendingDeltas.clear()
+
+      for (const [path, watcher] of this.configWatchers) {
+        try {
+          watcher.stop()
+          sessionLog.info(`Stopped config watcher for ${path}`)
+        } catch (error) {
+          sessionLog.warn(`Failed to stop config watcher for ${path}: ${error instanceof Error ? error.message : error}`)
+        }
+      }
+      this.configWatchers.clear()
+
+      for (const [workspacePath, automationSystem] of this.automationSystems) {
+        try {
+          automationSystem.dispose()
+          sessionLog.info(`Disposed AutomationSystem for ${workspacePath}`)
+        } catch (error) {
+          sessionLog.error(`Failed to dispose AutomationSystem for ${workspacePath}:`, error)
+        }
+      }
+      this.automationSystems.clear()
+
+      try {
+        if (!options?.skipFlush) {
+          const flushDeadline = Math.min(deadline, Date.now() + this.runtimeLifecycleConfig.flushTimeoutMs)
+          await waitUntil(sessionPersistenceQueue.flushAll(), flushDeadline)
+        }
+      } catch (error) {
+        sessionLog.error('Failed to flush sessions during shutdown:', error)
+      } finally {
+        const generations = [...this.runtimeRegistry.values()]
+        const disposals = generations.map(({ managed, generation }) => {
+          if (managed.runtimeGeneration === generation) {
+            return this.disposeManagedAgentRuntime(managed, 'shutdown', generation, deadline)
+          }
+          return this.disposeRuntimeGeneration(managed, generation, 'shutdown', deadline)
+        })
+        await waitUntil(Promise.allSettled(disposals), deadline)
+      }
+
+      this.pendingCredentialResolvers.clear()
+      this.pendingPermissionRequests.clear()
+      this.adminRememberApprovals.clear()
+      this.agentRefreshLocks.clear()
+      for (const sessionId of this.sessions.keys()) unregisterSessionScopedToolCallbacks(sessionId)
+
+      sessionLog.info('Cleanup complete')
+    })().catch((error) => {
+      // Terminal shutdown is fail-closed: after admission is closed, callers must
+      // continue host exit rather than strand a permanently-closing live app.
+      sessionLog.error('SessionManager cleanup failed:', error)
+    })
+
+    return this.cleanupPromise
   }
 }

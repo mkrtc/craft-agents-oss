@@ -46,10 +46,14 @@ export type {
   LlmAuthType,
   LlmProviderType,
   PostInitResult,
+  RuntimeDisposeOptions,
+  RuntimeDisposeResult,
+  BackendRuntimeExitEvent,
+  RuntimeDisposableLike,
 } from './types.ts';
 
-// Enums need to be exported as values, not just types
-export { AbortReason } from './types.ts';
+// Enums and helpers need to be exported as values, not just types
+export { AbortReason, disposeBackendRuntime } from './types.ts';
 
 // Factory
 export {

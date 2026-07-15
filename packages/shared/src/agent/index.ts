@@ -6,6 +6,12 @@ export * from './conversation-summary.ts';
 export { PiAgent, PiBackend } from './pi-agent.ts';
 export * from './errors.ts';
 export * from './options.ts';
+export {
+  toRuntimeLifecycleEvent,
+  serializeRuntimeLifecycleEvent,
+  RUNTIME_LIFECYCLE_CORRELATION_MAX_CHARS,
+  RUNTIME_LIFECYCLE_EVENT_MAX_BYTES,
+} from './runtime-lifecycle-serializer.ts';
 
 // Export session-scoped-tools - tools scoped to a specific session
 export {
@@ -144,9 +150,13 @@ export {
   type SourceActivationCallback,
   type ChatOptions,
   type RecoveryMessage,
+  type RuntimeDisposeOptions,
+  type RuntimeDisposeResult,
+  type RuntimeDisposableLike,
   type SdkMcpServerConfig as BackendMcpServerConfig,
-  // Enums
+  // Enums and helpers
   AbortReason as BackendAbortReason,
+  disposeBackendRuntime,
 } from './backend/index.ts';
 
 // Export core utilities for shared agent logic

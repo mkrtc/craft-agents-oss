@@ -252,6 +252,22 @@ const ERROR_DEFINITIONS: Record<ErrorCode, Omit<AgentError, 'code' | 'originalEr
     canRetry: true,
     retryDelayMs: 1000,
   },
+  runtime_backend_crashed: {
+    title: 'Agent Runtime Stopped',
+    message: 'The agent backend exited unexpectedly. Retry to continue with a fresh runtime.',
+    actions: [
+      { key: 'r', label: 'Retry', action: 'retry' },
+    ],
+    canRetry: true,
+  },
+  runtime_watchdog_timeout: {
+    title: 'Agent Became Unresponsive',
+    message: 'The agent did not make progress before the safety deadline. Retry to continue with a fresh runtime.',
+    actions: [
+      { key: 'r', label: 'Retry', action: 'retry' },
+    ],
+    canRetry: true,
+  },
   unknown_error: {
     title: 'Error',
     message: 'Something went wrong. If this persists, check the provider status page or retry.',
