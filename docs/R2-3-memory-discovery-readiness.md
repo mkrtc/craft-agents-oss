@@ -60,14 +60,14 @@
 
 - **Disposition:** **BLOCKED**
 - **Owner:** **A7**
-- **Current evidence:** transport policy is not yet fully enumerated for redirects, DNS, IPv4/IPv6, proxy, URLs with credentials, or timeout/body caps.
+- **Current evidence:** transport policy categories are documented, but concrete allow/deny decisions and runtime enforcement are not complete for redirects, DNS, IPv4/IPv6, proxy, URLs with credentials, or timeout/body caps.
 - **Required next:** define/implement deny rules before using arbitrary stored URLs at runtime.
 
 ### 1.9 Identity, limits, serialized bytes, safe integers, global collision
 
 - **Disposition:** **BLOCKING OPEN QUESTION**
 - **Owner:** **A4a**
-- **Current evidence:** identity hardening (duplicate/alias policy, serialized serialization, safe-integer overflow, global collision guarantees) is documented but not yet enforced in code.
+- **Current evidence:** identity hardening (duplicate/alias policy, serialized-byte invariants, safe-integer overflow, global collision guarantees) is documented but not yet enforced in code.
 - **Required next:** codify and verify these constraints as mandatory before A1.
 
 ### 1.10 Worktree topology / worker collision policy
@@ -131,8 +131,9 @@ For `startupRecovery`:
 
 ## 4) Verification outcomes snapshot (authoritative)
 
-- `/home/mkrtc/.bun/bin/bun test packages/shared/src/project-memory/connections/__tests__/repository.test.ts packages/shared/src/project-memory/connections/__tests__/validation.test.ts packages/shared/src/project-memory/connections/__tests__/environment.test.ts packages/shared/src/project-memory/connections/__tests__/session-refs.test.ts packages/shared/src/project-memory/connections/__tests__/dto.test.ts packages/shared/src/project-memory/connections/__tests__/boundary.test.ts`: `92 pass` / `3 fail` / `0 error` (95 tests).
+- `/home/mkrtc/.bun/bin/bun test packages/shared/src/project-memory/connections/__tests__/repository.test.ts packages/shared/src/project-memory/connections/__tests__/validation.test.ts packages/shared/src/project-memory/connections/__tests__/environment.test.ts packages/shared/src/project-memory/connections/__tests__/session-refs.test.ts packages/shared/src/project-memory/connections/__tests__/dto.test.ts packages/shared/src/project-memory/connections/__tests__/boundary.test.ts`: `92 pass` / `3 fail` / `0 error` (95 tests). Named failures: symlink containment, stale-backup mutation under EACCES, and two-process same-revision acknowledgement.
 - `/home/mkrtc/.bun/bin/bun test packages/shared/src/credentials/__tests__/memory-credentials.test.ts`: **NOT RUN in this doc correction pass**.
+- `/home/mkrtc/.bun/bin/bun test packages/server/src/__tests__/smoke.test.ts`: **NOT RUN in this doc correction pass**.
 - `/home/mkrtc/.bun/bin/bun test packages/session-tools-core/src/**/*.test.ts`: **NOT RUN in this doc correction pass**.
 - `/home/mkrtc/.bun/bin/bun test packages/server-core/src/**/*.test.ts`: **NOT RUN in this doc correction pass**.
 - `historical auditor run, exact command unavailable; not acceptable as future gate`: `98 pass` / `8 fail` / `4 error` across `106 tests`, with additional failures from missing dependencies and setup mismatch.
@@ -140,7 +141,8 @@ For `startupRecovery`:
 
 ```bash
 cd /home/mkrtc/Desktop/projects/worktrees/craft-agents-oss-memory-connections && \
-git grep -RIn --exclude-dir=.git --exclude-dir=node_modules --exclude-dir=dist --exclude-dir=build -n -e "AKIA[0-9A-Z]{16}" -e "(?i)api[_-]?key" -e "(?i)bearer\s+[A-Za-z0-9._-]+" -e "(?i)secret" -e "(?i)password"
+grep -RInE --ignore-case --exclude-dir=.git --exclude-dir=node_modules --exclude-dir=dist --exclude-dir=build \
+  "AKIA[0-9A-Z]{16}|api[_-]?key|bearer[[:space:]][A-Za-z0-9._-]+|secret|password" .
 ```
 
 ## 5) Mandatory vs adjacent risk register

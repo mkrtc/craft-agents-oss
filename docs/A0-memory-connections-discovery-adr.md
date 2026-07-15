@@ -3,15 +3,15 @@
 **Date (authoritative):** Wednesday, July 15, 2026 at 05:25 PM GMT+3
 **Working tree:** `work/memory-connections-wave-a-integration`
 **Baseline SHA:** `06e8c4db` (baseline checkpoint)
-**Branch HEAD:** `237843767396636238fe3c30537d16b3b254eeea`
+**Current integration tip:** this committed A0 docs tip (see `git rev-parse HEAD`)
 **Scope:** docs-only correction for Wave A readiness gate and dispatcher policy
 
 This ADR replaces the previous uncommitted drafts in this worktree and sets explicit gates for Wave A implementation. It is intentionally strict: if any blocking finding remains, **A1+ is not allowed to dispatch**.
 
 ## A. Status / Gate Summary
 
-- **A0 status:** **needs-correction-now** (this document is the corrected gate artifact).
-- **Re-audit outcome expected:** A0 can proceed only as **ready-for-re-audit** after independent external review accepts this doc set.
+- **A0 status:** corrected docs are committed and **pending independent re-audit**.
+- **Acceptance rule:** A0 is accepted only after independent re-audit passes this committed doc set.
 - **Dispatch policy:** **A1+ implementation is BLOCKED until this A0 correction commit is reviewed and accepted.**
 - **Wave progression:** Wave A not ready for execution; **Wave B/C are forbidden** until Wave A gates pass.
 
@@ -26,7 +26,7 @@ This ADR replaces the previous uncommitted drafts in this worktree and sets expl
 | Repository cross-process locking / fenced reread / transaction recovery | **FAIL** | ❌ Two-process same-revision acknowledgement test currently fails | [repository tests](packages/shared/src/project-memory/connections/__tests__/repository.test.ts) |
 | Migration/version / v1→v2 discriminators | **BLOCKING OPEN QUESTION** | ✅ Saga/version/identity policy freeze is documented in this ADR, but discriminator values, fail behavior, and rollback ownership are not yet enforced in code | [validation tests](packages/shared/src/project-memory/connections/__tests__/validation.test.ts), [validation contract](packages/shared/src/project-memory/connections/validation.ts) |
 | Centralized default-deny resolver + authorizer | **BLOCKED** | ✅ Resolver contract is documented in this ADR; centralized deny-first runtime/test enforcement is not yet implemented | [session refs](packages/shared/src/project-memory/connections/session-refs.ts), [SessionManager](packages/server-core/src/sessions/SessionManager.ts), [projects handler](packages/session-tools-core/src/handlers/project-memory.ts) |
-| Qdrant transport SSRF / redirect / DNS / egress policy | **BLOCKED** | ✅ Qdrant transport policy checklist is documented; runtime safeguards, tests, and strict failure behavior are still missing | [qdrant transport](packages/shared/src/project-memory/qdrant.ts), [qdrant tests](packages/shared/src/project-memory/qdrant.test.ts) |
+| Qdrant transport SSRF / redirect / DNS / egress policy | **BLOCKED** | ✅ Qdrant transport policy categories are documented; concrete allow/deny decisions, runtime safeguards, tests, and strict failure behavior remain missing | [qdrant transport](packages/shared/src/project-memory/qdrant.ts), [qdrant tests](packages/shared/src/project-memory/qdrant.test.ts) |
 | Identity, limits, bytes, numeric safety, global collision | **BLOCKING OPEN QUESTION** | ✅ Decision points (canonical identity tuple, serialized bytes, and overflow policy) are documented; enforcement details and ownership are not yet fully closed | [identity](packages/shared/src/project-memory/connections/identity.ts), [limits](packages/shared/src/project-memory/connections/limits.ts), [validation](packages/shared/src/project-memory/connections/validation.ts) |
 | Worktree topology | **NOT READY** | ❌ No canonical worker topology contract exists outside this ADR | [repo docs](docs/A0-memory-connections-discovery-adr.md) |
 | Verification matrix + cross-platform FS coverage | **NOT COMPLETE** | ❌ Matrix now has concrete commands and outcomes, but Linux/macOS/Windows outcomes are still needed for FS/race evidence | [this ADR + matrix docs](docs/A0-readiness-matrix.md) |
@@ -124,7 +124,7 @@ Wave A shall use a **single durable, secret-free saga journal**:
 ## F. Worktree topology and execution model
 
 - **Baseline checkpoint:** `06e8c4db`.
-- **Current integration tip:** `237843767396636238fe3c30537d16b3b254eeea`.
+- **Current integration tip:** the committed A0 docs tip under review (do not hard-code a stale SHA in worker prompts; record `git rev-parse HEAD` at dispatch time).
 - **Current integration branch:** `work/memory-connections-wave-a-integration`.
 - **Future workers:** branch from current audited integration tip only; no non-overlapping edits must target overlapping files.
 - **Integration model:** serial cherry-pick/review into integration branch.
@@ -154,7 +154,6 @@ Wave A shall use a **single durable, secret-free saga journal**:
 
 - `packages/shared/src/project-memory/connections/repository.ts`
 - `packages/shared/src/project-memory/connections/dto.ts`
-- `packages/shared/src/project-memory/connections/contracts.ts`
 - `packages/shared/src/project-memory/connections/mappers.ts`
 - Any `packages/shared/src/project-memory/migrations/**` or migration helper files
 - `packages/shared/src/credentials/**`
@@ -174,7 +173,7 @@ Wave A shall use a **single durable, secret-free saga journal**:
 ### Explicitly disallowed overlaps
 
 - `packages/shared/src/project-memory/connections/repository.ts` ownership must be single-worker only.
-- `packages/shared/src/project-memory/connections/validation.ts` and `contracts.ts` are reserved to A4a contract owner.
+- `packages/shared/src/project-memory/connections/validation.ts` is reserved to the A4a contract owner. `contracts.ts` is out of A4a scope unless a later re-audited plan explicitly expands ownership.
 - `packages/shared/src/credentials/*` must remain owned by A3/A5 chain only.
 
 ## I. Qdrant egress and transport policy (Wave A dormant-runtime gate)
@@ -194,7 +193,7 @@ All production outbound behavior is blocked until all decisions below are resolv
 
 Wave A implementation may only use static non-production negative probes until resolver + safe transport policy is complete and accepted.
 
-## I. Identity, limits, bytes, and numeric safety
+## J. Identity, limits, bytes, and numeric safety
 
 ### Mandatory choices before A1+ dispatch
 
@@ -213,11 +212,11 @@ Wave A implementation may only use static non-production negative probes until r
 - **Qdrant transport policy:** owner `A7`.
 - **Any business-policy exception (e.g., duplicate-identity fallback):** owner `orchestrator/user decision`.
 
-## J. Verification matrix policy
+## K. Verification matrix policy
 
 A0 acceptance now requires a complete matrix in the companion file with command families and exact outcomes: [A0 readiness matrix](docs/A0-readiness-matrix.md).
 
-## K. Mandatory vs adjacent risks
+## L. Mandatory vs adjacent risks
 
 ### Wave A mandatory blockers (cannot dispatch)
 - repository durability + symlink/containment
