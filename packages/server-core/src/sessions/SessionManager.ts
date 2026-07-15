@@ -44,6 +44,10 @@ import type { ActiveSessionInfo, SessionProcessingStatus, RuntimeDisposeReason, 
 import { loadWorkspaceConfig } from '@craft-agent/shared/workspaces'
 import { getProjectMemoryStore } from '@craft-agent/shared/project-memory'
 import {
+  formatSessionMemorySelectionDeniedReason,
+  resolveSessionManagedMemorySelectionFromRepository,
+} from './session-memory-runtime'
+import {
   // Session persistence functions
   listSessions as listStoredSessions,
   loadSession as loadStoredSession,
@@ -5448,8 +5452,50 @@ export class SessionManager implements ISessionManager {
 
           return { resolved: null, available }
         },
-        projectMemoryAddFn: async (input) => getProjectMemoryStore().add(input),
-        projectMemorySearchFn: async (input) => getProjectMemoryStore().search(input),
+        projectMemoryAddFn: async (input) => {
+          const selection = resolveSessionManagedMemorySelectionFromRepository({
+            workspaceId: managed.workspace.id,
+            projectId: managed.projectId,
+            enabledMemorySpaceRefs: managed.enabledMemorySpaceRefs,
+            memoryWriteTargetRef: managed.memoryWriteTargetRef,
+          }, {
+            loadCredential: (connectionId) => {
+              const manager = getCredentialManager()
+              try {
+                void manager.getMemoryApiKey(connectionId).catch(() => {})
+              } catch {
+                // Intentionally swallow to keep callback-only behavior.
+              }
+            },
+          })
+          if (selection.deniedRefs.length > 0) {
+            const denied = selection.deniedRefs.map(formatSessionMemorySelectionDeniedReason).join('; ')
+            throw new Error(`Invalid memory write selection: ${denied}`)
+          }
+          return getProjectMemoryStore().add(input)
+        },
+        projectMemorySearchFn: async (input) => {
+          const selection = resolveSessionManagedMemorySelectionFromRepository({
+            workspaceId: managed.workspace.id,
+            projectId: managed.projectId,
+            enabledMemorySpaceRefs: managed.enabledMemorySpaceRefs,
+            memoryWriteTargetRef: managed.memoryWriteTargetRef,
+          }, {
+            loadCredential: (connectionId) => {
+              const manager = getCredentialManager()
+              try {
+                void manager.getMemoryApiKey(connectionId).catch(() => {})
+              } catch {
+                // Intentionally swallow to keep callback-only behavior.
+              }
+            },
+          })
+          if (selection.deniedRefs.length > 0) {
+            const denied = selection.deniedRefs.map(formatSessionMemorySelectionDeniedReason).join('; ')
+            throw new Error(`Invalid memory search selection: ${denied}`)
+          }
+          return getProjectMemoryStore().search(input)
+        },
         projectMemoryStatusFn: async () => getProjectMemoryStore().status(),
         sendAgentMessageFn: async (sessionId: string, message: string, attachments?: Array<{ path: string; name?: string }>) => {
           // Build FileAttachment[] from paths (same pattern as spawn_session)
