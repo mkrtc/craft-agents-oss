@@ -42,6 +42,8 @@ export function ProjectMemoryPanel({ projectIdOrSlug }: ProjectMemoryPanelProps)
   const [connectionCollection, setConnectionCollection] = React.useState('craft_memory')
   const [connectionApiKey, setConnectionApiKey] = React.useState('')
   const [creatingConnection, setCreatingConnection] = React.useState(false)
+  const [checkingConnection, setCheckingConnection] = React.useState(false)
+  const [connectionCheckMessage, setConnectionCheckMessage] = React.useState<string | null>(null)
   const [mutatingConnectionId, setMutatingConnectionId] = React.useState<string | null>(null)
 
   const [source, setSource] = React.useState<ProjectMemoryUiSource>('manual-note')
@@ -149,6 +151,40 @@ export function ProjectMemoryPanel({ projectIdOrSlug }: ProjectMemoryPanelProps)
     }
   }, [projectIdOrSlug, query, t])
 
+  const handleCheckConnection = React.useCallback(async () => {
+    const url = connectionUrl.trim()
+    const collection = connectionCollection.trim()
+    const apiKey = connectionApiKey.trim()
+    if (!url || !collection) {
+      toast.error('Connection URL and collection are required')
+      return
+    }
+
+    setCheckingConnection(true)
+    setConnectionCheckMessage(null)
+    try {
+      const result = await window.electronAPI.checkProjectMemoryConnection({
+        url,
+        collection,
+        embedding: { model: 'craft-local-hash-v1', dimension: status?.dimension || 384 },
+        apiKey: apiKey || undefined,
+      })
+      setConnectionCheckMessage(result.message)
+      if (result.ok) {
+        toast.success(result.message)
+      } else {
+        toast.error(result.message)
+      }
+    } catch (err) {
+      console.error('[ProjectMemoryPanel] Failed to check memory connection:', err)
+      const message = err instanceof Error ? err.message : 'Failed to check memory connection'
+      setConnectionCheckMessage(message)
+      toast.error(message)
+    } finally {
+      setCheckingConnection(false)
+    }
+  }, [connectionApiKey, connectionCollection, connectionUrl, status?.dimension])
+
   const handleCreateConnection = React.useCallback(async () => {
     const name = connectionName.trim()
     const url = connectionUrl.trim()
@@ -249,12 +285,15 @@ export function ProjectMemoryPanel({ projectIdOrSlug }: ProjectMemoryPanelProps)
         collection={connectionCollection}
         apiKey={connectionApiKey}
         creating={creatingConnection}
+        checking={checkingConnection}
+        checkMessage={connectionCheckMessage}
         mutatingConnectionId={mutatingConnectionId}
         onNameChange={setConnectionName}
         onUrlChange={setConnectionUrl}
         onCollectionChange={setConnectionCollection}
         onApiKeyChange={setConnectionApiKey}
         onRefresh={loadConnections}
+        onCheck={handleCheckConnection}
         onCreate={handleCreateConnection}
         onToggle={handleToggleConnection}
         onDelete={handleDeleteConnection}
@@ -375,12 +414,15 @@ function MemoryConnectionsSection({
   collection,
   apiKey,
   creating,
+  checking,
+  checkMessage,
   mutatingConnectionId,
   onNameChange,
   onUrlChange,
   onCollectionChange,
   onApiKeyChange,
   onRefresh,
+  onCheck,
   onCreate,
   onToggle,
   onDelete,
@@ -393,17 +435,20 @@ function MemoryConnectionsSection({
   collection: string
   apiKey: string
   creating: boolean
+  checking: boolean
+  checkMessage: string | null
   mutatingConnectionId: string | null
   onNameChange: (value: string) => void
   onUrlChange: (value: string) => void
   onCollectionChange: (value: string) => void
   onApiKeyChange: (value: string) => void
   onRefresh: () => void
+  onCheck: () => void
   onCreate: () => void
   onToggle: (connection: ProjectMemoryConnectionSummary) => void
   onDelete: (connection: ProjectMemoryConnectionSummary) => void
 }) {
-  const connections = snapshot?.connections ?? []
+  const connections = React.useMemo(() => (snapshot?.connections ?? []).filter(connection => !connection.isEnvironment), [snapshot?.connections])
   const [pendingDeleteConnectionId, setPendingDeleteConnectionId] = React.useState<string | null>(null)
 
   React.useEffect(() => {
@@ -418,7 +463,7 @@ function MemoryConnectionsSection({
         <div>
           <h3 className="text-sm font-medium">Memory connections</h3>
           <p className="mt-1 text-xs text-muted-foreground">
-            Manage Qdrant connections used by project memory. API keys are never shown here.
+            Manage explicit Qdrant connections used by project memory. API keys are never shown here.
           </p>
         </div>
         <Button size="sm" variant="ghost" onClick={onRefresh} disabled={loading}>
@@ -436,23 +481,32 @@ function MemoryConnectionsSection({
 
         <div className="grid gap-3 md:grid-cols-[1fr_1.4fr_1fr_1fr_auto]">
           <Field label="Name">
-            <Input value={name} onChange={(e) => onNameChange(e.target.value)} placeholder="Primary Qdrant" disabled={creating} />
+            <Input value={name} onChange={(e) => onNameChange(e.target.value)} placeholder="Primary Qdrant" disabled={creating || checking} />
           </Field>
           <Field label="URL">
-            <Input value={url} onChange={(e) => onUrlChange(e.target.value)} placeholder="https://qdrant.example" disabled={creating} />
+            <Input value={url} onChange={(e) => onUrlChange(e.target.value)} placeholder="https://qdrant.example" disabled={creating || checking} />
           </Field>
           <Field label="Collection">
-            <Input value={collection} onChange={(e) => onCollectionChange(e.target.value)} placeholder="craft_memory" disabled={creating} />
+            <Input value={collection} onChange={(e) => onCollectionChange(e.target.value)} placeholder="craft_memory" disabled={creating || checking} />
           </Field>
           <Field label="API key (optional)">
-            <Input value={apiKey} onChange={(e) => onApiKeyChange(e.target.value)} placeholder="Stored securely" type="password" disabled={creating} />
+            <Input value={apiKey} onChange={(e) => onApiKeyChange(e.target.value)} placeholder="Stored securely" type="password" disabled={creating || checking} />
           </Field>
-          <div className="flex items-end">
-            <Button onClick={onCreate} disabled={creating || !name.trim() || !url.trim() || !collection.trim()}>
+          <div className="flex items-end gap-2">
+            <Button variant="outline" onClick={onCheck} disabled={creating || checking || !url.trim() || !collection.trim()}>
+              {checking ? 'Checking…' : 'Check'}
+            </Button>
+            <Button onClick={onCreate} disabled={creating || checking || !name.trim() || !url.trim() || !collection.trim()}>
               {creating ? 'Creating…' : 'Create'}
             </Button>
           </div>
         </div>
+
+        {checkMessage && (
+          <div className="rounded-lg border border-border/60 bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
+            {checkMessage}
+          </div>
+        )}
 
         {loading && !snapshot ? (
           <div className="rounded-lg border border-dashed border-border/70 px-4 py-6 text-center text-sm text-muted-foreground">

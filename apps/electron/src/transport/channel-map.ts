@@ -407,6 +407,7 @@ export const CHANNEL_MAP = {
   createProjectMemoryConnection: invoke(RPC_CHANNELS.projects.MEMORY_CONNECTION_CREATE),
   updateProjectMemoryConnection: invoke(RPC_CHANNELS.projects.MEMORY_CONNECTION_UPDATE),
   deleteProjectMemoryConnection: invoke(RPC_CHANNELS.projects.MEMORY_CONNECTION_DELETE),
+  checkProjectMemoryConnection: invoke(RPC_CHANNELS.projects.MEMORY_CONNECTION_CHECK),
   createProjectMemorySpace: invoke(RPC_CHANNELS.projects.MEMORY_SPACE_CREATE),
   updateProjectMemorySpace: invoke(RPC_CHANNELS.projects.MEMORY_SPACE_UPDATE),
   deleteProjectMemorySpace: invoke(RPC_CHANNELS.projects.MEMORY_SPACE_DELETE),

@@ -238,6 +238,8 @@ import type {
   ProjectMemoryConnectionCreateRequest,
   ProjectMemoryConnectionUpdateRequest,
   ProjectMemoryConnectionDeleteRequest,
+  ProjectMemoryConnectionCheckRequest,
+  ProjectMemoryConnectionCheckResult,
   ProjectMemorySpaceCreateRequest,
   ProjectMemorySpaceUpdateRequest,
   ProjectMemorySpaceDeleteRequest,
@@ -703,6 +705,7 @@ export interface ElectronAPI {
   createProjectMemoryConnection(input: ProjectMemoryConnectionCreateRequest): Promise<ProjectMemoryConnectionSummary>
   updateProjectMemoryConnection(input: ProjectMemoryConnectionUpdateRequest): Promise<ProjectMemoryConnectionSummary>
   deleteProjectMemoryConnection(input: ProjectMemoryConnectionDeleteRequest): Promise<{ success: true }>
+  checkProjectMemoryConnection(input: ProjectMemoryConnectionCheckRequest): Promise<ProjectMemoryConnectionCheckResult>
   createProjectMemorySpace(input: ProjectMemorySpaceCreateRequest): Promise<ProjectMemoryConnectionDetail>
   updateProjectMemorySpace(input: ProjectMemorySpaceUpdateRequest): Promise<ProjectMemoryConnectionDetail>
   deleteProjectMemorySpace(input: ProjectMemorySpaceDeleteRequest): Promise<ProjectMemoryConnectionDetail>

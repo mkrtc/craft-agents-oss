@@ -11,6 +11,8 @@ import {
   type ProjectMemoryConnectionCreateRequest,
   type ProjectMemoryConnectionUpdateRequest,
   type ProjectMemoryConnectionDeleteRequest,
+  type ProjectMemoryConnectionCheckRequest,
+  type ProjectMemoryConnectionCheckResult,
   type ProjectMemorySpaceCreateRequest,
   type ProjectMemorySpaceUpdateRequest,
   type ProjectMemorySpaceDeleteRequest,
@@ -22,6 +24,7 @@ import {
   getProjectMemoryStore,
   MemoryConnectionRepository,
   MemoryConnectionService,
+  QdrantProjectMemoryStore,
   toMemoryConnectionDetailDto,
   toMemoryConnectionSummaryDto,
   type MemoryConnectionConfig,
@@ -54,6 +57,7 @@ export const HANDLED_CHANNELS = [
   RPC_CHANNELS.projects.MEMORY_CONNECTION_CREATE,
   RPC_CHANNELS.projects.MEMORY_CONNECTION_UPDATE,
   RPC_CHANNELS.projects.MEMORY_CONNECTION_DELETE,
+  RPC_CHANNELS.projects.MEMORY_CONNECTION_CHECK,
   RPC_CHANNELS.projects.MEMORY_SPACE_CREATE,
   RPC_CHANNELS.projects.MEMORY_SPACE_UPDATE,
   RPC_CHANNELS.projects.MEMORY_SPACE_DELETE,
@@ -89,6 +93,51 @@ function normalizeProjectMemoryStatus(status: ProjectMemoryStatus): ProjectMemor
     state = 'unreachable'
   }
   return { ...status, state, message: error, error }
+}
+
+function normalizeMemoryConnectionCheckStatus(status: ProjectMemoryStatus): ProjectMemoryConnectionCheckResult {
+  if (status.ok) {
+    return {
+      ok: true,
+      state: 'ready',
+      message: 'Connection is ready',
+      url: status.url,
+      collection: status.collection,
+      dimension: status.dimension,
+    }
+  }
+
+  const error = status.error ?? 'Connection check failed'
+  const lower = error.toLowerCase()
+  let state: ProjectMemoryConnectionCheckResult['state'] = 'error'
+  if (lower.includes('qdrant 404') || lower.includes('not found')) {
+    state = 'not-initialized'
+  } else if (
+    lower.includes('vector size')
+    || lower.includes('distance')
+    || lower.includes('vector configuration')
+    || lower.includes('expected cosine')
+  ) {
+    state = 'config-mismatch'
+  } else if (
+    lower.includes('failed to fetch')
+    || lower.includes('fetch failed')
+    || lower.includes('econnrefused')
+    || lower.includes('connection refused')
+    || lower.includes('network')
+    || lower.includes('timeout')
+  ) {
+    state = 'unreachable'
+  }
+
+  return {
+    ok: false,
+    state,
+    message: error,
+    url: status.url,
+    collection: status.collection,
+    dimension: status.dimension,
+  }
 }
 
 function requireWorkspaceFromContext(ctx: RequestContext) {
@@ -460,6 +509,25 @@ export function registerProjectsHandlers(server: RpcServer, deps: HandlerDeps): 
     const { connectionId, expectedRootRevision } = input
     await getMemoryConnectionService().deleteConnection(connectionId, expectedRootRevision)
     return { success: true }
+  })
+
+  // Check a Qdrant connection without persisting it or storing the provided API key.
+  server.handle(RPC_CHANNELS.projects.MEMORY_CONNECTION_CHECK, async (_ctx, input: ProjectMemoryConnectionCheckRequest): Promise<ProjectMemoryConnectionCheckResult> => {
+    if (!input || typeof input !== 'object') throw new Error('Invalid memory connection check input')
+    const { url, collection, embedding, apiKey } = input
+    if (typeof url !== 'string' || !url.trim()) throw new Error('url is required')
+    if (typeof collection !== 'string' || !collection.trim()) throw new Error('collection is required')
+    const dimension = embedding?.dimension
+    if (!Number.isSafeInteger(dimension) || dimension <= 0) throw new Error('embedding.dimension must be a positive integer')
+
+    const status = await new QdrantProjectMemoryStore({
+      enabled: true,
+      url,
+      collection,
+      dimension,
+      apiKey: typeof apiKey === 'string' && apiKey.trim() ? apiKey.trim() : undefined,
+    }).status()
+    return normalizeMemoryConnectionCheckStatus(status)
   })
 
   // Create a new workspace/project/custom memory space on a connection.

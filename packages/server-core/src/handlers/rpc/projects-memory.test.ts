@@ -244,6 +244,42 @@ describe('project memory RPC handlers', () => {
     await expect(add(ctx(), { projectIdOrSlug: projectSlug, source: 'decision', content: 'x', tags: ['a'.repeat(65)] })).rejects.toThrow('tags must be at most')
   })
 
+  it('checks memory connection reachability without persisting the connection or api key', async () => {
+    registerProjectsHandlers(server(), deps())
+    const check = handler(RPC_CHANNELS.projects.MEMORY_CONNECTION_CHECK)
+    const snapshot = handler(RPC_CHANNELS.projects.MEMORY_CONNECTIONS_SNAPSHOT)
+    const originalFetch = globalThis.fetch
+    const calls: Array<{ url: string; headers?: unknown }> = []
+    globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+      calls.push({ url: String(url), headers: init?.headers })
+      return new Response(JSON.stringify({
+        result: {
+          config: {
+            params: {
+              vectors: { size: 384, distance: 'Cosine' },
+            },
+          },
+        },
+      }), { status: 200, headers: { 'content-type': 'application/json' } })
+    }) as typeof fetch
+
+    try {
+      const result = await check(ctx(), {
+        url: 'http://qdrant.example:6333',
+        collection: 'craft_memory',
+        embedding: defaultEmbedding,
+        apiKey: 'sk-check-only',
+      })
+
+      expect(result).toMatchObject({ ok: true, state: 'ready', collection: 'craft_memory', dimension: 384 })
+      expect(calls[0]?.url).toBe('http://qdrant.example:6333/collections/craft_memory')
+      expect(calls[0]?.headers).toMatchObject({ 'api-key': 'sk-check-only' })
+      expect((await snapshot(ctx())).revision).toBe(0)
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
   it('lists memory connection snapshots with revision and environment metadata', async () => {
     registerProjectsHandlers(server(), deps())
     const snapshot = handler(RPC_CHANNELS.projects.MEMORY_CONNECTIONS_SNAPSHOT)

@@ -205,6 +205,7 @@ const EXPECTED_CHANNELS: string[] = [
   'projects:getOne',
   'projects:listAssets',
   'projects:memoryAdd',
+  'projects:memoryConnectionCheck',
   'projects:memoryConnectionCreate',
   'projects:memoryConnectionDelete',
   'projects:memoryConnectionGet',

@@ -24,6 +24,8 @@ import type {
   CreateMemoryConnectionRequestDto,
   PatchMemoryConnectionRequestDto,
   DeleteMemoryConnectionRequestDto,
+  CheckMemoryConnectionRequestDto,
+  CheckMemoryConnectionResultDto,
   CreateMemorySpaceRequestDto,
   PatchMemorySpaceRequestDto,
   DeleteMemorySpaceRequestDto,
@@ -883,6 +885,10 @@ export type ProjectMemoryConnectionCreateRequest = CreateMemoryConnectionRequest
 export type ProjectMemoryConnectionUpdateRequest = PatchMemoryConnectionRequestDto
 
 export type ProjectMemoryConnectionDeleteRequest = DeleteMemoryConnectionRequestDto
+
+export type ProjectMemoryConnectionCheckRequest = CheckMemoryConnectionRequestDto
+
+export type ProjectMemoryConnectionCheckResult = CheckMemoryConnectionResultDto
 
 export type ProjectMemorySpaceCreateRequest = CreateMemorySpaceRequestDto
 

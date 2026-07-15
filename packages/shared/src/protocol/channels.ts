@@ -417,6 +417,7 @@ export const RPC_CHANNELS = {
     MEMORY_CONNECTION_CREATE: 'projects:memoryConnectionCreate',
     MEMORY_CONNECTION_UPDATE: 'projects:memoryConnectionUpdate',
     MEMORY_CONNECTION_DELETE: 'projects:memoryConnectionDelete',
+    MEMORY_CONNECTION_CHECK: 'projects:memoryConnectionCheck',
     MEMORY_SPACE_CREATE: 'projects:memorySpaceCreate',
     MEMORY_SPACE_UPDATE: 'projects:memorySpaceUpdate',
     MEMORY_SPACE_DELETE: 'projects:memorySpaceDelete',

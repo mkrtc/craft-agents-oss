@@ -102,6 +102,23 @@ export interface DeleteMemoryConnectionRequestDto {
   expectedRootRevision: number;
 }
 
+export interface CheckMemoryConnectionRequestDto {
+  url: string;
+  collection: string;
+  embedding: MemoryEmbeddingIdentity;
+  /** Write-only secret used only for this check; never persisted by the check endpoint. */
+  apiKey?: string;
+}
+
+export interface CheckMemoryConnectionResultDto {
+  ok: boolean;
+  state: 'ready' | 'not-initialized' | 'config-mismatch' | 'unreachable' | 'error';
+  message: string;
+  url: string;
+  collection: string;
+  dimension: number;
+}
+
 export type CreateMemorySpaceRequestDto =
   | { connectionId: string; expectedRevision: number; kind: 'workspace'; name: string; instructions?: string; writable?: boolean; workspaceId: string }
   | { connectionId: string; expectedRevision: number; kind: 'project'; name: string; instructions?: string; writable?: boolean; workspaceId: string; projectId: string }
