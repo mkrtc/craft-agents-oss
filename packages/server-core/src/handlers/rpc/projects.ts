@@ -5,9 +5,29 @@ import {
   type ProjectMemoryUiSearchHit,
   type ProjectMemoryUiSearchRequest,
   type ProjectMemoryUiStatus,
+  type ProjectMemoryConnectionSnapshot,
+  type ProjectMemoryConnectionSummary,
+  type ProjectMemoryConnectionDetail,
+  type ProjectMemoryConnectionCreateRequest,
+  type ProjectMemoryConnectionUpdateRequest,
+  type ProjectMemoryConnectionDeleteRequest,
+  type ProjectMemorySpaceCreateRequest,
+  type ProjectMemorySpaceUpdateRequest,
+  type ProjectMemorySpaceDeleteRequest,
 } from '@craft-agent/shared/protocol'
 import { getWorkspaceByNameOrId } from '@craft-agent/shared/config/storage'
-import { getProjectMemoryStore, type ProjectMemoryPayload, type ProjectMemoryStatus } from '@craft-agent/shared/project-memory'
+import {
+  buildEnvironmentMemoryConnection,
+  environmentMemoryConnectionHasApiKey,
+  getProjectMemoryStore,
+  MemoryConnectionRepository,
+  toMemoryConnectionDetailDto,
+  toMemoryConnectionSummaryDto,
+  type MemoryConnectionConfig,
+  type ProjectMemoryPayload,
+  type ProjectMemoryStatus,
+} from '@craft-agent/shared/project-memory'
+import { getCredentialManager } from '@craft-agent/shared/credentials'
 import { pushTyped, type RequestContext, type RpcServer } from '@craft-agent/server-core/transport'
 import type { HandlerDeps } from '../handler-deps'
 
@@ -28,6 +48,14 @@ export const HANDLED_CHANNELS = [
   RPC_CHANNELS.projects.MEMORY_STATUS,
   RPC_CHANNELS.projects.MEMORY_ADD,
   RPC_CHANNELS.projects.MEMORY_SEARCH,
+  RPC_CHANNELS.projects.MEMORY_CONNECTIONS_SNAPSHOT,
+  RPC_CHANNELS.projects.MEMORY_CONNECTION_GET,
+  RPC_CHANNELS.projects.MEMORY_CONNECTION_CREATE,
+  RPC_CHANNELS.projects.MEMORY_CONNECTION_UPDATE,
+  RPC_CHANNELS.projects.MEMORY_CONNECTION_DELETE,
+  RPC_CHANNELS.projects.MEMORY_SPACE_CREATE,
+  RPC_CHANNELS.projects.MEMORY_SPACE_UPDATE,
+  RPC_CHANNELS.projects.MEMORY_SPACE_DELETE,
 ] as const
 
 function normalizeProjectMemoryStatus(status: ProjectMemoryStatus): ProjectMemoryUiStatus {
@@ -78,6 +106,90 @@ async function resolveProjectForMemory(ctx: RequestContext, projectIdOrSlug: str
   const project = loadProject(workspace.rootPath, trimmed) ?? loadProjectById(workspace.rootPath, trimmed)
   if (!project) throw new Error(`Project not found: ${trimmed}`)
   return { workspaceId, projectId: project.config.id }
+}
+
+const memoryConnectionRepository: { current: MemoryConnectionRepository | null } = {
+  current: null,
+}
+
+function getMemoryConnectionRepo(): MemoryConnectionRepository {
+  if (!memoryConnectionRepository.current) {
+    memoryConnectionRepository.current = new MemoryConnectionRepository()
+  }
+  return memoryConnectionRepository.current
+}
+
+function getEnvironmentConnection(repo: MemoryConnectionRepository): MemoryConnectionConfig {
+  return buildEnvironmentMemoryConnection(repo.getInstallationId())
+}
+
+async function getConnectionHasApiKey(connectionId: string, isEnvironment: boolean): Promise<boolean> {
+  if (isEnvironment) return environmentMemoryConnectionHasApiKey()
+
+  try {
+    const manager = getCredentialManager()
+    return await manager.hasMemoryApiKey(connectionId)
+  } catch {
+    return false
+  }
+}
+
+async function buildConnectionSummary(
+  connection: MemoryConnectionConfig,
+  isEnvironment: boolean,
+): Promise<ProjectMemoryConnectionSummary> {
+  const hasApiKey = await getConnectionHasApiKey(connection.connectionId, isEnvironment)
+  return toMemoryConnectionSummaryDto(connection, { isEnvironment, hasApiKey })
+}
+
+function getMemoryConnectionById(
+  repo: MemoryConnectionRepository,
+  connectionId: string,
+): { connection: MemoryConnectionConfig; isEnvironment: boolean } | null {
+  const environmentConnection = getEnvironmentConnection(repo)
+  if (connectionId === environmentConnection.connectionId) {
+    return { connection: environmentConnection, isEnvironment: true }
+  }
+
+  const stored = repo.getConnection(connectionId)
+  if (!stored) return null
+
+  return { connection: stored, isEnvironment: false }
+}
+
+async function buildConnectionDetail(connectionId: string): Promise<ProjectMemoryConnectionDetail> {
+  const repo = getMemoryConnectionRepo()
+  const found = getMemoryConnectionById(repo, connectionId)
+  if (!found) throw new Error(`Connection not found: ${connectionId}`)
+
+  const { connection, isEnvironment } = found
+  return toMemoryConnectionDetailDto(
+    connection,
+    {
+      isEnvironment,
+      hasApiKey: await getConnectionHasApiKey(connection.connectionId, isEnvironment),
+    },
+  )
+}
+
+async function buildConnectionSnapshot(): Promise<ProjectMemoryConnectionSnapshot> {
+  const repo = getMemoryConnectionRepo()
+  const environmentConnection = getEnvironmentConnection(repo)
+
+  const snapshots = [
+    await buildConnectionSummary(environmentConnection, true),
+    ...await Promise.all(
+      repo
+        .listConnections()
+        .filter((connection) => connection.connectionId !== environmentConnection.connectionId)
+        .map((connection) => buildConnectionSummary(connection, false)),
+    ),
+  ]
+
+  return {
+    revision: repo.getRootRevision(),
+    connections: snapshots,
+  }
 }
 
 function normalizeTags(tags: unknown): string[] | undefined {
@@ -298,5 +410,77 @@ export function registerProjectsHandlers(server: RpcServer, deps: HandlerDeps): 
       limit: validated.limit,
     })
     return hits.map((hit) => ({ score: hit.score, payload: toUiPayload(hit.payload) }))
+  })
+
+  // List all memory connections + derived environment connection in a revisioned snapshot.
+  server.handle(RPC_CHANNELS.projects.MEMORY_CONNECTIONS_SNAPSHOT, async () => buildConnectionSnapshot())
+
+  // Get one memory connection detail by id.
+  server.handle(RPC_CHANNELS.projects.MEMORY_CONNECTION_GET, async (_ctx, connectionId: string): Promise<ProjectMemoryConnectionDetail> => {
+    if (typeof connectionId !== 'string' || !connectionId.trim()) {
+      throw new Error('connectionId is required')
+    }
+    return buildConnectionDetail(connectionId)
+  })
+
+  // Create a new memory connection entry (root revision required).
+  server.handle(RPC_CHANNELS.projects.MEMORY_CONNECTION_CREATE, async (_ctx, input: ProjectMemoryConnectionCreateRequest): Promise<ProjectMemoryConnectionSummary> => {
+    if (!input || typeof input !== 'object') throw new Error('Invalid memory connection create input')
+    const repo = getMemoryConnectionRepo()
+    const { expectedRootRevision, name, url, collection, embedding, enabled, proactiveRemoteSearch } = input
+    const created = await repo.createConnection({
+      name,
+      url,
+      collection,
+      embedding,
+      enabled,
+      proactiveRemoteSearch,
+    }, expectedRootRevision)
+    return buildConnectionSummary(created, false)
+  })
+
+  // Update name/enabled/proactiveRemoteSearch on a stored memory connection.
+  server.handle(RPC_CHANNELS.projects.MEMORY_CONNECTION_UPDATE, async (_ctx, input: ProjectMemoryConnectionUpdateRequest): Promise<ProjectMemoryConnectionSummary> => {
+    if (!input || typeof input !== 'object') throw new Error('Invalid memory connection update input')
+    const repo = getMemoryConnectionRepo()
+    const { connectionId, expectedRevision, ...patch } = input
+    const updated = await repo.updateConnection(connectionId, patch, expectedRevision)
+    return buildConnectionSummary(updated, false)
+  })
+
+  // Delete a stored memory connection by id (root revision required).
+  server.handle(RPC_CHANNELS.projects.MEMORY_CONNECTION_DELETE, async (_ctx, input: ProjectMemoryConnectionDeleteRequest): Promise<{ success: true }> => {
+    if (!input || typeof input !== 'object') throw new Error('Invalid memory connection delete input')
+    const repo = getMemoryConnectionRepo()
+    const { connectionId, expectedRootRevision } = input
+    await repo.deleteConnection(connectionId, expectedRootRevision)
+    return { success: true }
+  })
+
+  // Create a new workspace/project/custom memory space on a connection.
+  server.handle(RPC_CHANNELS.projects.MEMORY_SPACE_CREATE, async (_ctx, input: ProjectMemorySpaceCreateRequest): Promise<ProjectMemoryConnectionDetail> => {
+    if (!input || typeof input !== 'object') throw new Error('Invalid memory space create input')
+    const repo = getMemoryConnectionRepo()
+    const { connectionId, expectedRevision, ...space } = input
+    const result = await repo.addSpace(connectionId, space, expectedRevision)
+    return buildConnectionDetail(result.connection.connectionId)
+  })
+
+  // Update one memory space on a connection.
+  server.handle(RPC_CHANNELS.projects.MEMORY_SPACE_UPDATE, async (_ctx, input: ProjectMemorySpaceUpdateRequest): Promise<ProjectMemoryConnectionDetail> => {
+    if (!input || typeof input !== 'object') throw new Error('Invalid memory space update input')
+    const repo = getMemoryConnectionRepo()
+    const { connectionId, expectedRevision, spaceId, ...patch } = input
+    const result = await repo.updateSpace(connectionId, spaceId, patch, expectedRevision)
+    return buildConnectionDetail(result.connection.connectionId)
+  })
+
+  // Delete one memory space from a connection.
+  server.handle(RPC_CHANNELS.projects.MEMORY_SPACE_DELETE, async (_ctx, input: ProjectMemorySpaceDeleteRequest): Promise<ProjectMemoryConnectionDetail> => {
+    if (!input || typeof input !== 'object') throw new Error('Invalid memory space delete input')
+    const repo = getMemoryConnectionRepo()
+    const { connectionId, expectedRevision, spaceId } = input
+    const connection = await repo.deleteSpace(connectionId, spaceId, expectedRevision)
+    return buildConnectionDetail(connection.connectionId)
   })
 }

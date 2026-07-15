@@ -17,6 +17,17 @@ import type {
 import type { PermissionMode } from '../agent/mode-types'
 import type { ThinkingLevel } from '../agent/thinking-levels'
 import type { MemorySelectionMode, MemorySpaceRef } from '../project-memory/connections/types'
+import type {
+  MemoryConnectionDetailDto,
+  MemoryConnectionSummaryDto,
+  MemoryConnectionsSnapshotDto,
+  CreateMemoryConnectionRequestDto,
+  PatchMemoryConnectionRequestDto,
+  DeleteMemoryConnectionRequestDto,
+  CreateMemorySpaceRequestDto,
+  PatchMemorySpaceRequestDto,
+  DeleteMemorySpaceRequestDto,
+} from '../project-memory/connections/contracts'
 import type { CustomEndpointConfig } from '../config/llm-connections'
 import type { LabelSkillBindingsConfig, LabelSkillBindingsValidationResult, LabelSkillBindingGeneratedFrom } from '../label-skill-bindings/types'
 import type { SkillSummary } from '../skills/types'
@@ -855,6 +866,28 @@ export interface ProjectMemoryUiSearchHit {
   score: number
   payload: ProjectMemoryUiPayload
 }
+
+// ---------------------------------------------------------------------------
+// Project memory connection DTOs
+// ---------------------------------------------------------------------------
+
+export type ProjectMemoryConnectionSnapshot = MemoryConnectionsSnapshotDto
+
+export type ProjectMemoryConnectionSummary = MemoryConnectionSummaryDto
+
+export type ProjectMemoryConnectionDetail = MemoryConnectionDetailDto
+
+export type ProjectMemoryConnectionCreateRequest = CreateMemoryConnectionRequestDto
+
+export type ProjectMemoryConnectionUpdateRequest = PatchMemoryConnectionRequestDto
+
+export type ProjectMemoryConnectionDeleteRequest = DeleteMemoryConnectionRequestDto
+
+export type ProjectMemorySpaceCreateRequest = CreateMemorySpaceRequestDto
+
+export type ProjectMemorySpaceUpdateRequest = PatchMemorySpaceRequestDto
+
+export type ProjectMemorySpaceDeleteRequest = DeleteMemorySpaceRequestDto
 
 // ---------------------------------------------------------------------------
 // Automation types

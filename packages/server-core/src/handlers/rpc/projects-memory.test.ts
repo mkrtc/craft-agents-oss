@@ -11,6 +11,11 @@ const configDir = mkdtempSync(join(tmpdir(), 'craft-memory-rpc-config-'))
 const workspaceRoot = join(configDir, 'workspaces', 'test-workspace')
 const projectId = 'proj_canonical'
 const projectSlug = 'memory-project'
+const defaultEmbedding = { model: 'craft-local-hash-v1', dimension: 384 }
+
+function resetMemoryConnectionConfig() {
+  rmSync(join(configDir, 'memory'), { recursive: true, force: true })
+}
 
 let handlers: Map<string, HandlerFn>
 let setProjectMemoryStoreForTests: (store: ProjectMemoryStore | null) => void
@@ -61,6 +66,18 @@ function createStore(status: ProjectMemoryStatus = {
     },
   }
   return { store, calls }
+}
+
+function buildMemoryConnectionCreateInput(expectedRootRevision: number, name = 'Primary') {
+  return {
+    expectedRootRevision,
+    name,
+    url: 'https://qdrant.example',
+    collection: 'craft_memory',
+    embedding: defaultEmbedding,
+    enabled: true,
+    proactiveRemoteSearch: false,
+  }
 }
 
 function server(): RpcServer {
@@ -120,6 +137,7 @@ beforeAll(async () => {
 
 afterEach(() => {
   setProjectMemoryStoreForTests(null)
+  resetMemoryConnectionConfig()
 })
 
 afterAll(() => {
@@ -220,5 +238,112 @@ describe('project memory RPC handlers', () => {
     await expect(add(ctx(), { projectIdOrSlug: projectSlug, source: 'decision', content: '   ' })).rejects.toThrow('content is required')
     await expect(add(ctx(), { projectIdOrSlug: projectSlug, source: 'decision', content: 'x', tags: [''] })).rejects.toThrow('tags must not be empty')
     await expect(add(ctx(), { projectIdOrSlug: projectSlug, source: 'decision', content: 'x', tags: ['a'.repeat(65)] })).rejects.toThrow('tags must be at most')
+  })
+
+  it('lists memory connection snapshots with revision and environment metadata', async () => {
+    registerProjectsHandlers(server(), deps())
+    const snapshot = handler(RPC_CHANNELS.projects.MEMORY_CONNECTIONS_SNAPSHOT)
+    const create = handler(RPC_CHANNELS.projects.MEMORY_CONNECTION_CREATE)
+
+    const initial = await snapshot(ctx())
+    expect(initial.revision).toBe(0)
+    expect(initial.connections).toHaveLength(1)
+    expect(initial.connections[0]!.isEnvironment).toBe(true)
+
+    const created = await create(ctx(), buildMemoryConnectionCreateInput(0, 'Default'))
+    expect(created.hasApiKey).toBe(false)
+    expect('apiKey' in created).toBe(false)
+
+    const next = await snapshot(ctx())
+    expect(next.revision).toBe(1)
+    expect(next.connections).toHaveLength(2)
+
+    const environment = next.connections.find((item) => item.isEnvironment)
+    const stored = next.connections.find((item) => item.isEnvironment === false)
+
+    expect(typeof environment?.hasApiKey).toBe('boolean')
+    expect(stored?.hasApiKey).toBe(false)
+    expect(stored?.connectionId).toBe(created.connectionId)
+    expect(stored?.revision).toBe(1)
+  })
+
+  it('resolves connection detail for stored + environment connections', async () => {
+    registerProjectsHandlers(server(), deps())
+    const create = handler(RPC_CHANNELS.projects.MEMORY_CONNECTION_CREATE)
+    const getConnection = handler(RPC_CHANNELS.projects.MEMORY_CONNECTION_GET)
+
+    const snapshotBefore = await handler(RPC_CHANNELS.projects.MEMORY_CONNECTIONS_SNAPSHOT)(ctx())
+    const created = await create(ctx(), buildMemoryConnectionCreateInput(0, 'Primary'))
+    const snapshotAfter = await handler(RPC_CHANNELS.projects.MEMORY_CONNECTIONS_SNAPSHOT)(ctx())
+
+    const storedDetail = await getConnection(ctx(), created.connectionId)
+    expect(storedDetail.connectionId).toBe(created.connectionId)
+    expect(storedDetail.name).toBe(created.name)
+    expect(storedDetail.spaces[0]!.kind).toBe('global')
+    expect(storedDetail.spaces[0]!.readOnly).toBe(true)
+    expect(storedDetail.spaceCount).toBe(1)
+
+    const envConnectionId = snapshotAfter.connections.find((item) => item.isEnvironment)?.connectionId
+    if (!envConnectionId) {
+      throw new Error('Expected environment connection in snapshot')
+    }
+    const envDetail = await getConnection(ctx(), envConnectionId)
+    expect(envDetail.isEnvironment).toBe(true)
+    expect(envDetail.credentialMode).toBe('legacy-environment')
+
+    await expect(getConnection(ctx(), 'missing-connection-id')).rejects.toThrow('Connection not found: missing-connection-id')
+    expect(snapshotBefore.connections).toHaveLength(1)
+  })
+
+  it('enforces root and connection revision guards across connection/space mutations', async () => {
+    registerProjectsHandlers(server(), deps())
+    const create = handler(RPC_CHANNELS.projects.MEMORY_CONNECTION_CREATE)
+    const update = handler(RPC_CHANNELS.projects.MEMORY_CONNECTION_UPDATE)
+    const deleteConn = handler(RPC_CHANNELS.projects.MEMORY_CONNECTION_DELETE)
+    const createSpace = handler(RPC_CHANNELS.projects.MEMORY_SPACE_CREATE)
+    const updateSpace = handler(RPC_CHANNELS.projects.MEMORY_SPACE_UPDATE)
+
+    const created = await create(ctx(), buildMemoryConnectionCreateInput(0, 'Primary'))
+    expect(created.connectionId).toBeTruthy()
+
+    await expect(create(ctx(), buildMemoryConnectionCreateInput(0, 'Conflict'))).rejects.toThrow('revision')
+
+    const updated = await update(ctx(), {
+      connectionId: created.connectionId,
+      expectedRevision: created.revision,
+      name: 'Primary Updated',
+    })
+    expect(updated.name).toBe('Primary Updated')
+
+    await expect(update(ctx(), {
+      connectionId: created.connectionId,
+      expectedRevision: created.revision,
+      name: 'Stale',
+    })).rejects.toThrow('revision')
+
+    const spaceDetail = await createSpace(ctx(), {
+      connectionId: created.connectionId,
+      expectedRevision: updated.revision,
+      kind: 'project',
+      name: 'Project Space',
+      writable: true,
+      workspaceId: 'test-workspace',
+      projectId,
+    })
+
+    const projectSpace = spaceDetail.spaces.find((item) => item.kind === 'project')
+    expect(projectSpace?.spaceId).toBeTruthy()
+
+    await expect(updateSpace(ctx(), {
+      connectionId: created.connectionId,
+      expectedRevision: updated.revision,
+      spaceId: projectSpace!.spaceId,
+      name: 'Stale Space',
+    })).rejects.toThrow('revision')
+
+    await expect(deleteConn(ctx(), {
+      connectionId: created.connectionId,
+      expectedRootRevision: updated.revision,
+    })).rejects.toThrow('revision')
   })
 })
