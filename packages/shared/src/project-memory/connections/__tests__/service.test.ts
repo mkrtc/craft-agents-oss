@@ -10,7 +10,7 @@ import { CredentialManager } from '../../../credentials/manager.ts';
 import type { CredentialBackend } from '../../../credentials/backends/types.ts';
 import { accountToCredentialId, credentialIdToAccount, type CredentialId, type StoredCredential } from '../../../credentials/types.ts';
 import { MemoryConnectionRepository } from '../repository.ts';
-import { CreateMemoryConnectionServiceInput, MemoryConnectionService, UpdateMemoryConnectionServiceInput } from '../service.ts';
+import { MemoryConnectionService, type CreateMemoryConnectionServiceInput, type UpdateMemoryConnectionServiceInput } from '../service.ts';
 import type { CreateMemoryConnectionInput } from '../types.ts';
 
 interface BackendFaultConfig {
