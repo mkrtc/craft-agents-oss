@@ -6,30 +6,30 @@
 **Current integration tip:** this committed A0 docs tip (see `git rev-parse HEAD`)
 **Scope:** docs-only correction for Wave A readiness gate and dispatcher policy
 
-This ADR replaces the previous uncommitted drafts in this worktree and sets explicit gates for Wave A implementation. It is intentionally strict: if any blocking finding remains, **A1+ is not allowed to dispatch**.
+This ADR replaces the previous uncommitted drafts in this worktree and sets explicit gates for Wave A implementation. It is intentionally strict about dispatch gates: before this A0 document is accepted, **A1+ is not allowed to dispatch**. After A0 is accepted, only the sequenced remediation workers named here may dispatch in order; merge/release and Wave B/C remain blocked until all mandatory blockers close.
 
 ## A. Status / Gate Summary
 
 - **A0 status:** corrected docs are committed and **pending independent re-audit**.
 - **Acceptance rule:** A0 is accepted only after independent re-audit passes this committed doc set.
-- **Dispatch policy:** **A1+ implementation is BLOCKED until this A0 correction commit is reviewed and accepted.**
-- **Wave progression:** Wave A not ready for execution; **Wave B/C are forbidden** until Wave A gates pass.
+- **Dispatch policy before A0 acceptance:** **A1+ implementation is BLOCKED until this A0 correction commit is reviewed and accepted.**
+- **Wave progression:** after A0 acceptance, Wave A remediation may proceed only in the sequence below. **Wave B/C are forbidden** until Wave A closure audit passes.
 
 ## B. Finding-by-finding disposition for accepted P0/P1 themes
 
 | Theme | Required disposition | Current state after correction | Evidence file(s)
 |---|---|---|---|
-| Credential fault-test isolation / real `~/.craft-agent` credential safety | **BLOCKED** until injectable roots and guardrails are part of test contract | ❌ Missing explicit test isolation contract and no documented fixture-root discipline for destructive credential tests | [session-tools-core handlers](packages/session-tools-core/src/handlers/project-memory.ts), [credential manager](packages/shared/src/credentials/manager.ts), [credentials tests](packages/shared/src/credentials/__tests__/memory-credentials.test.ts) |
-| Credential backend durability + manager contract | **FAIL** on concurrent and recovery behaviors under current code | ❌ Storage tests show remaining durability/recovery failures in repository behavior under boundary conditions | [repository tests](packages/shared/src/project-memory/connections/__tests__/repository.test.ts), [environment tests](packages/shared/src/project-memory/connections/__tests__/environment.test.ts) |
-| Credential/config saga protocol | **BLOCKED** | ✅ Policy is documented; product enforcement remains missing in code/tests | [credentials types](packages/shared/src/credentials/types.ts), [dto](packages/shared/src/project-memory/connections/dto.ts), [repository](packages/shared/src/project-memory/connections/repository.ts) |
-| Repository FS containment / bounded I/O | **FAIL** | ❌ Symlink containment checks and path-bound guarantees incomplete in enforced mode | [repository tests](packages/shared/src/project-memory/connections/__tests__/repository.test.ts) |
-| Repository cross-process locking / fenced reread / transaction recovery | **FAIL** | ❌ Two-process same-revision acknowledgement test currently fails | [repository tests](packages/shared/src/project-memory/connections/__tests__/repository.test.ts) |
-| Migration/version / v1→v2 discriminators | **BLOCKING OPEN QUESTION** | ✅ Saga/version/identity policy freeze is documented in this ADR, but discriminator values, fail behavior, and rollback ownership are not yet enforced in code | [validation tests](packages/shared/src/project-memory/connections/__tests__/validation.test.ts), [validation contract](packages/shared/src/project-memory/connections/validation.ts) |
-| Centralized default-deny resolver + authorizer | **BLOCKED** | ✅ Resolver contract is documented in this ADR; centralized deny-first runtime/test enforcement is not yet implemented | [session refs](packages/shared/src/project-memory/connections/session-refs.ts), [SessionManager](packages/server-core/src/sessions/SessionManager.ts), [projects handler](packages/session-tools-core/src/handlers/project-memory.ts) |
-| Qdrant transport SSRF / redirect / DNS / egress policy | **BLOCKED** | ✅ Qdrant transport policy categories are documented; concrete allow/deny decisions, runtime safeguards, tests, and strict failure behavior remain missing | [qdrant transport](packages/shared/src/project-memory/qdrant.ts), [qdrant tests](packages/shared/src/project-memory/qdrant.test.ts) |
-| Identity, limits, bytes, numeric safety, global collision | **BLOCKING OPEN QUESTION** | ✅ Decision points (canonical identity tuple, serialized bytes, and overflow policy) are documented; enforcement details and ownership are not yet fully closed | [identity](packages/shared/src/project-memory/connections/identity.ts), [limits](packages/shared/src/project-memory/connections/limits.ts), [validation](packages/shared/src/project-memory/connections/validation.ts) |
-| Worktree topology | **NOT READY** | ❌ No canonical worker topology contract exists outside this ADR | [repo docs](docs/A0-memory-connections-discovery-adr.md) |
-| Verification matrix + cross-platform FS coverage | **NOT COMPLETE** | ❌ Matrix now has concrete commands and outcomes, but Linux/macOS/Windows outcomes are still needed for FS/race evidence | [this ADR + matrix docs](docs/A0-readiness-matrix.md) |
+| Credential fault-test isolation / real `~/.craft-agent` credential safety | **BLOCKED** until injectable roots and guardrails are part of test contract | ❌ Missing explicit test isolation contract and no documented fixture-root discipline for destructive credential tests | [session-tools-core handlers](../packages/session-tools-core/src/handlers/project-memory.ts), [credential manager](../packages/shared/src/credentials/manager.ts), [credentials tests](../packages/shared/src/credentials/__tests__/memory-credentials.test.ts) |
+| Credential backend durability + manager contract | **FAIL** on concurrent and recovery behaviors under current code | ❌ Storage tests show remaining durability/recovery failures in repository behavior under boundary conditions | [repository tests](../packages/shared/src/project-memory/connections/__tests__/repository.test.ts), [environment tests](../packages/shared/src/project-memory/connections/__tests__/environment.test.ts) |
+| Credential/config saga protocol | **BLOCKED** | ✅ Policy is documented; product enforcement remains missing in code/tests | [credentials types](../packages/shared/src/credentials/types.ts), [dto](../packages/shared/src/project-memory/connections/dto.ts), [repository](../packages/shared/src/project-memory/connections/repository.ts) |
+| Repository FS containment / bounded I/O | **FAIL** | ❌ Symlink containment checks and path-bound guarantees incomplete in enforced mode | [repository tests](../packages/shared/src/project-memory/connections/__tests__/repository.test.ts) |
+| Repository cross-process locking / fenced reread / transaction recovery | **FAIL** | ❌ Two-process same-revision acknowledgement test currently fails | [repository tests](../packages/shared/src/project-memory/connections/__tests__/repository.test.ts) |
+| Migration/version / v1→v2 discriminators | **BLOCKING OPEN QUESTION** | ✅ Saga/version/identity policy freeze is documented in this ADR, but discriminator values, fail behavior, and rollback ownership are not yet enforced in code | [validation tests](../packages/shared/src/project-memory/connections/__tests__/validation.test.ts), [validation contract](../packages/shared/src/project-memory/connections/validation.ts) |
+| Centralized default-deny resolver + authorizer | **BLOCKED** | ✅ Resolver contract is documented in this ADR; centralized deny-first runtime/test enforcement is not yet implemented | [session refs](../packages/shared/src/project-memory/connections/session-refs.ts), [SessionManager](../packages/server-core/src/sessions/SessionManager.ts), [projects handler](../packages/session-tools-core/src/handlers/project-memory.ts) |
+| Qdrant transport SSRF / redirect / DNS / egress policy | **BLOCKED** | ✅ Qdrant transport policy categories are documented; concrete allow/deny decisions, runtime safeguards, tests, and strict failure behavior remain missing | [qdrant transport](../packages/shared/src/project-memory/qdrant.ts), [qdrant tests](../packages/shared/src/project-memory/qdrant.test.ts) |
+| Identity, limits, bytes, numeric safety, global collision | **BLOCKING OPEN QUESTION** | ✅ Decision points (canonical identity tuple, serialized bytes, and overflow policy) are documented; enforcement details and ownership are not yet fully closed | [identity](../packages/shared/src/project-memory/connections/identity.ts), [limits](../packages/shared/src/project-memory/connections/limits.ts), [validation](../packages/shared/src/project-memory/connections/validation.ts) |
+| Worktree topology | **NOT READY** | ❌ No canonical worker topology contract exists outside this ADR | [repo docs](A0-memory-connections-discovery-adr.md) |
+| Verification matrix + cross-platform FS coverage | **NOT COMPLETE** | ❌ Matrix now has concrete commands and outcomes, but Linux/macOS/Windows outcomes are still needed for FS/race evidence | [this ADR + matrix docs](A0-readiness-matrix.md) |
 
 ## C. Default-Deny Resolver (explicit contract)
 
@@ -195,7 +195,7 @@ Wave A implementation may only use static non-production negative probes until r
 
 ## J. Identity, limits, bytes, and numeric safety
 
-### Mandatory choices before A1+ dispatch
+### A4a-owned choices before A1 dispatch
 
 - duplicate physical identity policy: **FORBID** aliasing unless explicit dedupe key migration approved by orchestrator/user
 - canonical identity tuple: normalized origin + collection + embedding dimension
@@ -214,11 +214,11 @@ Wave A implementation may only use static non-production negative probes until r
 
 ## K. Verification matrix policy
 
-A0 acceptance now requires a complete matrix in the companion file with command families and exact outcomes: [A0 readiness matrix](docs/A0-readiness-matrix.md).
+A0 acceptance now requires a complete matrix in the companion file with command families and exact outcomes: [A0 readiness matrix](A0-readiness-matrix.md).
 
 ## L. Mandatory vs adjacent risks
 
-### Wave A mandatory blockers (cannot dispatch)
+### Wave A mandatory blockers (must close before merge/release or Wave B/C)
 - repository durability + symlink/containment
 - cross-process mutation serialization and two-process recovery
 - fault-test isolation + credential-safety harness
@@ -236,4 +236,4 @@ Each deferred item requires a follow-up task with a dedicated gate before touchi
 
 ### Closing statement
 
-This ADR establishes a **blocking gate**: until these sections are resolved and independently accepted, A1+ implementation must remain blocked and **Wave B/C remain forbidden**.
+This ADR establishes the A0 dispatch gate: until this committed doc set is independently accepted, A1+ implementation must remain blocked. After A0 acceptance, A4a may dispatch first, followed by the sequenced Wave A remediation workers above. Merge/release and **Wave B/C remain forbidden** until all mandatory blockers are fixed and independently audited.

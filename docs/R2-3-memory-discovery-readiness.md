@@ -27,9 +27,9 @@
 ### 1.3 Credential/config saga protocol
 
 - **Disposition:** **BLOCKED**
-- **Owner:** **A4a**
+- **Owner:** **A5** for implementation; A0 documents vocabulary only.
 - **Current evidence:** policy is documented in ADR §D with canonical operation + marker vocabulary, but no implementation enforcement in runtime/tests yet.
-- **Required next:** implement/enforce saga intent/journal/rollback behavior for all mutation operations.
+- **Required next:** implement/enforce saga intent/journal/rollback behavior for all mutation operations in A5 after A2/A3/A4a gates pass.
 
 ### 1.4 Repository FS containment / bounded I/O
 
@@ -87,6 +87,13 @@
 - **Disposition:** **BLOCKED**
 - **Current evidence:** A4a scope is now documented, but re-audit of this decision-only gate is not complete.
 - **Required next:** after A0 re-audit, run A4a as pure-contract worker from the audited tip, then re-audit before A1 dispatch.
+
+### 1.13 A8 closure audit status
+
+- **Disposition:** **FINAL GATE**
+- **Owner:** integration/audit worker after A1/A2/A3/A5/A6/A7 are accepted
+- **Current evidence:** no integrated remediation diffs exist yet.
+- **Required next:** independently audit the integrated Wave A branch and rerun the full verification matrix before merge/release or Wave B/C.
 
 ## 2) Exact operation list required for A5 saga
 
@@ -147,15 +154,15 @@ grep -RInE --ignore-case --exclude-dir=.git --exclude-dir=node_modules --exclude
 
 ## 5) Mandatory vs adjacent risk register
 
-### Mandatory Wave A blockers (must close before A1 dispatch)
+### Mandatory Wave A blockers (must close before merge/release or Wave B/C)
 
-1. FS containment and bounded I/O
-2. Cross-process concurrency recovery
-3. Fault-test isolation + credential-safety harness
-4. Resolver default-deny authorizer and binding policy
-5. Saga + recovery journal for all mutation operations
-6. Migration discriminators and rollback semantics
-7. Qdrant transport hardening
+1. FS containment and bounded I/O (A1 remediation)
+2. Cross-process concurrency recovery (A2 remediation)
+3. Fault-test isolation + credential-safety harness (A3 remediation)
+4. Saga + recovery journal for all mutation operations (A5 remediation)
+5. Resolver default-deny authorizer and binding policy (A6 remediation)
+6. Migration discriminators and rollback semantics (A4a decision gate, later migration owner)
+7. Qdrant transport hardening (A7 remediation)
 
 ### Adjacent repo risks (not part of core Wave A, defer with explicit gate)
 
