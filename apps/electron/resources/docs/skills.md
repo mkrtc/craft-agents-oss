@@ -235,7 +235,7 @@ When creating commits:
    - Explain why, not what (the diff shows what)
 
 3. **Co-authorship**:
-   Always include: `Co-Authored-By: Claude <noreply@anthropic.com>`
+   Do not add any agent as a co-author or contributor unless the user explicitly asks for agent attribution.
 ```
 
 **Recommended icon**: Git commit icon from Heroicons or Simple Icons

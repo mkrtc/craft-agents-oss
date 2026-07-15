@@ -3,7 +3,7 @@ import { describe, it, expect, mock, beforeEach } from 'bun:test'
 // Stub the preferences module so we can toggle `getCoAuthorPreference` per test
 // without touching disk. `formatPreferencesForPrompt` is stubbed to '' because
 // it's unrelated to the behavior under test here.
-let mockIncludeCoAuthoredBy = true
+let mockIncludeCoAuthoredBy = false
 mock.module('../../config/preferences.ts', () => ({
   getCoAuthorPreference: () => mockIncludeCoAuthoredBy,
   formatPreferencesForPrompt: () => '',
@@ -50,7 +50,7 @@ describe('system prompt guidance', () => {
 
 describe('includeCoAuthoredBy handling', () => {
   beforeEach(() => {
-    mockIncludeCoAuthoredBy = true
+    mockIncludeCoAuthoredBy = false
   })
 
   it('includes the Git Conventions block when the arg is explicitly true', () => {
@@ -83,10 +83,9 @@ describe('includeCoAuthoredBy handling', () => {
     expect(prompt).not.toContain(CO_AUTHOR_TRAILER)
   })
 
-  // Regression test for #576: Pi-backed sessions called getSystemPrompt without
-  // the 7th arg, and the function silently defaulted to `true`, ignoring the
-  // user's preference. The defensive fallback in getSystemPrompt should now
-  // resolve to getCoAuthorPreference() when the arg is omitted.
+  // Regression test for #576 and explicit-only attribution: callers that omit
+  // the 7th arg must resolve through getCoAuthorPreference(), whose default is
+  // false unless the user explicitly opted in.
   it('falls back to getCoAuthorPreference() when the arg is omitted (#576)', () => {
     mockIncludeCoAuthoredBy = false
 
@@ -104,7 +103,7 @@ describe('includeCoAuthoredBy handling', () => {
     expect(prompt).not.toContain(CO_AUTHOR_TRAILER)
   })
 
-  it('falls back to getCoAuthorPreference() === true when the arg is omitted and the user has not opted out', () => {
+  it('falls back to getCoAuthorPreference() === true only after explicit opt-in', () => {
     mockIncludeCoAuthoredBy = true
 
     const prompt = getSystemPrompt(
@@ -116,6 +115,20 @@ describe('includeCoAuthoredBy handling', () => {
 
     expect(prompt).toContain(GIT_CONVENTIONS_HEADING)
     expect(prompt).toContain(CO_AUTHOR_TRAILER)
+  })
+
+  it('omits the Git Conventions block by default when no explicit opt-in exists', () => {
+    mockIncludeCoAuthoredBy = false
+
+    const prompt = getSystemPrompt(
+      undefined,
+      undefined,
+      '/tmp/workspace',
+      '/tmp/workspace'
+    )
+
+    expect(prompt).not.toContain(GIT_CONVENTIONS_HEADING)
+    expect(prompt).not.toContain(CO_AUTHOR_TRAILER)
   })
 })
 

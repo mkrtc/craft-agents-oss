@@ -371,8 +371,9 @@ export function getSystemPrompt(
   // Optional workspace-project context (injected after preferences, before debug+context-files)
   const projectBlock = projectContext ? formatProjectContextForPrompt(projectContext) : '';
 
-  // Fall back to the user's current preference when callers don't pin/pass a value,
-  // so forgetting the argument can't silently re-enable the co-author trailer (see #576).
+  // Fall back to the user's current preference when callers don't pin/pass a value.
+  // Default is intentionally opt-in only, so forgetting the argument cannot silently
+  // add an agent co-author/contributor trailer.
   const resolvedIncludeCoAuthoredBy = includeCoAuthoredBy ?? getCoAuthorPreference();
 
   // Note: Date/time context is now added to user messages instead of system prompt
@@ -555,9 +556,9 @@ function getCraftAgentEnvironmentMarker(): string {
  *
  * @param workspaceRootPath - Root path of the workspace
  * @param backendName - Backend name for "powered by X" text (default: 'Claude Code')
- * @param includeCoAuthoredBy - Whether to include the Co-Authored-By git trailer instruction (default: true)
+ * @param includeCoAuthoredBy - Whether to include the Co-Authored-By git trailer instruction (default: false; explicit opt-in only)
  */
-function getCraftAssistantPrompt(workspaceRootPath?: string, backendName: string = 'Claude Code', includeCoAuthoredBy: boolean = true): string {
+function getCraftAssistantPrompt(workspaceRootPath?: string, backendName: string = 'Claude Code', includeCoAuthoredBy: boolean = false): string {
   // Default to ${APP_ROOT}/workspaces/{id} if no path provided
   const workspacePath = workspaceRootPath || `${APP_ROOT}/workspaces/{id}`;
 
@@ -735,7 +736,10 @@ When you learn information about the user (their name, timezone, location, langu
 
 ${includeCoAuthoredBy ? `## Git Conventions
 
-When creating git commits, include Craft Agent as a co-author:
+Only add an agent co-author/contributor trailer when the user explicitly asks for one.
+Do not add Craft Agent, Claude, or any other agent as a co-author or contributor by default.
+
+If explicitly requested, use:
 
 \`\`\`
 Co-Authored-By: Craft Agent <agents-noreply@craft.do>

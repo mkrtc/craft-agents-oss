@@ -275,3 +275,50 @@ describe('preferences.uiLanguage', () => {
     });
   });
 });
+
+describe('preferences.includeCoAuthoredBy', () => {
+  it('defaults to false when the preference file does not exist', () => {
+    const { configDir } = setupDir();
+    try {
+      const r = runScript(configDir, `
+        import { getCoAuthorPreference } from '${PREFS_MODULE}';
+        console.log(JSON.stringify({ value: getCoAuthorPreference() }));
+      `);
+      expect(r.exitCode).toBe(0);
+      expect(JSON.parse(r.stdout)).toEqual({ value: false });
+    } finally {
+      rmSync(configDir, { recursive: true, force: true });
+    }
+  });
+
+  it('returns false when the field is missing or explicitly false, and true only after explicit opt-in', () => {
+    const { configDir, prefsFile } = setupDir();
+    try {
+      writeRawPrefs(prefsFile, { name: 'Alice' });
+      let r = runScript(configDir, `
+        import { getCoAuthorPreference } from '${PREFS_MODULE}';
+        console.log(JSON.stringify({ value: getCoAuthorPreference() }));
+      `);
+      expect(r.exitCode).toBe(0);
+      expect(JSON.parse(r.stdout)).toEqual({ value: false });
+
+      writeRawPrefs(prefsFile, { includeCoAuthoredBy: false });
+      r = runScript(configDir, `
+        import { getCoAuthorPreference } from '${PREFS_MODULE}';
+        console.log(JSON.stringify({ value: getCoAuthorPreference() }));
+      `);
+      expect(r.exitCode).toBe(0);
+      expect(JSON.parse(r.stdout)).toEqual({ value: false });
+
+      writeRawPrefs(prefsFile, { includeCoAuthoredBy: true });
+      r = runScript(configDir, `
+        import { getCoAuthorPreference } from '${PREFS_MODULE}';
+        console.log(JSON.stringify({ value: getCoAuthorPreference() }));
+      `);
+      expect(r.exitCode).toBe(0);
+      expect(JSON.parse(r.stdout)).toEqual({ value: true });
+    } finally {
+      rmSync(configDir, { recursive: true, force: true });
+    }
+  });
+});
