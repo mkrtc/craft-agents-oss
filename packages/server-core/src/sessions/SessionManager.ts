@@ -8553,6 +8553,49 @@ export class SessionManager implements ISessionManager {
   }
 
   /**
+   * Set or clear the explicit Memory connection/space selection for a session.
+   * This persists structurally canonical refs; availability/authorization is resolved at runtime.
+   */
+  async setSessionMemorySelection(
+    sessionId: string,
+    selection: {
+      enabledMemorySpaceRefs?: SessionHeader['enabledMemorySpaceRefs']
+      memoryWriteTargetRef?: SessionHeader['memoryWriteTargetRef']
+      memorySelectionMode?: SessionHeader['memorySelectionMode']
+    },
+  ): Promise<void> {
+    const managed = this.sessions.get(sessionId)
+    if (!managed) return
+
+    const normalized = normalizeSessionHeaderMemorySelection({
+      id: managed.id,
+      createdAt: managed.createdAt,
+      workspaceRootPath: managed.workspace.rootPath,
+      messages: [],
+      tokenUsage: managed.tokenUsage,
+      ...selection,
+      lastUsedAt: managed.lastMessageAt ?? Date.now(),
+      messageCount: managed.messages.length,
+    } as unknown as SessionHeader)
+
+    managed.enabledMemorySpaceRefs = normalized.enabledMemorySpaceRefs?.map(ref => ({ ...ref }))
+    managed.memoryWriteTargetRef = normalized.memoryWriteTargetRef ? { ...normalized.memoryWriteTargetRef } : undefined
+    managed.memorySelectionMode = normalized.memorySelectionMode
+    this.setMetadataWriteGuard(managed)
+
+    const changes = {
+      enabledMemorySpaceRefs: managed.enabledMemorySpaceRefs,
+      memoryWriteTargetRef: managed.memoryWriteTargetRef,
+      memorySelectionMode: managed.memorySelectionMode,
+    }
+    this.sendEvent({ type: 'session_metadata_changed', sessionId, changes }, managed.workspace.id)
+    this.persistSession(managed)
+    await this.flushSession(managed.id)
+    const watcher = this.configWatchers.get(managed.workspace.rootPath)
+    watcher?.notifyFileChange(`sessions/${sessionId}/session.jsonl`)
+  }
+
+  /**
    * Set the kanban board column for a session ('todo' | 'in-progress' | 'done').
    * Pass `null` to clear (board falls back to the default column). Independent of sessionStatus.
    */

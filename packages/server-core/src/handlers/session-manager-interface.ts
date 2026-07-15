@@ -23,7 +23,7 @@ import type {
   UnreadSummary,
   ShareResult,
 } from '@craft-agent/shared/protocol'
-import type { SessionBundle, DispatchMode } from '@craft-agent/shared/sessions'
+import type { SessionBundle, DispatchMode, SessionHeader } from '@craft-agent/shared/sessions'
 import type { EventSink } from '../transport'
 
 export interface ISessionManager {
@@ -90,6 +90,11 @@ export interface ISessionManager {
     opts?: { parentSessionId?: string },
   ): Promise<{ labelId: string } | undefined>
   setSessionProjectId(sessionId: string, projectId: string | null): Promise<void>
+  setSessionMemorySelection(sessionId: string, selection: {
+    enabledMemorySpaceRefs?: SessionHeader['enabledMemorySpaceRefs']
+    memoryWriteTargetRef?: SessionHeader['memoryWriteTargetRef']
+    memorySelectionMode?: SessionHeader['memorySelectionMode']
+  }): Promise<void>
   setKanbanColumn(sessionId: string, column: string | null): Promise<void>
   setTaskNodeCount(sessionId: string, count: number): Promise<void>
   adoptGeneratedTaskOrchestrator(
