@@ -1,8 +1,13 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { getDefaultProjectMemoryOptions, QdrantProjectMemoryStore } from './qdrant.ts';
+import {
+  QDRANT_MAX_REQUEST_BODY_BYTES,
+  getDefaultProjectMemoryOptions,
+  QdrantProjectMemoryStore,
+} from './qdrant.ts';
 
 const originalFetch = globalThis.fetch;
 const originalDimension = process.env.CRAFT_QDRANT_DIMENSION;
+const originalUrl = process.env.CRAFT_QDRANT_URL;
 
 function jsonResponse(body: unknown, init: ResponseInit = {}): Response {
   return new Response(JSON.stringify(body), {
@@ -16,6 +21,8 @@ afterEach(() => {
   globalThis.fetch = originalFetch;
   if (originalDimension === undefined) delete process.env.CRAFT_QDRANT_DIMENSION;
   else process.env.CRAFT_QDRANT_DIMENSION = originalDimension;
+  if (originalUrl === undefined) delete process.env.CRAFT_QDRANT_URL;
+  else process.env.CRAFT_QDRANT_URL = originalUrl;
 });
 
 describe('QdrantProjectMemoryStore', () => {
@@ -28,6 +35,78 @@ describe('QdrantProjectMemoryStore', () => {
 
     process.env.CRAFT_QDRANT_DIMENSION = '768';
     expect(getDefaultProjectMemoryOptions().dimension).toBe(768);
+  });
+
+  test('canonicalizes trailing-dot qdrant URL in defaults', () => {
+    process.env.CRAFT_QDRANT_URL = 'https://example.com.:443';
+    expect(getDefaultProjectMemoryOptions().url).toBe('https://example.com/');
+  });
+
+  test('rejects qdrant URL with embedded credentials in explicit store config', async () => {
+    delete process.env.CRAFT_QDRANT_URL;
+    let fetchCalled = false;
+    globalThis.fetch = (async () => {
+      fetchCalled = true;
+      return jsonResponse({ result: { config: { params: { vectors: { size: 384, distance: 'Cosine' } } } } });
+    }) as unknown as typeof fetch;
+
+    const store = new QdrantProjectMemoryStore({
+      enabled: true,
+      url: 'https://user:pass@example.com',
+      dimension: 384,
+    });
+
+    await expect(store.status()).rejects.toThrow('Invalid Qdrant URL: https://user:pass@example.com');
+    expect(fetchCalled).toBe(false);
+  });
+
+  test('enforces request body limits before second request', async () => {
+    let calls = 0;
+    globalThis.fetch = (async () => {
+      calls += 1;
+      return jsonResponse({
+        result: {
+          config: {
+            params: {
+              vectors: { size: 384, distance: 'Cosine' },
+            },
+          },
+        },
+      });
+    }) as unknown as typeof fetch;
+
+    const store = new QdrantProjectMemoryStore({ enabled: true });
+    await expect(
+      store.search({
+        query: 'x'.repeat(QDRANT_MAX_REQUEST_BODY_BYTES + 1),
+        scopes: [{ scope: 'global' }],
+      }),
+    ).rejects.toThrow('Qdrant request body exceeds');
+    expect(calls).toBe(1);
+  });
+
+  test('rejects request with unsafe redirect/credential handling options', async () => {
+    let lastRequest: RequestInit | undefined;
+    globalThis.fetch = ((_, init) => {
+      lastRequest = init;
+      return Promise.resolve(
+        jsonResponse({
+          result: {
+            config: {
+              params: {
+                vectors: { size: 384, distance: 'Cosine' },
+              },
+            },
+          },
+        }),
+      );
+    }) as unknown as typeof fetch;
+
+    const store = new QdrantProjectMemoryStore({ enabled: true, dimension: 384 });
+    const status = await store.status();
+    expect(status.ok).toBe(true);
+    expect(lastRequest?.redirect).toBe('error');
+    expect(lastRequest?.credentials).toBe('omit');
   });
 
   test('rejects empty and malformed search scopes before calling Qdrant', async () => {

@@ -1,3 +1,4 @@
+import { canonicalizeMemoryUrl } from './connections/validation.ts';
 import type {
   ProjectMemoryAddInput,
   ProjectMemoryPayload,
@@ -46,6 +47,11 @@ class QdrantRequestError extends Error {
 
 const DEFAULT_URL = 'http://127.0.0.1:6333';
 const DEFAULT_COLLECTION = 'craft_memory';
+const DEFAULT_FETCH_TIMEOUT_MS = 5_000;
+const DEFAULT_MAX_REQUEST_BODY_BYTES = 1_048_576;
+
+export const QDRANT_FETCH_TIMEOUT_MS = DEFAULT_FETCH_TIMEOUT_MS;
+export const QDRANT_MAX_REQUEST_BODY_BYTES = DEFAULT_MAX_REQUEST_BODY_BYTES;
 
 function parseProjectMemoryDimension(value: string | undefined): number {
   if (!value) return PROJECT_MEMORY_VECTOR_DIMENSION;
@@ -56,10 +62,39 @@ function parseProjectMemoryDimension(value: string | undefined): number {
   return parsed;
 }
 
+/**
+ * Canonicalize a Qdrant URL for transport usage.
+ *
+ * Falls back to DEFAULT_URL only when caller-provided input is undefined or invalid,
+ * keeping deterministic origin normalization in lockstep with validation.
+ */
+export function canonicalizeProjectMemoryUrl(rawUrl: string | undefined, fallbackUrl: string): string {
+  return canonicalizeMemoryUrl(rawUrl) ?? fallbackUrl;
+}
+
+/**
+ * Enforce transport request body caps for defensive memory safety.
+ */
+function enforceBodyLimit(body: string): string {
+  const bytes = new TextEncoder().encode(body).length;
+  if (bytes > DEFAULT_MAX_REQUEST_BODY_BYTES) {
+    throw new Error(`Qdrant request body exceeds ${DEFAULT_MAX_REQUEST_BODY_BYTES} bytes`);
+  }
+  return body;
+}
+
+function requireSafeUrl(rawUrl: string): string {
+  const canonical = canonicalizeMemoryUrl(rawUrl);
+  if (!canonical) {
+    throw new Error(`Invalid Qdrant URL: ${rawUrl}`);
+  }
+  return canonical;
+}
+
 export function getDefaultProjectMemoryOptions(): Required<Omit<QdrantProjectMemoryOptions, 'apiKey'>> & { apiKey?: string } {
   return {
     enabled: process.env.CRAFT_PROJECT_MEMORY_ENABLED !== '0',
-    url: process.env.CRAFT_QDRANT_URL || DEFAULT_URL,
+    url: canonicalizeProjectMemoryUrl(process.env.CRAFT_QDRANT_URL, DEFAULT_URL),
     apiKey: process.env.CRAFT_QDRANT_API_KEY || undefined,
     collection: process.env.CRAFT_QDRANT_COLLECTION || DEFAULT_COLLECTION,
     dimension: parseProjectMemoryDimension(process.env.CRAFT_QDRANT_DIMENSION),
@@ -103,7 +138,12 @@ export class QdrantProjectMemoryStore implements ProjectMemoryStore {
   constructor(private readonly options: QdrantProjectMemoryOptions = {}) {}
 
   private get resolved() {
-    return { ...getDefaultProjectMemoryOptions(), ...this.options };
+    const base = getDefaultProjectMemoryOptions();
+    return {
+      ...base,
+      ...this.options,
+      url: this.options.url === undefined ? base.url : requireSafeUrl(this.options.url),
+    };
   }
 
   private headers(): Record<string, string> {
@@ -113,20 +153,33 @@ export class QdrantProjectMemoryStore implements ProjectMemoryStore {
     return headers;
   }
 
-  private async request<T>(path: string, init?: RequestInit): Promise<T> {
+  private async request<T>(path: string, init: Omit<RequestInit, 'body'> & { body?: string } = {}): Promise<T> {
     const { url } = this.resolved;
-    const res = await fetch(`${url.replace(/\/$/, '')}${path}`, {
-      ...init,
-      headers: {
-        ...this.headers(),
-        ...(init?.headers ?? {}),
-      },
-    });
-    if (!res.ok) {
-      const text = await res.text().catch(() => '');
-      throw new QdrantRequestError(res.status, res.statusText, `Qdrant ${res.status} ${res.statusText}${text ? `: ${text}` : ''}`);
+    const safeBody = init.body === undefined ? undefined : enforceBodyLimit(init.body);
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), DEFAULT_FETCH_TIMEOUT_MS);
+
+    try {
+      const response = await fetch(`${url.replace(/\/$/, '')}${path}`, {
+        ...init,
+        body: safeBody,
+        redirect: 'error',
+        credentials: 'omit',
+        signal: init.signal ?? controller.signal,
+        headers: {
+          ...this.headers(),
+          ...(init?.headers ?? {}),
+        },
+      });
+      if (!response.ok) {
+        const text = await response.text().catch(() => '');
+        throw new QdrantRequestError(response.status, response.statusText, `Qdrant ${response.status} ${response.statusText}${text ? `: ${text}` : ''}`);
+      }
+      return await response.json() as T;
+    } finally {
+      clearTimeout(timer);
     }
-    return await res.json() as T;
   }
 
   async status(): Promise<ProjectMemoryStatus> {

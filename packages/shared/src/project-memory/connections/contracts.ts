@@ -18,6 +18,7 @@ export * from './types.ts';
 export * from './identity.ts';
 export * from './validation.ts';
 export * from './dto.ts';
+export * from './resolver.ts';
 export * from './session-refs.ts';
 export {
   CANONICAL_UUID_PATTERN,

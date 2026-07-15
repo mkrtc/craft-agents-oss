@@ -111,6 +111,13 @@ function validateName(value: unknown, field: string, maxCodePoints: number, erro
 /**
  * Validate and canonicalize a Qdrant base URL. Returns the canonical origin
  * (scheme + host + trailing slash), or `undefined` (with errors) on rejection.
+ *
+ * Canonicalization behavior is intentionally strict and deterministic:
+ * - lowercase hostnames,
+ * - default ports are omitted, equivalent origins are equal,
+ * - trailing-dot hostnames are normalized (RFC-3490/host alias handling,
+ *   e.g. `example.com.` -> `example.com`),
+ * - all credential material is rejected.
  */
 function validateUrl(value: unknown, errors: string[]): string | undefined {
   if (typeof value !== 'string') {
@@ -161,10 +168,19 @@ function validateUrl(value: unknown, errors: string[]): string | undefined {
     errors.push('url must be an origin only (no path)');
     return undefined;
   }
-  // Canonical origin: scheme + host (default ports collapsed by `origin`),
-  // plus a single trailing slash. Equivalent origins (e.g. `:80` vs no port)
-  // normalize to the same string.
-  return `${parsed.origin}/`;
+
+  const host = parsed.hostname.replace(/\.+$/u, '');
+  const hostForOrigin = host.includes(':') && !host.startsWith('[') ? `[${host}]` : host;
+  const port = parsed.port
+    ? (parsed.protocol === 'http:' && parsed.port === '80' || parsed.protocol === 'https:' && parsed.port === '443'
+      ? ''
+      : `:${parsed.port}`)
+    : '';
+
+  // Canonical origin: scheme + host (default ports collapsed),
+  // plus a single trailing slash. Equivalent origins (e.g. `:80` vs no port,
+  // trailing-dot hosts) normalize to the same string.
+  return `${parsed.protocol}//${hostForOrigin}${port}/`;
 }
 
 /**

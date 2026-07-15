@@ -82,6 +82,12 @@ describe('canonicalizeMemoryUrl (security contract)', () => {
     expect(canonicalizeMemoryUrl('https://host:443')).toBe('https://host/');
   });
 
+  test('normalizes trailing-dot hostnames deterministically', () => {
+    expect(canonicalizeMemoryUrl('http://example.com./')).toBe('http://example.com/');
+    expect(canonicalizeMemoryUrl('http://EXAMPLE.COM...:80')).toBe('http://example.com/');
+    expect(canonicalizeMemoryUrl('https://example.com.:443')).toBe('https://example.com/');
+  });
+
   test('rejects userinfo, query, fragment, non-root path, control chars, and non-http', () => {
     expect(canonicalizeMemoryUrl('http://user:pass@host:6333')).toBeNull();
     expect(canonicalizeMemoryUrl('http://host:6333/?q=1')).toBeNull();
