@@ -1,14 +1,20 @@
 # R2-3 Appendix — Memory Discovery Readiness and Risk Register
 
-**Date (authoritative):** Wednesday, July 15, 2026 at 05:19 PM GMT+3
+**Date (authoritative):** Wednesday, July 15, 2026 at 05:25 PM GMT+3
 **Purpose:** authoritative appendix for A0 correction, containing finding disposition and policy freezes for future executor prompts.
+
+## Decision ownership and non-dispatch scope
+
+- Byte cap/version/identity/limit policy questions: **owner `A4a`**.
+- Qdrant transport SSRF/egress policy questions: **owner `A7`**.
+- Business-policy exceptions (for example, alias migration exceptions): **owner `orchestrator/user decision`**.
+- Unresolved items stay **BLOCKING OPEN QUESTION** until their owner marks them accepted.
 
 ## 1) P0/P1 finding disposition (detailed)
 
 ### 1.1 Credential fault-test isolation / real `~/.craft-agent` credential safety
 
 - **Disposition:** **BLOCKED**
-- **Requirement:** introduce injectable credential/config/fs/clock hooks for destructive tests; forbid fault tests that touch default production root.
 - **Current evidence:** hooks are not contractually required in docs/tests; no explicit “do not run on real path” gate in tool/process docs.
 - **Required next:** add explicit test harness constraints in Wave A docs and enforce in test scaffolding.
 
@@ -20,9 +26,10 @@
 
 ### 1.3 Credential/config saga protocol
 
-- **Disposition:** **NOT READY**
-- **Current evidence:** no durable intent / recovery journal and idempotency contract is documented for config-mutating operations.
-- **Required next:** add saga intent, journal checkpointing, and replay-before-next-operation semantics.
+- **Disposition:** **BLOCKED**
+- **Owner:** **A4a**
+- **Current evidence:** policy is documented in ADR §D with canonical operation + marker vocabulary, but no implementation enforcement in runtime/tests yet.
+- **Required next:** implement/enforce saga intent/journal/rollback behavior for all mutation operations.
 
 ### 1.4 Repository FS containment / bounded I/O
 
@@ -39,31 +46,34 @@
 ### 1.6 Migration/version policy (v1→v2)
 
 - **Disposition:** **BLOCKING OPEN QUESTION**
-- **Current evidence:** explicit discriminators for `foundation-v1`, `pre-repair-v1`, and `current-v1` are not implemented as gating metadata.
+- **Owner:** **A4a**
+- **Current evidence:** explicit discriminators for `foundation-v1`, `pre-repair-v1`, and `current-v1` are defined as policy but not yet enforced in implementation.
 - **Required next:** decide migration constants, idempotent pre-validation detector, rollback/backup policy, and corrupted/future-version fail-closed behavior.
 
 ### 1.7 Default-deny resolver / authorizer
 
-- **Disposition:** **NOT READY**
-- **Current evidence:** resolver semantics are fragmented and not yet a single audited gate.
-- **Required next:** create explicit resolver contract in one place with deny-default and no-callback/no-network/no-secret-on-deny behavior.
+- **Disposition:** **BLOCKED**
+- **Current evidence:** ADR documents the resolver contract, but centralized deny-first behavior is still missing in product enforcement.
+- **Required next:** enforce policy in resolver + authorizer handlers and add contract tests before dispatch.
 
 ### 1.8 Qdrant transport / SSRF / egress policy
 
 - **Disposition:** **BLOCKED**
+- **Owner:** **A7**
 - **Current evidence:** transport policy is not yet fully enumerated for redirects, DNS, IPv4/IPv6, proxy, URLs with credentials, or timeout/body caps.
 - **Required next:** define/implement deny rules before using arbitrary stored URLs at runtime.
 
 ### 1.9 Identity, limits, serialized bytes, safe integers, global collision
 
-- **Disposition:** **NOT READY**
-- **Current evidence:** identity hardening (duplicate/alias policy, serialized serialization, safe-integer overflow, global collision guarantees) not yet locked as gate requirements.
+- **Disposition:** **BLOCKING OPEN QUESTION**
+- **Owner:** **A4a**
+- **Current evidence:** identity hardening (duplicate/alias policy, serialized serialization, safe-integer overflow, global collision guarantees) is documented but not yet enforced in code.
 - **Required next:** codify and verify these constraints as mandatory before A1.
 
 ### 1.10 Worktree topology / worker collision policy
 
 - **Disposition:** **NOT READY**
-- **Current evidence:** no committed topology contract prior to this correction.
+- **Current evidence:** contract now added in ADR; file ownership still needs follow-up re-audit before worker dispatch.
 - **Required next:** enforce base SHA + expected file set + serial integration for each worker.
 
 ### 1.11 Verification matrix / cross-platform matrix
@@ -72,18 +82,37 @@
 - **Current evidence:** matrix had false PASS claims and incomplete OS-specific evidence.
 - **Required next:** maintain a live matrix with command families and Linux/macOS/Windows outcomes.
 
+### 1.12 A4a contract gate status
+
+- **Disposition:** **BLOCKED**
+- **Current evidence:** A4a scope is now documented, but re-audit of this decision-only gate is not complete.
+- **Required next:** after A0 re-audit, run A4a as pure-contract worker from the audited tip, then re-audit before A1 dispatch.
+
 ## 2) Exact operation list required for A5 saga
 
+### Canonical operation names
+
 - `createConnection`
-- `updateConnection`
+- `updateConnectionConfig`
 - `deleteConnection`
 - `setApiKey`
 - `replaceApiKey`
 - `clearApiKey`
 - `setCredentialMode`
-- `legacyUppercaseMigration`
+- `migrateLegacyUppercaseCredentials`
+- `startupRecovery`
 
-For each operation: `intent -> prepare -> acquire lock -> mutate -> verify -> checkpoint -> emit recovery marker -> release`.
+### Canonical marker steps
+
+`prepare` → `stageSecret` → `commitConfig` → `commitCredential` → `reconcile` → `complete` → `rollback`
+
+### Required per-operation sequence
+
+For all mutation operations (`createConnection`, `updateConnectionConfig`, `deleteConnection`, `setApiKey`, `replaceApiKey`, `clearApiKey`, `setCredentialMode`, `migrateLegacyUppercaseCredentials`):
+`prepare` → `stageSecret` → `commitConfig` → `commitCredential` → `reconcile` → `complete`; rollback uses `rollback`.
+
+For `startupRecovery`:
+`prepare` → `reconcile` → `complete` with `rollback` on failure.
 
 ## 3) Default-deny resolver freeze list
 
@@ -98,13 +127,21 @@ For each operation: `intent -> prepare -> acquire lock -> mutate -> verify -> ch
 - no callbacks/network/credential access on deny
 - secret-free output shape
 - no fallback from managed refs to raw legacy store
+- **Product enforcement status:** policy defined; dispatch remains BLOCKED until handlers/tests enforce it.
 
 ## 4) Verification outcomes snapshot (authoritative)
 
-- `/home/mkrtc/.bun/bin/bun test` targeted files: `92 pass / 3 fail / 0 error`.
-- Independent audit outcome (provided): `98 pass / 8 fail / 4 error` across `106 tests`.
-- Failures include repository symlink containment, stale-backup mutation on EACCES, and two-process same-revision acknowledgment.
-- Some suite loads failed due missing test dependencies in the broader run.
+- `/home/mkrtc/.bun/bin/bun test packages/shared/src/project-memory/connections/__tests__/repository.test.ts packages/shared/src/project-memory/connections/__tests__/validation.test.ts packages/shared/src/project-memory/connections/__tests__/environment.test.ts packages/shared/src/project-memory/connections/__tests__/session-refs.test.ts packages/shared/src/project-memory/connections/__tests__/dto.test.ts packages/shared/src/project-memory/connections/__tests__/boundary.test.ts`: `92 pass` / `3 fail` / `0 error` (95 tests).
+- `/home/mkrtc/.bun/bin/bun test packages/shared/src/credentials/__tests__/memory-credentials.test.ts`: **NOT RUN in this doc correction pass**.
+- `/home/mkrtc/.bun/bin/bun test packages/session-tools-core/src/**/*.test.ts`: **NOT RUN in this doc correction pass**.
+- `/home/mkrtc/.bun/bin/bun test packages/server-core/src/**/*.test.ts`: **NOT RUN in this doc correction pass**.
+- `historical auditor run, exact command unavailable; not acceptable as future gate`: `98 pass` / `8 fail` / `4 error` across `106 tests`, with additional failures from missing dependencies and setup mismatch.
+- **No scanner command exists as a dedicated script in this repository.** Use fallback check below for manual reproducibility:
+
+```bash
+cd /home/mkrtc/Desktop/projects/worktrees/craft-agents-oss-memory-connections && \
+git grep -RIn --exclude-dir=.git --exclude-dir=node_modules --exclude-dir=dist --exclude-dir=build -n -e "AKIA[0-9A-Z]{16}" -e "(?i)api[_-]?key" -e "(?i)bearer\s+[A-Za-z0-9._-]+" -e "(?i)secret" -e "(?i)password"
+```
 
 ## 5) Mandatory vs adjacent risk register
 
