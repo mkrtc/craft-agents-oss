@@ -1,5 +1,5 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'bun:test'
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { RPC_CHANNELS } from '@craft-agent/shared/protocol'
@@ -250,8 +250,8 @@ describe('project memory RPC handlers', () => {
     expect(initial.connections).toHaveLength(1)
     expect(initial.connections[0]!.isEnvironment).toBe(true)
 
-    const created = await create(ctx(), buildMemoryConnectionCreateInput(0, 'Default'))
-    expect(created.hasApiKey).toBe(false)
+    const created = await create(ctx(), { ...buildMemoryConnectionCreateInput(0, 'Default'), apiKey: '  sk-test-default  ' })
+    expect(created.hasApiKey).toBe(true)
     expect('apiKey' in created).toBe(false)
 
     const next = await snapshot(ctx())
@@ -262,7 +262,7 @@ describe('project memory RPC handlers', () => {
     const stored = next.connections.find((item) => item.isEnvironment === false)
 
     expect(typeof environment?.hasApiKey).toBe('boolean')
-    expect(stored?.hasApiKey).toBe(false)
+    expect(stored?.hasApiKey).toBe(true)
     expect(stored?.connectionId).toBe(created.connectionId)
     expect(stored?.revision).toBe(1)
   })
@@ -312,8 +312,10 @@ describe('project memory RPC handlers', () => {
       connectionId: created.connectionId,
       expectedRevision: created.revision,
       name: 'Primary Updated',
+      apiKey: 'sk-updated',
     })
     expect(updated.name).toBe('Primary Updated')
+    expect(updated.hasApiKey).toBe(true)
 
     await expect(update(ctx(), {
       connectionId: created.connectionId,

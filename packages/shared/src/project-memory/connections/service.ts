@@ -12,6 +12,8 @@ import { MemoryError } from './types.ts';
 import type { CredentialManager } from '../../credentials/manager.ts';
 
 export interface CreateMemoryConnectionServiceInput extends CreateMemoryConnectionInput {
+  /** Optional expected root revision for optimistic concurrency. Defaults to current root for direct service callers. */
+  expectedRootRevision?: number;
   /** Optional API key to persist in credentials store. */
   apiKey?: string;
 }
@@ -116,9 +118,9 @@ export class MemoryConnectionService {
   }
 
   async createConnection(input: CreateMemoryConnectionServiceInput): Promise<MemoryConnectionSummaryDto> {
-    const { apiKey, ...connectionInput } = input;
+    const { apiKey, expectedRootRevision: requestedRootRevision, ...connectionInput } = input;
     const normalizedApiKey = apiKey !== undefined ? normalizeApiKey(apiKey) : undefined;
-    const expectedRootRevision = this.repository.getRootRevision();
+    const expectedRootRevision = requestedRootRevision ?? this.repository.getRootRevision();
     const credentialMode = normalizedApiKey !== undefined ? 'stored-api-key' : 'none';
 
     const connection = await this.repository

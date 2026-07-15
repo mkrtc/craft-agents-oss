@@ -21,6 +21,7 @@ import {
   environmentMemoryConnectionHasApiKey,
   getProjectMemoryStore,
   MemoryConnectionRepository,
+  MemoryConnectionService,
   toMemoryConnectionDetailDto,
   toMemoryConnectionSummaryDto,
   type MemoryConnectionConfig,
@@ -117,6 +118,13 @@ function getMemoryConnectionRepo(): MemoryConnectionRepository {
     memoryConnectionRepository.current = new MemoryConnectionRepository()
   }
   return memoryConnectionRepository.current
+}
+
+function getMemoryConnectionService(): MemoryConnectionService {
+  return new MemoryConnectionService({
+    repository: getMemoryConnectionRepo(),
+    credentialManager: getCredentialManager(),
+  })
 }
 
 function getEnvironmentConnection(repo: MemoryConnectionRepository): MemoryConnectionConfig {
@@ -426,34 +434,31 @@ export function registerProjectsHandlers(server: RpcServer, deps: HandlerDeps): 
   // Create a new memory connection entry (root revision required).
   server.handle(RPC_CHANNELS.projects.MEMORY_CONNECTION_CREATE, async (_ctx, input: ProjectMemoryConnectionCreateRequest): Promise<ProjectMemoryConnectionSummary> => {
     if (!input || typeof input !== 'object') throw new Error('Invalid memory connection create input')
-    const repo = getMemoryConnectionRepo()
-    const { expectedRootRevision, name, url, collection, embedding, enabled, proactiveRemoteSearch } = input
-    const created = await repo.createConnection({
+    const { expectedRootRevision, name, url, collection, embedding, enabled, proactiveRemoteSearch, apiKey } = input
+    return getMemoryConnectionService().createConnection({
+      expectedRootRevision,
       name,
       url,
       collection,
       embedding,
       enabled,
       proactiveRemoteSearch,
-    }, expectedRootRevision)
-    return buildConnectionSummary(created, false)
+      apiKey,
+    })
   })
 
   // Update name/enabled/proactiveRemoteSearch on a stored memory connection.
   server.handle(RPC_CHANNELS.projects.MEMORY_CONNECTION_UPDATE, async (_ctx, input: ProjectMemoryConnectionUpdateRequest): Promise<ProjectMemoryConnectionSummary> => {
     if (!input || typeof input !== 'object') throw new Error('Invalid memory connection update input')
-    const repo = getMemoryConnectionRepo()
     const { connectionId, expectedRevision, ...patch } = input
-    const updated = await repo.updateConnection(connectionId, patch, expectedRevision)
-    return buildConnectionSummary(updated, false)
+    return getMemoryConnectionService().patchConnection({ connectionId, expectedRevision, ...patch })
   })
 
   // Delete a stored memory connection by id (root revision required).
   server.handle(RPC_CHANNELS.projects.MEMORY_CONNECTION_DELETE, async (_ctx, input: ProjectMemoryConnectionDeleteRequest): Promise<{ success: true }> => {
     if (!input || typeof input !== 'object') throw new Error('Invalid memory connection delete input')
-    const repo = getMemoryConnectionRepo()
     const { connectionId, expectedRootRevision } = input
-    await repo.deleteConnection(connectionId, expectedRootRevision)
+    await getMemoryConnectionService().deleteConnection(connectionId, expectedRootRevision)
     return { success: true }
   })
 

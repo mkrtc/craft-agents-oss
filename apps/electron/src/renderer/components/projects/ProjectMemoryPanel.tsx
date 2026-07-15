@@ -40,6 +40,7 @@ export function ProjectMemoryPanel({ projectIdOrSlug }: ProjectMemoryPanelProps)
   const [connectionName, setConnectionName] = React.useState('')
   const [connectionUrl, setConnectionUrl] = React.useState('')
   const [connectionCollection, setConnectionCollection] = React.useState('craft_memory')
+  const [connectionApiKey, setConnectionApiKey] = React.useState('')
   const [creatingConnection, setCreatingConnection] = React.useState(false)
   const [mutatingConnectionId, setMutatingConnectionId] = React.useState<string | null>(null)
 
@@ -152,6 +153,7 @@ export function ProjectMemoryPanel({ projectIdOrSlug }: ProjectMemoryPanelProps)
     const name = connectionName.trim()
     const url = connectionUrl.trim()
     const collection = connectionCollection.trim()
+    const apiKey = connectionApiKey.trim()
     if (!name || !url || !collection) {
       toast.error('Connection name, URL, and collection are required')
       return
@@ -167,11 +169,13 @@ export function ProjectMemoryPanel({ projectIdOrSlug }: ProjectMemoryPanelProps)
         embedding: { model: 'craft-local-hash-v1', dimension: status?.dimension || 384 },
         enabled: true,
         proactiveRemoteSearch: false,
+        apiKey: apiKey || undefined,
       })
       toast.success('Memory connection created')
       setConnectionName('')
       setConnectionUrl('')
       setConnectionCollection('craft_memory')
+      setConnectionApiKey('')
       await Promise.all([loadConnections(), loadStatus()])
     } catch (err) {
       console.error('[ProjectMemoryPanel] Failed to create memory connection:', err)
@@ -179,7 +183,7 @@ export function ProjectMemoryPanel({ projectIdOrSlug }: ProjectMemoryPanelProps)
     } finally {
       setCreatingConnection(false)
     }
-  }, [connectionCollection, connectionName, connectionUrl, connectionsSnapshot?.revision, loadConnections, loadStatus, status?.dimension])
+  }, [connectionApiKey, connectionCollection, connectionName, connectionUrl, connectionsSnapshot?.revision, loadConnections, loadStatus, status?.dimension])
 
   const handleToggleConnection = React.useCallback(async (connection: ProjectMemoryConnectionSummary) => {
     setMutatingConnectionId(connection.connectionId)
@@ -244,11 +248,13 @@ export function ProjectMemoryPanel({ projectIdOrSlug }: ProjectMemoryPanelProps)
         name={connectionName}
         url={connectionUrl}
         collection={connectionCollection}
+        apiKey={connectionApiKey}
         creating={creatingConnection}
         mutatingConnectionId={mutatingConnectionId}
         onNameChange={setConnectionName}
         onUrlChange={setConnectionUrl}
         onCollectionChange={setConnectionCollection}
+        onApiKeyChange={setConnectionApiKey}
         onRefresh={loadConnections}
         onCreate={handleCreateConnection}
         onToggle={handleToggleConnection}
@@ -368,11 +374,13 @@ function MemoryConnectionsSection({
   name,
   url,
   collection,
+  apiKey,
   creating,
   mutatingConnectionId,
   onNameChange,
   onUrlChange,
   onCollectionChange,
+  onApiKeyChange,
   onRefresh,
   onCreate,
   onToggle,
@@ -384,11 +392,13 @@ function MemoryConnectionsSection({
   name: string
   url: string
   collection: string
+  apiKey: string
   creating: boolean
   mutatingConnectionId: string | null
   onNameChange: (value: string) => void
   onUrlChange: (value: string) => void
   onCollectionChange: (value: string) => void
+  onApiKeyChange: (value: string) => void
   onRefresh: () => void
   onCreate: () => void
   onToggle: (connection: ProjectMemoryConnectionSummary) => void
@@ -418,7 +428,7 @@ function MemoryConnectionsSection({
           </div>
         )}
 
-        <div className="grid gap-3 md:grid-cols-[1fr_1.4fr_1fr_auto]">
+        <div className="grid gap-3 md:grid-cols-[1fr_1.4fr_1fr_1fr_auto]">
           <Field label="Name">
             <Input value={name} onChange={(e) => onNameChange(e.target.value)} placeholder="Primary Qdrant" disabled={creating} />
           </Field>
@@ -427,6 +437,9 @@ function MemoryConnectionsSection({
           </Field>
           <Field label="Collection">
             <Input value={collection} onChange={(e) => onCollectionChange(e.target.value)} placeholder="craft_memory" disabled={creating} />
+          </Field>
+          <Field label="API key (optional)">
+            <Input value={apiKey} onChange={(e) => onApiKeyChange(e.target.value)} placeholder="Stored securely" type="password" disabled={creating} />
           </Field>
           <div className="flex items-end">
             <Button onClick={onCreate} disabled={creating || !name.trim() || !url.trim() || !collection.trim()}>

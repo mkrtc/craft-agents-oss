@@ -83,7 +83,8 @@ export interface CreateMemoryConnectionRequestDto {
   embedding: MemoryEmbeddingIdentity;
   enabled?: boolean;
   proactiveRemoteSearch?: boolean;
-  // NOTE: no apiKey — the secret is set through the credential flow separately.
+  /** Write-only secret. Stored in credentials, never returned in config/DTO responses. */
+  apiKey?: string;
 }
 
 export interface PatchMemoryConnectionRequestDto {
@@ -92,6 +93,8 @@ export interface PatchMemoryConnectionRequestDto {
   name?: string;
   enabled?: boolean;
   proactiveRemoteSearch?: boolean;
+  /** Write-only secret operation: omit keeps existing key, null deletes, string sets/replaces. */
+  apiKey?: string | null;
 }
 
 export interface DeleteMemoryConnectionRequestDto {
