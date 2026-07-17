@@ -1,26 +1,14 @@
 /**
  * Config File Watcher
  *
- * Watches configuration files for changes and triggers callbacks.
- * Uses recursive directory watching for simplicity and reliability.
- *
- * Watched paths:
- * - ~/.craft-agent/config.json - Main app configuration
- * - ~/.craft-agent/preferences.json - User preferences
- * - ~/.craft-agent/theme.json - App-level theme overrides
- * - ~/.craft-agent/themes/*.json - Preset theme files (app-level)
- * - ~/.craft-agent/workspaces/{slug}/ - Workspace directory (recursive)
- *   - sources/{slug}/config.json, guide.md, permissions.json
- *   - skills/{slug}/SKILL.md, icon.*
- *   - sessions/{id}/session.jsonl (header metadata only)
- *   - label-skill-bindings.json
- *   - permissions.json
+ * Watches a fixed matrix of global/workspace control directories plus direct
+ * source, skill, and session children. All observation is non-recursive and
+ * leased through the process-wide DirectoryWatchBroker.
  */
 
-import { watch, existsSync, readdirSync, statSync, readFileSync, mkdirSync } from 'fs';
-import { join, dirname, basename, relative } from 'path';
+import { existsSync, lstatSync, opendirSync, realpathSync, mkdirSync } from 'fs';
+import { join, relative, resolve, isAbsolute } from 'path';
 import { platform } from 'os';
-import type { FSWatcher } from 'fs';
 import { CONFIG_DIR } from './paths.ts';
 import { debug } from '../utils/debug.ts';
 import { expandPath } from '../utils/paths.ts';
@@ -42,7 +30,12 @@ import {
   downloadSourceIcon,
 } from '../sources/storage.ts';
 import { permissionsConfigCache, getAppPermissionsDir } from '../agent/permissions-config.ts';
-import { getWorkspacePath, getWorkspaceSourcesPath, getWorkspaceSkillsPath } from '../workspaces/storage.ts';
+import {
+  getWorkspacePath,
+  getWorkspaceSourcesPath,
+  getWorkspaceSkillsPath,
+  getWorkspaceSessionsPath,
+} from '../workspaces/storage.ts';
 import type { LoadedSkill } from '../skills/types.ts';
 import { loadSkill, loadAllSkills, invalidateSkillsCache, skillNeedsIconDownload, downloadSkillIcon } from '../skills/storage.ts';
 import {
@@ -56,17 +49,33 @@ import { AUTOMATIONS_CONFIG_FILE } from '../automations/constants.ts';
 import { LABEL_SKILL_BINDINGS_FILE } from '../label-skill-bindings/types.ts';
 import { loadAppTheme, loadPresetThemes, loadPresetTheme, getAppThemesDir } from './storage.ts';
 import type { ThemeOverrides, PresetTheme } from './theme.ts';
+import {
+  DEFAULT_WATCH_DIRECTORY_CAPACITY,
+  getProcessWatchBroker,
+  type DirectoryWatchBroker,
+  type DirectoryWatchLease,
+  type DirectoryWatchRequest,
+} from './watch-broker.ts';
+import type {
+  WatchBrokerSnapshot,
+  WatchDiagnostic,
+  WatchLeasePriority,
+  WatchLeaseState,
+  WatchPathClass,
+} from './watch-diagnostics.ts';
+import type { DirectoryWatchEvent } from './watch-adapter.ts';
 
 // ============================================================
 // Active Watcher Registry (duplicate detection)
 // ============================================================
 
 /**
- * Tracks active ConfigWatcher instances by workspace directory.
- * Used to detect duplicate recursive watchers on the same directory tree,
- * which can wedge Bun's event loop on Linux.
+ * Tracks active ConfigWatcher instances by canonical workspace directory.
+ * Descriptor sharing itself is enforced by DirectoryWatchBroker; this registry
+ * remains as a lightweight lifecycle/debugging aid.
  */
-const activeWatchers = new Map<string, string>(); // workspaceDir → creator workspaceId
+const activeWatchers = new Map<string, string>(); // canonical workspaceDir → first creator workspaceId
+const activeWatcherCounts = new Map<string, number>();
 
 /** Exported for testing only */
 export function _getActiveWatchers(): ReadonlyMap<string, string> {
@@ -77,11 +86,11 @@ export function _getActiveWatchers(): ReadonlyMap<string, string> {
 // Constants
 // ============================================================
 
-const CONFIG_FILE = join(CONFIG_DIR, 'config.json');
 const PREFERENCES_FILE = join(CONFIG_DIR, 'preferences.json');
 
 // Debounce delay in milliseconds
 const DEBOUNCE_MS = 100;
+const MAX_DIRECT_CHILDREN_PER_SERVICE = DEFAULT_WATCH_DIRECTORY_CAPACITY;
 
 // Longer debounce for session metadata on Windows where fs.watch() fires
 // aggressively for atomic writes (unlink + rename = 2+ events)
@@ -174,6 +183,18 @@ export interface ConfigWatcherCallbacks {
   onValidationError?: (file: string, result: ValidationResult) => void;
   /** Called when an error occurs reading/parsing a file */
   onError?: (file: string, error: Error) => void;
+  /** Content-free descriptor/capacity/error telemetry. */
+  onWatchDiagnostic?: (diagnostic: WatchDiagnostic) => void;
+  /** Typed degraded/recovered state for one watched path class. */
+  onWatchStateChange?: (state: WatchLeaseState) => void;
+}
+
+export interface ConfigWatcherOptions {
+  broker?: DirectoryWatchBroker;
+  /** Test-only global path overrides; production uses ~/.craft-agent paths. */
+  globalConfigDir?: string;
+  appThemesDir?: string;
+  appPermissionsDir?: string;
 }
 
 // ============================================================
@@ -201,37 +222,54 @@ export function loadPreferences(): UserPreferences | null {
 // ============================================================
 
 /**
- * Watches config files and triggers callbacks on changes.
- * Uses recursive directory watching for workspace files.
+ * Watches the fixed configuration matrix through process-wide broker leases.
  */
 export class ConfigWatcher {
-  private workspaceId: string;
-  private callbacks: ConfigWatcherCallbacks;
-  private watchers: FSWatcher[] = [];
-  private debounceTimers: Map<string, NodeJS.Timeout> = new Map();
+  private readonly workspaceId: string;
+  private readonly callbacks: ConfigWatcherCallbacks;
+  private readonly broker: DirectoryWatchBroker;
+  private readonly debounceTimers = new Map<string, NodeJS.Timeout>();
+  private readonly controlLeases = new Map<WatchPathClass, DirectoryWatchLease>();
+  private readonly sourceLeases = new Map<string, DirectoryWatchLease>();
+  private readonly skillLeases = new Map<string, DirectoryWatchLease>();
+  private readonly sessionLeases = new Map<string, DirectoryWatchLease>();
   private isRunning = false;
+  private generation = 0;
+  private registryKey = '';
+  private registryRegistered = false;
 
   // Track known items for detecting adds/removes
-  private knownSources: Set<string> = new Set();
-  private knownSkills: Set<string> = new Set();
-  private knownThemes: Set<string> = new Set();
+  private readonly knownSources = new Set<string>();
+  private readonly knownSkills = new Set<string>();
+  private readonly knownSessions = new Set<string>();
+  private readonly knownThemes = new Set<string>();
 
   // Track LLM connections for change detection (JSON string for deep comparison)
-  private lastLlmConnectionsHash: string = '';
+  private lastLlmConnectionsHash = '';
 
   // Computed paths
-  private workspaceDir: string;
-  private sourcesDir: string;
-  private skillsDir: string;
+  private readonly workspaceDir: string;
+  private readonly sourcesDir: string;
+  private readonly skillsDir: string;
+  private readonly sessionsDir: string;
+  private readonly statusesDir: string;
+  private readonly statusIconsDir: string;
+  private readonly labelsDir: string;
+  private readonly globalConfigDir: string;
+  private readonly appThemesDir: string;
+  private readonly appPermissionsDir: string;
 
-  constructor(workspaceIdOrPath: string, callbacks: ConfigWatcherCallbacks) {
+  constructor(
+    workspaceIdOrPath: string,
+    callbacks: ConfigWatcherCallbacks,
+    options: ConfigWatcherOptions = {},
+  ) {
     this.callbacks = callbacks;
-    // Support both workspace ID and workspace root path
-    // Paths contain '/' or '\\' (Windows) while IDs don't
+    this.broker = options.broker ?? getProcessWatchBroker();
+    // Support both workspace ID and workspace root path.
     const isPath = workspaceIdOrPath.includes('/') || workspaceIdOrPath.includes('\\');
     if (isPath) {
       this.workspaceDir = expandPath(workspaceIdOrPath);
-      // Extract workspace ID from path (last segment) - handle both separators
       this.workspaceId = workspaceIdOrPath.split(/[/\\]/).pop() || workspaceIdOrPath;
     } else {
       this.workspaceId = workspaceIdOrPath;
@@ -239,79 +277,72 @@ export class ConfigWatcher {
     }
     this.sourcesDir = getWorkspaceSourcesPath(this.workspaceDir);
     this.skillsDir = getWorkspaceSkillsPath(this.workspaceDir);
+    this.sessionsDir = getWorkspaceSessionsPath(this.workspaceDir);
+    this.statusesDir = join(this.workspaceDir, 'statuses');
+    this.statusIconsDir = join(this.statusesDir, 'icons');
+    this.labelsDir = join(this.workspaceDir, 'labels');
+    this.globalConfigDir = options.globalConfigDir ?? CONFIG_DIR;
+    this.appThemesDir = options.appThemesDir ?? getAppThemesDir();
+    this.appPermissionsDir = options.appPermissionsDir ?? getAppPermissionsDir();
   }
 
-  /**
-   * Get the workspace slug this watcher is scoped to
-   */
   getWorkspaceSlug(): string {
     return this.workspaceId;
   }
 
-  /**
-   * Start watching config files
-   */
-  start(): void {
-    if (this.isRunning) {
-      return;
-    }
-
-    const span = perf.span('configWatcher.start', { workspaceId: this.workspaceId });
-
-    this.isRunning = true;
-
-    // Detect duplicate recursive watchers on the same directory tree
-    const existingOwner = activeWatchers.get(this.workspaceDir);
-    if (existingOwner) {
-      debug(`[ConfigWatcher] WARNING: duplicate watcher for ${this.workspaceDir} (already owned by: ${existingOwner}, new: ${this.workspaceId})`);
-    }
-    activeWatchers.set(this.workspaceDir, this.workspaceId);
-
-    debug('[ConfigWatcher] Starting for workspace:', this.workspaceId);
-
-    // Ensure workspace directory exists
-    if (!existsSync(this.workspaceDir)) {
-      mkdirSync(this.workspaceDir, { recursive: true });
-    }
-    span.mark('ensureDir');
-
-    // Watch global config files
-    this.watchGlobalConfigs();
-    span.mark('watchGlobalConfigs');
-
-    // Watch workspace directory recursively
-    this.watchWorkspaceDir();
-    span.mark('watchWorkspaceDir');
-
-    // Watch app-level themes directory
-    this.watchAppThemesDir();
-    span.mark('watchAppThemesDir');
-
-    // Watch app-level permissions directory
-    this.watchAppPermissionsDir();
-    span.mark('watchAppPermissionsDir');
-
-    // Initial scan to populate known sources, skills, and themes
-    this.scanSources();
-    span.mark('scanSources');
-
-    this.scanSkills();
-    span.mark('scanSkills');
-
-    this.scanAppThemes();
-    span.mark('scanAppThemes');
-
-    // Initialize LLM connections hash for change detection
-    this.initLlmConnectionsHash();
-    span.mark('initLlmConnectionsHash');
-
-    debug('[ConfigWatcher] Started watching files');
-    span.end();
+  getWatchSnapshot(): WatchBrokerSnapshot {
+    return this.broker.getSnapshot();
   }
 
   /**
-   * Initialize LLM connections hash for change detection
+   * Start in two passes: acquire all shared/global and workspace controls as one
+   * transaction, then request optional direct-child leases.
    */
+  start(): void {
+    if (this.isRunning) return;
+
+    const span = perf.span('configWatcher.start', { workspaceId: this.workspaceId });
+    const generation = ++this.generation;
+    this.isRunning = true;
+
+    try {
+      this.ensureRequiredDirectories();
+      span.mark('ensureDirectories');
+
+      this.registryKey = this.canonicalWorkspaceKey();
+      const existingOwner = activeWatchers.get(this.registryKey);
+      if (existingOwner) {
+        debug(`[ConfigWatcher] Sharing canonical workspace watch (existing: ${existingOwner}, new: ${this.workspaceId})`);
+      }
+
+      const requests = this.requiredWatchRequests(generation);
+      const leases = this.broker.acquireRequired(requests);
+      for (let index = 0; index < requests.length; index += 1) {
+        this.controlLeases.set(requests[index]!.pathClass, leases[index]!);
+      }
+      if (!existingOwner) activeWatchers.set(this.registryKey, this.workspaceId);
+      activeWatcherCounts.set(this.registryKey, (activeWatcherCounts.get(this.registryKey) ?? 0) + 1);
+      this.registryRegistered = true;
+      span.mark('requiredControls');
+
+      // Dynamic children are intentionally second-pass and optional.
+      this.scanSources(false);
+      this.scanSkills(false);
+      this.scanSessions(false);
+      this.scanAppThemes();
+      span.mark('optionalChildren');
+
+      this.initLlmConnectionsHash();
+      span.mark('initLlmConnectionsHash');
+      debug('[ConfigWatcher] Started bounded directory observation');
+      span.end();
+    } catch (error) {
+      this.stopInternal();
+      span.end();
+      throw error;
+    }
+  }
+
   private initLlmConnectionsHash(): void {
     const config = loadStoredConfig();
     if (config) {
@@ -321,214 +352,335 @@ export class ConfigWatcher {
   }
 
   /**
-   * Manually notify the watcher of a file change.
-   * Workaround: Bun's fs.watch({ recursive: true }) on Linux doesn't track
-   * files in directories created after the watcher started.
-   * See: https://github.com/oven-sh/bun/issues/15939
-   * See: https://github.com/oven-sh/bun/issues/15085
-   * When these are fixed, this method and its call sites can be removed.
+   * Local SessionManager writes remain authoritative. This also closes the
+   * create-directory/initial-write race before a new child lease is attached.
    */
   notifyFileChange(relativePath: string): void {
     if (!this.isRunning) return;
-    this.handleWorkspaceFileChange(relativePath, 'change');
+    this.handleWorkspaceFileChange(relativePath.replace(/\\/g, '/'), 'change');
   }
 
-  /**
-   * Stop watching all files
-   */
   stop(): void {
-    if (!this.isRunning) {
-      return;
-    }
-
-    this.isRunning = false;
-    activeWatchers.delete(this.workspaceDir);
-
-    // Clear all debounce timers
-    for (const timer of this.debounceTimers.values()) {
-      clearTimeout(timer);
-    }
-    this.debounceTimers.clear();
-
-    // Close all watchers
-    for (const watcher of this.watchers) {
-      watcher.close();
-    }
-    this.watchers = [];
-
-    this.knownSources.clear();
-    this.knownSkills.clear();
-    this.knownThemes.clear();
-
+    if (!this.isRunning) return;
+    this.stopInternal();
     debug('[ConfigWatcher] Stopped');
   }
 
-  /**
-   * Watch global config files (config.json, preferences.json)
-   */
-  private watchGlobalConfigs(): void {
-    // Ensure config directory exists
-    if (!existsSync(CONFIG_DIR)) {
-      mkdirSync(CONFIG_DIR, { recursive: true });
+  private stopInternal(): void {
+    this.isRunning = false;
+    ++this.generation;
+    if (this.registryKey && this.registryRegistered) {
+      const remaining = (activeWatcherCounts.get(this.registryKey) ?? 1) - 1;
+      if (remaining <= 0) {
+        activeWatcherCounts.delete(this.registryKey);
+        activeWatchers.delete(this.registryKey);
+      } else {
+        activeWatcherCounts.set(this.registryKey, remaining);
+      }
     }
+    this.registryKey = '';
+    this.registryRegistered = false;
 
+    for (const timer of this.debounceTimers.values()) clearTimeout(timer);
+    this.debounceTimers.clear();
+    for (const lease of this.controlLeases.values()) lease.close();
+    for (const lease of this.sourceLeases.values()) lease.close();
+    for (const lease of this.skillLeases.values()) lease.close();
+    for (const lease of this.sessionLeases.values()) lease.close();
+    this.controlLeases.clear();
+    this.sourceLeases.clear();
+    this.skillLeases.clear();
+    this.sessionLeases.clear();
+    this.knownSources.clear();
+    this.knownSkills.clear();
+    this.knownSessions.clear();
+    this.knownThemes.clear();
+  }
+
+  private ensureRequiredDirectories(): void {
+    const paths = [
+      this.globalConfigDir,
+      this.appThemesDir,
+      this.appPermissionsDir,
+      this.workspaceDir,
+      this.sourcesDir,
+      this.skillsDir,
+      this.sessionsDir,
+      this.statusesDir,
+      this.statusIconsDir,
+      this.labelsDir,
+    ];
+    for (const path of paths) {
+      try {
+        lstatSync(path);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+        mkdirSync(path, { recursive: true });
+      }
+    }
+  }
+
+  private canonicalWorkspaceKey(): string {
     try {
-      // Watch the config directory for changes to config.json, preferences.json, and theme.json
-      const watcher = watch(CONFIG_DIR, (eventType, filename) => {
-        if (!filename) return;
+      return realpathSync.native(this.workspaceDir);
+    } catch {
+      return resolve(this.workspaceDir);
+    }
+  }
 
-        if (filename === 'config.json') {
-          this.debounce('config.json', () => this.handleConfigChange());
-        } else if (filename === 'preferences.json') {
-          this.debounce('preferences.json', () => this.handlePreferencesChange());
-        } else if (filename === 'theme.json') {
-          this.debounce('app-theme', () => this.handleAppThemeChange());
+  private requiredWatchRequests(generation: number): DirectoryWatchRequest[] {
+    return [
+      this.makeRequest(this.globalConfigDir, 'global-config', 'required', generation),
+      this.makeRequest(this.appThemesDir, 'app-themes', 'required', generation, undefined, {
+        rejectSymlink: true,
+        containWithin: this.globalConfigDir,
+      }),
+      this.makeRequest(this.appPermissionsDir, 'app-permissions', 'required', generation, undefined, {
+        rejectSymlink: true,
+        containWithin: this.globalConfigDir,
+      }),
+      this.makeRequest(this.workspaceDir, 'workspace-root', 'required', generation),
+      this.makeRequest(this.sourcesDir, 'sources-root', 'required', generation, undefined, this.serviceOptions()),
+      this.makeRequest(this.skillsDir, 'skills-root', 'required', generation, undefined, this.serviceOptions()),
+      this.makeRequest(this.sessionsDir, 'sessions-root', 'required', generation, undefined, this.serviceOptions()),
+      this.makeRequest(this.statusesDir, 'statuses-root', 'required', generation, undefined, this.serviceOptions()),
+      this.makeRequest(this.statusIconsDir, 'status-icons', 'required', generation, undefined, this.serviceOptions()),
+      this.makeRequest(this.labelsDir, 'labels-root', 'required', generation, undefined, this.serviceOptions()),
+    ];
+  }
+
+  private serviceOptions() {
+    return { rejectSymlink: true, containWithin: this.workspaceDir };
+  }
+
+  private makeRequest(
+    path: string,
+    pathClass: WatchPathClass,
+    priority: WatchLeasePriority,
+    generation: number,
+    childId?: string,
+    inspection: { rejectSymlink?: boolean; containWithin?: string } = {},
+  ): DirectoryWatchRequest {
+    let sawState = false;
+    let wasDegraded = false;
+    return {
+      path,
+      pathClass,
+      priority,
+      ...inspection,
+      onEvent: (event) => {
+        if (!this.isCurrent(generation)) return;
+        this.handleBrokerEvent(pathClass, event, childId);
+      },
+      onStateChange: (state) => {
+        if (!this.isCurrent(generation)) return;
+        this.callbacks.onWatchStateChange?.(state);
+        if (sawState && wasDegraded && state.status === 'active') {
+          // Catch up changes that may have occurred while this optional or
+          // quarantined path had no descriptor.
+          this.handleBrokerEvent(pathClass, { eventType: 'reconcile' }, childId);
         }
-      });
+        wasDegraded = state.status === 'degraded';
+        sawState = true;
+      },
+      onDiagnostic: (diagnostic) => {
+        if (!this.isCurrent(generation)) return;
+        this.callbacks.onWatchDiagnostic?.(diagnostic);
+      },
+    };
+  }
 
-      this.watchers.push(watcher);
-      debug('[ConfigWatcher] Watching global configs:', CONFIG_DIR);
-    } catch (error) {
-      debug('[ConfigWatcher] Error watching global configs:', error);
+  private isCurrent(generation: number): boolean {
+    return this.isRunning && this.generation === generation;
+  }
+
+  private handleBrokerEvent(pathClass: WatchPathClass, event: DirectoryWatchEvent, childId?: string): void {
+    const filename = event.filename?.replace(/\\/g, '/');
+    switch (pathClass) {
+      case 'global-config':
+        this.handleGlobalDirectoryEvent(filename);
+        break;
+      case 'app-themes':
+        this.handleThemesDirectoryEvent(filename);
+        break;
+      case 'app-permissions':
+        if (!filename || filename === 'default.json') {
+          this.debounce('default-permissions', () => this.handleDefaultPermissionsChange());
+        }
+        break;
+      case 'workspace-root':
+        this.handleWorkspaceRootEvent(filename);
+        break;
+      case 'sources-root':
+        this.debounce('sources-dir', () => this.handleSourcesDirChange());
+        break;
+      case 'source-child':
+        if (childId) this.handleSourceChildEvent(childId, filename);
+        break;
+      case 'skills-root':
+        this.debounce('skills-dir', () => this.handleSkillsDirChange());
+        break;
+      case 'skill-child':
+        if (childId) this.handleSkillChildEvent(childId, filename);
+        break;
+      case 'sessions-root':
+        this.debounce('sessions-dir', () => this.handleSessionsDirChange());
+        break;
+      case 'session-child':
+        if (childId && (!filename || filename === 'session.jsonl')) {
+          this.debounce(`session-meta:${childId}`, () => this.handleSessionMetadataChange(childId), SESSION_META_DEBOUNCE_MS);
+        }
+        break;
+      case 'statuses-root':
+        if (!filename || filename === 'config.json') {
+          this.debounce('statuses-config', () => this.handleStatusConfigChange());
+        }
+        if (!filename || filename === 'icons') {
+          this.controlLeases.get('status-icons')?.reconcile();
+          // The replacement directory may already contain icons before the new
+          // lease attaches, so always perform one bounded catch-up scan.
+          this.debounce('statuses-icons-reconcile', () => this.handleAllStatusIcons());
+        }
+        break;
+      case 'status-icons':
+        if (filename) {
+          this.debounce(`statuses-icon:${filename}`, () => this.handleStatusIconChange(filename));
+        } else {
+          this.debounce('statuses-icons-reconcile', () => this.handleAllStatusIcons());
+        }
+        break;
+      case 'labels-root':
+        if (!filename || filename === 'config.json') {
+          this.debounce('labels-config', () => this.handleLabelConfigChange());
+        }
+        break;
+      case 'session-panel-root':
+      case 'session-panel-child':
+        break;
     }
   }
 
-  /**
-   * Watch workspace directory recursively
-   */
-  private watchWorkspaceDir(): void {
-    debug('[ConfigWatcher] Setting up workspace watcher for:', this.workspaceDir);
-    try {
-      const watcher = watch(this.workspaceDir, { recursive: true }, (eventType, filename) => {
-        if (!filename) return;
-
-        // Normalize path separators
-        const normalizedPath = filename.replace(/\\/g, '/');
-        this.handleWorkspaceFileChange(normalizedPath, eventType);
-      });
-
-      this.watchers.push(watcher);
-      debug('[ConfigWatcher] Watching workspace recursively:', this.workspaceDir);
-    } catch (error) {
-      debug('[ConfigWatcher] Error watching workspace directory:', error);
+  private handleGlobalDirectoryEvent(filename?: string): void {
+    if (!filename || filename === 'config.json') {
+      this.debounce('config.json', () => this.handleConfigChange());
+    }
+    if (!filename || filename === 'preferences.json') {
+      this.debounce('preferences.json', () => this.handlePreferencesChange());
+    }
+    if (!filename || filename === 'theme.json') {
+      this.debounce('app-theme', () => this.handleAppThemeChange());
     }
   }
 
-  /**
-   * Handle a file change within the workspace directory
-   */
-  private handleWorkspaceFileChange(relativePath: string, eventType: string): void {
-    const parts = relativePath.split('/');
+  private handleThemesDirectoryEvent(filename?: string): void {
+    if (!filename) {
+      this.debounce('themes-reconcile', () => this.handleThemesDirChange());
+      return;
+    }
+    if (filename.endsWith('.json')) {
+      const themeId = filename.slice(0, -'.json'.length);
+      this.debounce(`preset-theme:${themeId}`, () => this.handlePresetThemeChange(themeId));
+    }
+  }
 
-    // Workspace-level permissions.json
+  private handleWorkspaceRootEvent(filename?: string): void {
+    if (!filename) {
+      this.handleWorkspaceFileChange('permissions.json', 'rename');
+      this.handleWorkspaceFileChange(AUTOMATIONS_CONFIG_FILE, 'rename');
+      this.handleWorkspaceFileChange(LABEL_SKILL_BINDINGS_FILE, 'rename');
+      for (const pathClass of ['sources-root', 'skills-root', 'sessions-root', 'statuses-root', 'status-icons', 'labels-root'] as const) {
+        this.controlLeases.get(pathClass)?.reconcile();
+      }
+      this.debounce('sources-dir', () => this.handleSourcesDirChange());
+      this.debounce('skills-dir', () => this.handleSkillsDirChange());
+      this.debounce('sessions-dir', () => this.handleSessionsDirChange());
+      this.debounce('statuses-config', () => this.handleStatusConfigChange());
+      this.debounce('statuses-icons-reconcile', () => this.handleAllStatusIcons());
+      this.debounce('labels-config', () => this.handleLabelConfigChange());
+      return;
+    }
+
+    const directName = filename.split('/')[0]!;
+    if (directName === 'sources') {
+      this.controlLeases.get('sources-root')?.reconcile();
+      this.debounce('sources-dir', () => this.handleSourcesDirChange());
+    } else if (directName === 'skills') {
+      this.controlLeases.get('skills-root')?.reconcile();
+      this.debounce('skills-dir', () => this.handleSkillsDirChange());
+    } else if (directName === 'sessions') {
+      this.controlLeases.get('sessions-root')?.reconcile();
+      this.debounce('sessions-dir', () => this.handleSessionsDirChange());
+    } else if (directName === 'statuses') {
+      this.controlLeases.get('statuses-root')?.reconcile();
+      this.controlLeases.get('status-icons')?.reconcile();
+    } else if (directName === 'labels') {
+      this.controlLeases.get('labels-root')?.reconcile();
+    } else {
+      this.handleWorkspaceFileChange(filename, 'rename');
+    }
+  }
+
+  private handleSourceChildEvent(slug: string, filename?: string): void {
+    if (!filename || filename === 'config.json') {
+      this.debounce(`source-config:${slug}`, () => this.handleSourceConfigChange(slug));
+    }
+    if (!filename || filename === 'guide.md') {
+      this.debounce(`source-guide:${slug}`, () => this.handleSourceGuideChange(slug));
+    }
+    if (!filename || filename === 'permissions.json') {
+      this.debounce(`source-permissions:${slug}`, () => this.handleSourcePermissionsChange(slug));
+    }
+  }
+
+  private handleSkillChildEvent(slug: string, filename?: string): void {
+    if (!filename || filename === 'SKILL.md' || /^icon\.(svg|png|jpg|jpeg)$/i.test(filename)) {
+      this.debounce(`skill:${slug}`, () => this.handleSkillChange(slug));
+    }
+  }
+
+  /** Handle authoritative/manual workspace-relative changes. */
+  private handleWorkspaceFileChange(relativePath: string, _eventType: string): void {
+    const parts = relativePath.split('/').filter(Boolean);
     if (relativePath === 'permissions.json') {
       this.debounce('workspace-permissions', () => this.handleWorkspacePermissionsChange());
       return;
     }
-
-    // Workspace-level automations config file
     if (relativePath === AUTOMATIONS_CONFIG_FILE) {
-      debug('[ConfigWatcher] automations config change detected:', relativePath);
       this.debounce('automations-config', () => this.handleAutomationsConfigChange());
       return;
     }
-
-    // Workspace-level label-skill binding config file
     if (relativePath === LABEL_SKILL_BINDINGS_FILE) {
-      debug('[ConfigWatcher] label-skill bindings config change detected:', relativePath);
       this.debounce('label-skill-bindings-config', () => this.handleLabelSkillBindingsConfigChange());
       return;
     }
 
-    // Sources changes: sources/{slug}/...
-    if (parts[0] === 'sources' && parts.length >= 2) {
-      const slug = parts[1]!;  // Safe: checked parts.length >= 2
-      const file = parts[2];
-
-      // Directory-level changes (new/removed source folders)
-      if (parts.length === 2) {
-        this.debounce('sources-dir', () => this.handleSourcesDirChange());
-        return;
-      }
-
-      // File-level changes
-      if (file === 'config.json') {
-        this.debounce(`source-config:${slug}`, () => this.handleSourceConfigChange(slug));
-      } else if (file === 'guide.md') {
-        this.debounce(`source-guide:${slug}`, () => this.handleSourceGuideChange(slug));
-      } else if (file === 'permissions.json') {
-        this.debounce(`source-permissions:${slug}`, () => this.handleSourcePermissionsChange(slug));
+    if (parts[0] === 'sources' && parts[1]) {
+      if (parts.length === 2) this.debounce('sources-dir', () => this.handleSourcesDirChange());
+      else this.handleSourceChildEvent(parts[1], parts[2]);
+      return;
+    }
+    if (parts[0] === 'skills' && parts[1]) {
+      if (parts.length === 2) this.debounce('skills-dir', () => this.handleSkillsDirChange());
+      else this.handleSkillChildEvent(parts[1], parts[2]);
+      return;
+    }
+    if (parts[0] === 'sessions' && parts[1]) {
+      if (parts.length === 2) this.debounce('sessions-dir', () => this.handleSessionsDirChange());
+      else if (parts[2] === 'session.jsonl') {
+        this.debounce(`session-meta:${parts[1]}`, () => this.handleSessionMetadataChange(parts[1]!), SESSION_META_DEBOUNCE_MS);
       }
       return;
     }
-
-    // Skills changes: skills/{slug}/...
-    if (parts[0] === 'skills' && parts.length >= 2) {
-      const slug = parts[1]!;  // Safe: checked parts.length >= 2
-      const file = parts[2];
-
-      // Directory-level changes (new/removed skill folders)
-      if (parts.length === 2) {
-        this.debounce('skills-dir', () => this.handleSkillsDirChange());
-        return;
-      }
-
-      // File-level changes
-      if (file === 'SKILL.md') {
-        this.debounce(`skill:${slug}`, () => this.handleSkillChange(slug));
-      } else if (file && /^icon\.(svg|png|jpg|jpeg)$/i.test(file)) {
-        // Icon file changes also trigger a skill change (to update iconPath)
-        this.debounce(`skill-icon:${slug}`, () => this.handleSkillChange(slug));
-      }
+    if (parts[0] === 'statuses' && parts[1] === 'config.json') {
+      this.debounce('statuses-config', () => this.handleStatusConfigChange());
       return;
     }
-
-    // Session metadata changes: sessions/{id}/session.jsonl
-    // Detects external modifications (other instances, scripts, manual edits).
-    // Only reads line 1 (header) — lightweight even during active streaming.
-    if (parts[0] === 'sessions' && parts.length >= 3) {
-      const sessionId = parts[1]!;
-      const file = parts[2];
-
-      // Only watch actual session files, ignore .tmp (atomic write intermediates)
-      if (file === 'session.jsonl') {
-        this.debounce(`session-meta:${sessionId}`, () => this.handleSessionMetadataChange(sessionId), SESSION_META_DEBOUNCE_MS);
-      }
+    if (parts[0] === 'statuses' && parts[1] === 'icons' && parts[2]) {
+      this.debounce(`statuses-icon:${parts[2]}`, () => this.handleStatusIconChange(parts[2]!));
       return;
     }
-
-    // Statuses changes: statuses/...
-    if (parts[0] === 'statuses' && parts.length >= 2) {
-      const file = parts[1];
-
-      // config.json change
-      if (file === 'config.json') {
-        this.debounce('statuses-config', () => this.handleStatusConfigChange());
-        return;
-      }
-
-      // Icon file changes: statuses/icons/*.svg, *.png, etc.
-      if (file === 'icons' && parts.length >= 3) {
-        const iconFilename = parts[2];
-        if (iconFilename) {
-          this.debounce(`statuses-icon:${iconFilename}`, () => {
-            this.handleStatusIconChange(iconFilename);
-          });
-        }
-        return;
-      }
-    }
-
-    // Labels changes: labels/...
-    if (parts[0] === 'labels' && parts.length >= 2) {
-      const file = parts[1];
-
-      // config.json change
-      if (file === 'config.json') {
-        this.debounce('labels-config', () => this.handleLabelConfigChange());
-        return;
-      }
-
+    if (parts[0] === 'labels' && parts[1] === 'config.json') {
+      this.debounce('labels-config', () => this.handleLabelConfigChange());
     }
   }
 
@@ -537,106 +689,173 @@ export class ConfigWatcher {
    */
   private debounce(key: string, handler: () => void, delayMs: number = DEBOUNCE_MS): void {
     const existing = this.debounceTimers.get(key);
-    if (existing) {
-      clearTimeout(existing);
-    }
+    if (existing) clearTimeout(existing);
+    const generation = this.generation;
 
     const timer = setTimeout(() => {
       this.debounceTimers.delete(key);
+      if (!this.isCurrent(generation)) return;
       handler();
     }, delayMs);
 
     this.debounceTimers.set(key, timer);
   }
 
+  private listSafeDirectChildren(
+    parentDir: string,
+    pathClass: 'source-child' | 'skill-child' | 'session-child',
+    priority: 'source' | 'skill' | 'session',
+  ): string[] {
+    if (!existsSync(parentDir)) return [];
+    const names: string[] = [];
+    let parentPhysical: string;
+    try {
+      parentPhysical = realpathSync.native(parentDir);
+    } catch {
+      return [];
+    }
+
+    const directory = opendirSync(parentDir);
+    let inspected = 0;
+    try {
+      while (true) {
+        const entry = directory.readSync();
+        if (!entry) return names.sort();
+        if (inspected >= MAX_DIRECT_CHILDREN_PER_SERVICE) {
+          this.emitWatchDegraded(pathClass, priority, 'capacity');
+          return names.sort();
+        }
+        inspected += 1;
+        const entryPath = join(parentDir, entry.name);
+        try {
+          const stats = lstatSync(entryPath);
+          if (stats.isSymbolicLink()) {
+            this.emitWatchDegraded(pathClass, priority, 'unsafe-symlink');
+            continue;
+          }
+          if (!stats.isDirectory()) continue;
+          const physical = realpathSync.native(entryPath);
+          const rel = relative(parentPhysical, physical);
+          if (rel === '..' || rel.startsWith('../') || rel.startsWith('..\\') || isAbsolute(rel)) {
+            this.emitWatchDegraded(pathClass, priority, 'outside-root');
+            continue;
+          }
+          names.push(entry.name);
+        } catch {
+          this.emitWatchDegraded(pathClass, priority, 'invalid-directory');
+        }
+      }
+    } finally {
+      directory.closeSync();
+    }
+  }
+
+  private listBoundedDirectFiles(
+    parentDir: string,
+    pathClass: WatchPathClass,
+    priority: WatchLeasePriority,
+    include: (filename: string) => boolean,
+  ): string[] {
+    if (!existsSync(parentDir)) return [];
+    const files: string[] = [];
+    const directory = opendirSync(parentDir);
+    let inspected = 0;
+    try {
+      while (true) {
+        const entry = directory.readSync();
+        if (!entry) return files;
+        if (inspected >= MAX_DIRECT_CHILDREN_PER_SERVICE) {
+          this.emitWatchDegraded(pathClass, priority, 'capacity');
+          return files;
+        }
+        inspected += 1;
+        if (entry.isFile() && include(entry.name)) files.push(entry.name);
+      }
+    } finally {
+      directory.closeSync();
+    }
+  }
+
+  private emitWatchDegraded(
+    pathClass: WatchPathClass,
+    priority: WatchLeasePriority,
+    reason: WatchLeaseState['reason'],
+  ): void {
+    if (!reason) return;
+    const snapshot = this.broker.getSnapshot();
+    this.callbacks.onWatchStateChange?.({ status: 'degraded', pathClass, priority, reason });
+    this.callbacks.onWatchDiagnostic?.({
+      type: 'degraded',
+      pathClass,
+      priority,
+      activeDirectoryCount: snapshot.activeDirectoryCount,
+      leaseCount: snapshot.leaseCount,
+      capacity: snapshot.capacity,
+      reason,
+    });
+  }
+
+  private syncOptionalLeases(
+    names: Set<string>,
+    leases: Map<string, DirectoryWatchLease>,
+    parentDir: string,
+    pathClass: 'source-child' | 'skill-child' | 'session-child',
+    priority: 'source' | 'skill' | 'session',
+  ): Set<string> {
+    const added = new Set<string>();
+    for (const [name, lease] of leases) {
+      if (!names.has(name)) {
+        lease.close();
+        leases.delete(name);
+      }
+    }
+    for (const name of names) {
+      if (leases.has(name)) continue;
+      const generation = this.generation;
+      const lease = this.broker.acquireOptional(this.makeRequest(
+        join(parentDir, name),
+        pathClass,
+        priority,
+        generation,
+        name,
+        { rejectSymlink: true, containWithin: parentDir },
+      ));
+      leases.set(name, lease);
+      added.add(name);
+    }
+    return added;
+  }
+
   // ============================================================
   // Sources Handlers
   // ============================================================
 
-  /**
-   * Scan sources directory to populate known sources
-   */
-  private scanSources(): void {
-    if (!existsSync(this.sourcesDir)) {
-      mkdirSync(this.sourcesDir, { recursive: true });
-      return;
-    }
-
+  private scanSources(emitChanges: boolean): void {
     try {
-      const entries = readdirSync(this.sourcesDir);
-
-      for (const entry of entries) {
-        const entryPath = join(this.sourcesDir, entry);
-        if (statSync(entryPath).isDirectory()) {
-          this.knownSources.add(entry);
+      const currentFolders = new Set(this.listSafeDirectChildren(this.sourcesDir, 'source-child', 'source'));
+      const added = this.syncOptionalLeases(currentFolders, this.sourceLeases, this.sourcesDir, 'source-child', 'source');
+      if (emitChanges) {
+        for (const folder of added) {
+          const source = loadSource(this.workspaceDir, folder);
+          if (source) this.callbacks.onSourceChange?.(folder, source);
+        }
+        for (const folder of this.knownSources) {
+          if (!currentFolders.has(folder)) this.callbacks.onSourceChange?.(folder, null);
         }
       }
-
+      this.knownSources.clear();
+      for (const folder of currentFolders) this.knownSources.add(folder);
       debug('[ConfigWatcher] Known sources:', Array.from(this.knownSources));
     } catch (error) {
       debug('[ConfigWatcher] Error scanning sources:', error);
+      this.callbacks.onError?.('sources/', error as Error);
     }
   }
 
-  /**
-   * Handle sources directory change (add/remove folders)
-   */
   private handleSourcesDirChange(): void {
     debug('[ConfigWatcher] Sources directory changed');
-
-    if (!existsSync(this.sourcesDir)) {
-      // Directory was deleted
-      const removed = Array.from(this.knownSources);
-      this.knownSources.clear();
-
-      for (const slug of removed) {
-        this.callbacks.onSourceChange?.(slug, null);
-      }
-
-      this.callbacks.onSourcesListChange?.([]);
-      return;
-    }
-
-    try {
-      const entries = readdirSync(this.sourcesDir);
-      const currentFolders = new Set<string>();
-
-      for (const entry of entries) {
-        const entryPath = join(this.sourcesDir, entry);
-        if (statSync(entryPath).isDirectory()) {
-          currentFolders.add(entry);
-        }
-      }
-
-      // Find added folders
-      for (const folder of currentFolders) {
-        if (!this.knownSources.has(folder)) {
-          debug('[ConfigWatcher] New source folder:', folder);
-          this.knownSources.add(folder);
-
-          const source = loadSource(this.workspaceDir, folder);
-          if (source) {
-            this.callbacks.onSourceChange?.(folder, source);
-          }
-        }
-      }
-
-      // Find removed folders
-      for (const folder of this.knownSources) {
-        if (!currentFolders.has(folder)) {
-          debug('[ConfigWatcher] Removed source folder:', folder);
-          this.knownSources.delete(folder);
-          this.callbacks.onSourceChange?.(folder, null);
-        }
-      }
-
-      // Notify list change
-      const allSources = loadWorkspaceSources(this.workspaceDir);
-      this.callbacks.onSourcesListChange?.(allSources);
-    } catch (error) {
-      debug('[ConfigWatcher] Error handling sources dir change:', error);
-      this.callbacks.onError?.('sources/', error as Error);
-    }
+    this.scanSources(true);
+    this.callbacks.onSourcesListChange?.(existsSync(this.sourcesDir) ? loadWorkspaceSources(this.workspaceDir) : []);
   }
 
   /**
@@ -658,9 +877,10 @@ export class ConfigWatcher {
     // Check if icon needs to be downloaded (URL in config, no local file)
     if (source && sourceNeedsIconDownload(this.workspaceDir, slug, source.config)) {
       debug('[ConfigWatcher] Downloading source icon:', slug);
+      const generation = this.generation;
       downloadSourceIcon(this.workspaceDir, slug, source.config.icon!)
         .then((iconPath) => {
-          if (iconPath) {
+          if (iconPath && this.isCurrent(generation)) {
             debug('[ConfigWatcher] Source icon downloaded:', slug, iconPath);
             // Re-emit source change with updated icon path
             const updatedSource = loadSource(this.workspaceDir, slug);
@@ -710,94 +930,34 @@ export class ConfigWatcher {
   // Skills Handlers
   // ============================================================
 
-  /**
-   * Scan skills directory to populate known skills
-   */
-  private scanSkills(): void {
-    if (!existsSync(this.skillsDir)) {
-      mkdirSync(this.skillsDir, { recursive: true });
-      return;
-    }
-
+  private scanSkills(emitChanges: boolean): void {
     try {
-      const entries = readdirSync(this.skillsDir);
-
-      for (const entry of entries) {
-        const entryPath = join(this.skillsDir, entry);
-        if (statSync(entryPath).isDirectory()) {
-          this.knownSkills.add(entry);
+      const currentFolders = new Set(this.listSafeDirectChildren(this.skillsDir, 'skill-child', 'skill'));
+      const added = this.syncOptionalLeases(currentFolders, this.skillLeases, this.skillsDir, 'skill-child', 'skill');
+      if (emitChanges) {
+        invalidateSkillsCache();
+        for (const folder of added) {
+          const skill = loadSkill(this.workspaceDir, folder);
+          if (skill) this.callbacks.onSkillChange?.(folder, skill);
+        }
+        for (const folder of this.knownSkills) {
+          if (!currentFolders.has(folder)) this.callbacks.onSkillChange?.(folder, null);
         }
       }
-
+      this.knownSkills.clear();
+      for (const folder of currentFolders) this.knownSkills.add(folder);
       debug('[ConfigWatcher] Known skills:', Array.from(this.knownSkills));
     } catch (error) {
       debug('[ConfigWatcher] Error scanning skills:', error);
+      this.callbacks.onError?.('skills/', error as Error);
     }
   }
 
-  /**
-   * Handle skills directory change (add/remove folders)
-   */
   private handleSkillsDirChange(): void {
     debug('[ConfigWatcher] Skills directory changed');
-
-    // Directory add/remove events can change any cached full-skill or summary view.
-    // Clear before emitting callbacks so consumers that reload skills during the
-    // callback do not observe stale metadata.
     invalidateSkillsCache();
-
-    if (!existsSync(this.skillsDir)) {
-      // Directory was deleted
-      const removed = Array.from(this.knownSkills);
-      this.knownSkills.clear();
-
-      for (const slug of removed) {
-        this.callbacks.onSkillChange?.(slug, null);
-      }
-
-      this.callbacks.onSkillsListChange?.([]);
-      return;
-    }
-
-    try {
-      const entries = readdirSync(this.skillsDir);
-      const currentFolders = new Set<string>();
-
-      for (const entry of entries) {
-        const entryPath = join(this.skillsDir, entry);
-        if (statSync(entryPath).isDirectory()) {
-          currentFolders.add(entry);
-        }
-      }
-
-      // Find added folders
-      for (const folder of currentFolders) {
-        if (!this.knownSkills.has(folder)) {
-          debug('[ConfigWatcher] New skill folder:', folder);
-          this.knownSkills.add(folder);
-
-          const skill = loadSkill(this.workspaceDir, folder);
-          if (skill) {
-            this.callbacks.onSkillChange?.(folder, skill);
-          }
-        }
-      }
-
-      // Find removed folders
-      for (const folder of this.knownSkills) {
-        if (!currentFolders.has(folder)) {
-          debug('[ConfigWatcher] Removed skill folder:', folder);
-          this.knownSkills.delete(folder);
-          this.callbacks.onSkillChange?.(folder, null);
-        }
-      }
-
-      const allSkills = loadAllSkills(this.workspaceDir);
-      this.callbacks.onSkillsListChange?.(allSkills);
-    } catch (error) {
-      debug('[ConfigWatcher] Error handling skills dir change:', error);
-      this.callbacks.onError?.('skills/', error as Error);
-    }
+    this.scanSkills(true);
+    this.callbacks.onSkillsListChange?.(existsSync(this.skillsDir) ? loadAllSkills(this.workspaceDir) : []);
   }
 
   /**
@@ -820,11 +980,12 @@ export class ConfigWatcher {
     // This happens when SKILL.md has icon: "https://..." but no local icon.* file exists
     if (skill && skillNeedsIconDownload(skill)) {
       debug('[ConfigWatcher] Skill needs icon download:', slug, skill.metadata.icon);
+      const generation = this.generation;
 
       // Download asynchronously - don't block the watcher
       downloadSkillIcon(skill.path, skill.metadata.icon!)
         .then((iconPath) => {
-          if (iconPath) {
+          if (iconPath && this.isCurrent(generation)) {
             // Reload the skill with the new icon and emit another change
             invalidateSkillsCache();
             const updatedSkill = loadSkill(this.workspaceDir, slug);
@@ -921,9 +1082,10 @@ export class ConfigWatcher {
     for (const status of config.statuses) {
       if (statusNeedsIconDownload(this.workspaceDir, status)) {
         debug('[ConfigWatcher] Downloading status icon:', status.id);
+        const generation = this.generation;
         downloadStatusIcon(this.workspaceDir, status.id, status.icon!)
           .then((iconPath) => {
-            if (iconPath) {
+            if (iconPath && this.isCurrent(generation)) {
               debug('[ConfigWatcher] Status icon downloaded:', status.id, iconPath);
               // Re-emit config change to update UI with new icon
               this.callbacks.onStatusConfigChange?.(this.workspaceId);
@@ -944,6 +1106,21 @@ export class ConfigWatcher {
   private handleStatusIconChange(iconFilename: string): void {
     debug('[ConfigWatcher] Status icon changed:', this.workspaceId, iconFilename);
     this.callbacks.onStatusIconChange?.(this.workspaceId, iconFilename);
+  }
+
+  private handleAllStatusIcons(): void {
+    if (!existsSync(this.statusIconsDir)) return;
+    try {
+      const files = this.listBoundedDirectFiles(
+        this.statusIconsDir,
+        'status-icons',
+        'required',
+        () => true,
+      );
+      for (const file of files) this.handleStatusIconChange(file);
+    } catch (error) {
+      this.callbacks.onError?.('statuses/icons/', error as Error);
+    }
   }
 
   // ============================================================
@@ -978,6 +1155,33 @@ export class ConfigWatcher {
   // Session Metadata Handlers
   // ============================================================
 
+  private scanSessions(emitInitialForAdded: boolean): void {
+    try {
+      const currentFolders = new Set(this.listSafeDirectChildren(this.sessionsDir, 'session-child', 'session'));
+      const newlyObserved = this.syncOptionalLeases(
+        currentFolders,
+        this.sessionLeases,
+        this.sessionsDir,
+        'session-child',
+        'session',
+      );
+      if (emitInitialForAdded) {
+        // Read immediately after acquisition. The initial session.jsonl write may
+        // have completed before the new child watcher could be attached.
+        for (const sessionId of newlyObserved) this.handleSessionMetadataChange(sessionId);
+      }
+      this.knownSessions.clear();
+      for (const sessionId of currentFolders) this.knownSessions.add(sessionId);
+    } catch (error) {
+      debug('[ConfigWatcher] Error scanning sessions:', error);
+      this.callbacks.onError?.('sessions/', error as Error);
+    }
+  }
+
+  private handleSessionsDirChange(): void {
+    this.scanSessions(true);
+  }
+
   /**
    * Handle session.jsonl change — reads only line 1 (header) and emits if valid.
    * This enables detection of external metadata changes (labels, name, flags)
@@ -1010,64 +1214,6 @@ export class ConfigWatcher {
   }
 
   /**
-   * Watch app-level themes directory (~/.craft-agent/themes/)
-   */
-  private watchAppThemesDir(): void {
-    const themesDir = getAppThemesDir();
-
-    // Create themes directory if it doesn't exist
-    if (!existsSync(themesDir)) {
-      mkdirSync(themesDir, { recursive: true });
-    }
-
-    try {
-      const watcher = watch(themesDir, (eventType, filename) => {
-        if (!filename) return;
-
-        // Only handle .json files
-        if (filename.endsWith('.json')) {
-          const themeId = filename.replace('.json', '');
-          this.debounce(`preset-theme:${themeId}`, () => this.handlePresetThemeChange(themeId));
-        }
-      });
-
-      this.watchers.push(watcher);
-      debug('[ConfigWatcher] Watching app themes directory:', themesDir);
-    } catch (error) {
-      debug('[ConfigWatcher] Error watching app themes directory:', error);
-    }
-  }
-
-  /**
-   * Watch app-level permissions directory (~/.craft-agent/permissions/)
-   * Watches for changes to default.json which contains the default read-only patterns
-   */
-  private watchAppPermissionsDir(): void {
-    const permissionsDir = getAppPermissionsDir();
-
-    // Create permissions directory if it doesn't exist
-    if (!existsSync(permissionsDir)) {
-      mkdirSync(permissionsDir, { recursive: true });
-    }
-
-    try {
-      const watcher = watch(permissionsDir, (eventType, filename) => {
-        if (!filename) return;
-
-        // Only watch default.json - this is where the default patterns live
-        if (filename === 'default.json') {
-          this.debounce('default-permissions', () => this.handleDefaultPermissionsChange());
-        }
-      });
-
-      this.watchers.push(watcher);
-      debug('[ConfigWatcher] Watching app permissions directory:', permissionsDir);
-    } catch (error) {
-      debug('[ConfigWatcher] Error watching app permissions directory:', error);
-    }
-  }
-
-  /**
    * Handle default.json permissions change (app-level)
    */
   private handleDefaultPermissionsChange(): void {
@@ -1084,24 +1230,30 @@ export class ConfigWatcher {
    * Scan app-level themes directory to populate known themes
    */
   private scanAppThemes(): void {
-    const themesDir = getAppThemesDir();
-
-    if (!existsSync(themesDir)) {
-      return;
-    }
-
+    if (!existsSync(this.appThemesDir)) return;
     try {
-      const files = readdirSync(themesDir).filter(f => f.endsWith('.json'));
-
-      for (const file of files) {
-        const themeId = file.replace('.json', '');
-        this.knownThemes.add(themeId);
-      }
-
+      const files = this.listBoundedDirectFiles(
+        this.appThemesDir,
+        'app-themes',
+        'required',
+        filename => filename.endsWith('.json'),
+      );
+      this.knownThemes.clear();
+      for (const file of files) this.knownThemes.add(file.slice(0, -'.json'.length));
       debug('[ConfigWatcher] Known themes:', Array.from(this.knownThemes));
     } catch (error) {
       debug('[ConfigWatcher] Error scanning themes:', error);
     }
+  }
+
+  private handleThemesDirChange(): void {
+    const previous = new Set(this.knownThemes);
+    this.scanAppThemes();
+    for (const themeId of previous) {
+      if (!this.knownThemes.has(themeId)) this.callbacks.onPresetThemeChange?.(themeId, null);
+    }
+    for (const themeId of this.knownThemes) this.handlePresetThemeChange(themeId);
+    this.callbacks.onPresetThemesListChange?.(loadPresetThemes());
   }
 
   /**
@@ -1110,8 +1262,7 @@ export class ConfigWatcher {
   private handlePresetThemeChange(themeId: string): void {
     debug('[ConfigWatcher] Preset theme changed:', themeId);
 
-    const themesDir = getAppThemesDir();
-    const themePath = join(themesDir, `${themeId}.json`);
+    const themePath = join(this.appThemesDir, `${themeId}.json`);
 
     if (!existsSync(themePath)) {
       // Theme was deleted
@@ -1150,9 +1301,10 @@ export class ConfigWatcher {
  */
 export function createConfigWatcher(
   workspaceId: string,
-  callbacks: ConfigWatcherCallbacks
+  callbacks: ConfigWatcherCallbacks,
+  options: ConfigWatcherOptions = {},
 ): ConfigWatcher {
-  const watcher = new ConfigWatcher(workspaceId, callbacks);
+  const watcher = new ConfigWatcher(workspaceId, callbacks, options);
   watcher.start();
   return watcher;
 }

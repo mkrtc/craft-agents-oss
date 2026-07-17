@@ -14,4 +14,8 @@ export {
   ConfigWatcher,
   createConfigWatcher,
   type ConfigWatcherCallbacks,
+  type ConfigWatcherOptions,
 } from './watcher.ts';
+export * from './watch-adapter.ts';
+export * from './watch-broker.ts';
+export * from './watch-diagnostics.ts';

@@ -1,4 +1,4 @@
-import { readFile, writeFile, stat } from 'fs/promises'
+import { readFile, writeFile } from 'fs/promises'
 import { join } from 'path'
 import { RPC_CHANNELS, type FileAttachment, type SendMessageOptions, type SessionEvent } from '@craft-agent/shared/protocol'
 import type { StoredAttachment } from '@craft-agent/core/types'
@@ -10,14 +10,18 @@ const VALID_THINKING_LEVELS_LIST = THINKING_LEVEL_IDS.map(id => `'${id}'`).join(
 import { pushTyped, type RpcServer } from '@craft-agent/server-core/transport'
 import type { HandlerDeps } from '../handler-deps'
 import { setTransferableHandler } from './transfer'
+import {
+  SessionFileObserver,
+  scanSessionDirectoryBounded,
+} from './session-file-observer'
 
 interface ClientSessionWatchState {
-  watcher: import('fs').FSWatcher
+  observer: SessionFileObserver
   sessionId: string
-  debounceTimer: ReturnType<typeof setTimeout> | null
+  status: import('@craft-agent/shared/protocol').SessionFileWatchStatus
 }
 
-// Per-client session file watcher state (supports concurrent windows/clients safely)
+// Per-client session file observation state (supports concurrent clients safely).
 const clientSessionWatches = new Map<string, ClientSessionWatchState>()
 
 const SESSION_GET_LOG_ID_LIMIT = 25
@@ -47,58 +51,8 @@ function sessionWorkspaceDistribution(sessions: Array<{ workspaceId?: string }>)
 export function cleanupSessionFileWatchForClient(clientId: string): void {
   const state = clientSessionWatches.get(clientId)
   if (!state) return
-
-  if (state.debounceTimer) {
-    clearTimeout(state.debounceTimer)
-    state.debounceTimer = null
-  }
-
-  state.watcher.close()
+  state.observer.close()
   clientSessionWatches.delete(clientId)
-}
-
-// Recursive directory scanner for session files
-// Filters out internal files (session.jsonl) and hidden files (. prefix)
-// Returns only non-empty directories
-async function scanSessionDirectory(dirPath: string): Promise<import('@craft-agent/shared/protocol').SessionFile[]> {
-  const { readdir, stat } = await import('fs/promises')
-  const entries = await readdir(dirPath, { withFileTypes: true })
-  const files: import('@craft-agent/shared/protocol').SessionFile[] = []
-
-  for (const entry of entries) {
-    // Skip internal and hidden files
-    if (entry.name === 'session.jsonl' || entry.name.startsWith('.')) continue
-
-    const fullPath = join(dirPath, entry.name)
-
-    if (entry.isDirectory()) {
-      // Recursively scan subdirectory
-      const children = await scanSessionDirectory(fullPath)
-      // Only include non-empty directories
-      if (children.length > 0) {
-        files.push({
-          name: entry.name,
-          path: fullPath,
-          type: 'directory',
-          children,
-        })
-      }
-    } else {
-      const stats = await stat(fullPath)
-      files.push({
-        name: entry.name,
-        path: fullPath,
-        type: 'file',
-        size: stats.size,
-      })
-    }
-  }
-
-  // Sort: directories first, then alphabetically
-  return files.sort((a, b) => {
-    if (a.type !== b.type) return a.type === 'directory' ? -1 : 1
-    return a.name.localeCompare(b.name)
-  })
 }
 
 export const HANDLED_CHANNELS = [
@@ -455,55 +409,75 @@ export function registerSessionsHandlers(server: RpcServer, deps: HandlerDeps): 
   // Session Info Panel (files, notes, file watching)
   // ============================================================
 
-  // Get files in session directory (recursive tree structure)
+  // Get a bounded file tree. Observation is non-recursive; this listing has
+  // hard entry/depth/time limits so a hostile or accidental tree cannot run away.
   server.handle(RPC_CHANNELS.sessions.GET_FILES, async (_ctx, sessionId: string) => {
     const sessionPath = sessionManager.getSessionPath(sessionId)
     if (!sessionPath) return []
 
     try {
-      return await scanSessionDirectory(sessionPath)
+      const result = await scanSessionDirectoryBounded(sessionPath)
+      if (result.truncated) {
+        log.warn('Session file listing reached a safety limit', {
+          reason: result.reason,
+          scannedEntries: result.scannedEntries,
+          scannedDirectories: result.scannedDirectories,
+        })
+      }
+      return result.files
     } catch (error) {
       log.error('Failed to get session files:', error)
       return []
     }
   })
 
-  // Start watching a session directory for file changes (per client)
+  // Start bounded non-recursive observation plus coalesced polling (per client).
   server.handle(RPC_CHANNELS.sessions.WATCH_FILES, async (ctx, sessionId: string) => {
     const clientId = ctx.clientId
     cleanupSessionFileWatchForClient(clientId)
 
     const sessionPath = sessionManager.getSessionPath(sessionId)
-    if (!sessionPath) return
+    if (!sessionPath) return undefined
+
+    let state: ClientSessionWatchState
+    const observer = new SessionFileObserver(sessionPath, {
+      onChanged: () => {
+        const current = clientSessionWatches.get(clientId)
+        if (!current || current.observer !== observer) return
+        pushTyped(server, RPC_CHANNELS.sessions.FILES_CHANGED, { to: 'client', clientId }, current.sessionId)
+      },
+      onStatusChange: (status) => {
+        const current = clientSessionWatches.get(clientId)
+        if (current?.observer === observer) current.status = status
+      },
+      onRemoved: () => {
+        const current = clientSessionWatches.get(clientId)
+        if (current?.observer === observer) clientSessionWatches.delete(clientId)
+      },
+    })
+
+    state = {
+      observer,
+      sessionId,
+      status: observer.getStatus(),
+    }
+    clientSessionWatches.set(clientId, state)
 
     try {
-      const { watch } = await import('fs')
-
-      const state: ClientSessionWatchState = {
-        watcher: null as unknown as import('fs').FSWatcher,
-        sessionId,
-        debounceTimer: null,
-      }
-
-      state.watcher = watch(sessionPath, { recursive: true }, (_eventType, filename) => {
-        // Ignore internal files and hidden files
-        if (filename && (filename.includes('session.jsonl') || filename.startsWith('.'))) {
-          return
-        }
-
-        // Debounce: wait 100ms before notifying to batch rapid changes
-        if (state.debounceTimer) {
-          clearTimeout(state.debounceTimer)
-        }
-
-        state.debounceTimer = setTimeout(() => {
-          pushTyped(server, RPC_CHANNELS.sessions.FILES_CHANGED, { to: 'client', clientId }, state.sessionId)
-        }, 100)
-      })
-
-      clientSessionWatches.set(clientId, state)
+      state.status = await observer.start()
+      return state.status
     } catch (error) {
-      log.error('Failed to start session file watcher:', error)
+      if (clientSessionWatches.get(clientId)?.observer === observer) {
+        cleanupSessionFileWatchForClient(clientId)
+      }
+      log.error('Failed to start bounded session file observation:', error)
+      return {
+        mode: 'manual-refresh',
+        degraded: true,
+        reason: 'path-unavailable',
+        watchedDirectoryCount: 0,
+        limits: observer.getStatus().limits,
+      } satisfies import('@craft-agent/shared/protocol').SessionFileWatchStatus
     }
   })
 

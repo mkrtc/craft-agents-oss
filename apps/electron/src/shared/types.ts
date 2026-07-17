@@ -206,6 +206,7 @@ import type {
   TestLlmConnectionResult,
   SkillFile,
   SessionFile,
+  SessionFileWatchStatus,
   OAuthResult,
   McpToolsResult,
   GitBashStatus,
@@ -491,7 +492,7 @@ export interface ElectronAPI {
   getSessionFiles(sessionId: string): Promise<SessionFile[]>
   getSessionNotes(sessionId: string): Promise<string>
   setSessionNotes(sessionId: string, content: string): Promise<void>
-  watchSessionFiles(sessionId: string): Promise<void>
+  watchSessionFiles(sessionId: string): Promise<SessionFileWatchStatus | undefined>
   unwatchSessionFiles(): Promise<void>
   onSessionFilesChanged(callback: (sessionId: string) => void): () => void
 

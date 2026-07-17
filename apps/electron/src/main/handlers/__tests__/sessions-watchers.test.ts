@@ -97,8 +97,10 @@ describe('sessions file watchers', () => {
     expect(watch).toBeTruthy()
     expect(unwatch).toBeTruthy()
 
-    await watch!({ clientId: 'client-a' }, 'session-a')
-    await watch!({ clientId: 'client-b' }, 'session-b')
+    const statusA = await watch!({ clientId: 'client-a' }, 'session-a')
+    const statusB = await watch!({ clientId: 'client-b' }, 'session-b')
+    expect(statusA).toMatchObject({ mode: 'watching', degraded: false })
+    expect(statusB).toMatchObject({ mode: 'watching', degraded: false })
     await wait(50)
 
     writeFileSync(join(sessionDirA, 'a.txt'), `a-${Date.now()}`)

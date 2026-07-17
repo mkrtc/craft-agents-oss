@@ -603,6 +603,31 @@ export interface SessionFile {
   children?: SessionFile[]
 }
 
+export type SessionFileWatchDegradedReason =
+  | 'capacity'
+  | 'watch-error'
+  | 'watch-closed'
+  | 'watch-limit'
+  | 'entry-limit'
+  | 'depth-limit'
+  | 'time-limit'
+  | 'path-unavailable'
+  | 'unsafe-symlink'
+
+export interface SessionFileWatchStatus {
+  mode: 'watching' | 'polling' | 'manual-refresh'
+  degraded: boolean
+  reason?: SessionFileWatchDegradedReason
+  watchedDirectoryCount: number
+  pollingIntervalMs?: number
+  limits: {
+    maxEntries: number
+    maxDepth: number
+    maxDurationMs: number
+    maxWatchedDirectories: number
+  }
+}
+
 export interface FileSearchResult {
   name: string
   path: string
