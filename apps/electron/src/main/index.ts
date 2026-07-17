@@ -23,7 +23,7 @@ Sentry.init({
   release: app.getVersion(),
   // Enabled whenever the ingest URL is available — works in both production (baked via CI)
   // and development (injected via .env / 1Password). Filter by environment in Sentry dashboard.
-  enabled: !!process.env.SENTRY_ELECTRON_INGEST_URL,
+  enabled: process.env.CRAFT_DIAG_MAIN_MEMORY !== '1' && !!process.env.SENTRY_ELECTRON_INGEST_URL,
 
   // Scrub sensitive data before sending to Sentry.
   // Removes authorization headers, API keys/tokens, and credential-like values.
@@ -741,6 +741,42 @@ app.whenReady().then(async () => {
       oauthFlowStore = instance.oauthFlowStore
       moduleSink = instance.wsServer.push.bind(instance.wsServer)
       moduleClientResolver = resolveClientId
+
+      // Diagnostic-only main-memory attribution. The module is deliberately
+      // dynamically imported behind one exact gate: ordinary launches do not
+      // load a route, timer, driver, counter surface, or output writer.
+      if (process.env.CRAFT_DIAG_MAIN_MEMORY === '1') {
+        let diagnosticExitCode = 0
+        try {
+          const { runMainMemoryDiagnostic } = await import('./diagnostics/main-memory')
+          await runMainMemoryDiagnostic({
+            sessionManager: instance.sessionManager,
+            wsServer: instance.wsServer,
+            serverToken: instance.token,
+            appUserDataPath: app.getPath('userData'),
+          })
+          mainLog.info('[main-memory-diagnostic] isolated run completed')
+        } catch (error) {
+          diagnosticExitCode = 1
+          mainLog.error(
+            '[main-memory-diagnostic] isolated run failed:',
+            error instanceof Error ? error.message : error,
+          )
+        } finally {
+          const deadline = Date.now() + resolveRuntimeLifecycleConfig().shutdownTimeoutMs
+          await instance.sessionManager.cleanup({ deadline }).catch(error => {
+            diagnosticExitCode = 1
+            mainLog.error('[main-memory-diagnostic] session cleanup failed:', error)
+          })
+          await instance.stop().catch(error => {
+            diagnosticExitCode = 1
+            mainLog.error('[main-memory-diagnostic] server cleanup failed:', error)
+          })
+          browserPaneManager?.destroyAll()
+          app.exit(diagnosticExitCode)
+        }
+        return
+      }
 
       // -----------------------------------------------------------------------
       // Messaging Gateway — attach the WS publisher, init local workspaces,
