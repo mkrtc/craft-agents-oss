@@ -39,6 +39,7 @@ import { parseDiffFromFile, type FileContents } from '@pierre/diffs'
 import { getDiffStats, getUnifiedDiffStats } from '../code-viewer'
 import { TurnCardActionsMenu } from './TurnCardActionsMenu'
 import { computeLastChildSet, groupActivitiesByParent, isActivityGroup, formatDuration, formatTokens, deriveTurnPhase, shouldShowThinkingIndicator, type ActivityGroup, type AssistantTurn } from './turn-utils'
+import { recordTurnCardRender } from '../../perf/streamPerf'
 import { extractAnnotationSelectedText } from './follow-up-helpers'
 import {
   formatAnnotationFollowUpTooltipText,
@@ -2850,6 +2851,12 @@ export const TurnCard = React.memo(function TurnCard({
   openAnnotationRequest,
   annotationInteractionMode = 'interactive',
 }: TurnCardProps) {
+  // CRFT-STREAM-V1 opt-in, content-free render counter. No-op unless explicitly
+  // enabled (see perf/streamPerf.ts). Records every TurnCard function-body entry,
+  // split into completed-historical vs active tallies. Must remain the first
+  // statement so it counts every render attempt that React does not memo away.
+  recordTurnCardRender(isComplete, isStreaming)
+
   // Derive the turn phase from props using the state machine.
   // This provides a single source of truth for lifecycle state,
   // replacing the old ad-hoc boolean combinations.

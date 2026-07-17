@@ -8,6 +8,12 @@ import { resolve } from 'path'
 // SENTRY_ORG, SENTRY_PROJECT to CI secrets. See CLAUDE.md "Sentry Error Tracking" section.
 // import { sentryVitePlugin } from '@sentry/vite-plugin'
 
+// CRFT-STREAM-V1 Lane A perf harness: only bundled when explicitly requested
+// (CRFT_PERF_BUILD=1) or during `vite dev` (where rollupOptions.input is not
+// consulted at all). A normal production build (`bun run electron:build:renderer`,
+// used for packaging) must not ship this dedicated entry.
+const includePerfHarness = process.env.CRFT_PERF_BUILD === '1'
+
 export default defineConfig({
   plugins: [
     react({
@@ -43,6 +49,9 @@ export default defineConfig({
       input: {
         main: resolve(__dirname, 'src/renderer/index.html'),
         playground: resolve(__dirname, 'src/renderer/playground.html'),
+        ...(includePerfHarness
+          ? { 'chat-stream-perf': resolve(__dirname, 'src/renderer/chat-stream-perf.html') }
+          : {}),
         'browser-toolbar': resolve(__dirname, 'src/renderer/browser-toolbar.html'),
         'browser-empty-state': resolve(__dirname, 'src/renderer/browser-empty-state.html'),
       }

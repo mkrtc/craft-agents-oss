@@ -62,6 +62,7 @@ import {
   type UserTurn,
   type SystemTurn,
   type AuthRequestTurn,
+  recordChatDisplayRender,
 } from "@craft-agent/ui"
 import { MemoizedAuthRequestCard } from "@/components/chat/AuthRequestCard"
 import { ChatInputZone, type StructuredInputState, type StructuredResponse, type PermissionResponse, type AdminApprovalResponse } from "./input"
@@ -505,6 +506,11 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
   // Connection unavailable
   connectionUnavailable = false,
 }, ref) {
+  // CRFT-STREAM-V1 opt-in, content-free render counter. No-op unless explicitly
+  // enabled (see @craft-agent/ui perf/streamPerf). Records every ChatDisplay
+  // function-body entry so the renderer baseline can measure container renders.
+  recordChatDisplayRender()
+
   const { t } = useTranslation()
 
   // Panel focus state (for multi-panel auto-scroll behavior)

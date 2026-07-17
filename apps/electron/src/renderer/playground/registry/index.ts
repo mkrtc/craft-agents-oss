@@ -26,6 +26,7 @@ import { imageSupportComponents } from './image-support'
 import { mobileWebUIComponents } from './mobile-webui'
 import { kanbanComponents } from './kanban'
 import { taskEditorComponents } from './task-editor'
+import { chatStreamPerfComponents } from './chat-stream-perf'
 
 export * from './types'
 
@@ -58,6 +59,7 @@ export const componentRegistry: ComponentEntry[] = [
   ...containerTransitionsComponents,
   ...messagingComponents,
   ...imageSupportComponents,
+  ...chatStreamPerfComponents,
 ]
 
 export function getCategories(): CategoryGroup[] {

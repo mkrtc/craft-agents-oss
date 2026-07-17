@@ -16,6 +16,8 @@
     "./annotations/follow-up-state": "./src/components/annotations/follow-up-state.ts",
     "./ui/drawer": "./src/components/ui/drawer.tsx",
     "./context": "./src/context/index.ts",
+    "./perf/streamPerf": "./src/perf/streamPerf.ts",
+    "./perf/crft-stream-v1": "./src/perf/crft-stream-v1/index.ts",
     "./styles": "./src/styles/index.css"
   },
   "dependencies": {

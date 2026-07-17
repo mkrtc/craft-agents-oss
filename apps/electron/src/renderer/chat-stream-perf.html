@@ -1,0 +1,17 @@
+<!DOCTYPE html>
+<html lang="en" class="light">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; img-src 'self' data: https: file: thumbnail:; connect-src 'self' https:; font-src 'self' data: https://fonts.gstatic.com;">
+  <title>CRFT-STREAM-V1 Perf Harness</title>
+</head>
+<body>
+  <div id="root"></div>
+  <!-- Dedicated CRFT-STREAM-V1 Lane A entry: mounts ONLY the harness (no app
+       registry) so it boots cleanly in the production `vite preview` lane and
+       renders without React.StrictMode double-invocation for authoritative
+       production render counts. -->
+  <script type="module" src="./chat-stream-perf.tsx"></script>
+</body>
+</html>

@@ -287,3 +287,16 @@ export {
   Icon_Inbox,
   type IconProps,
 } from './components/icons'
+
+// CRFT-STREAM-V1 opt-in, content-free render instrumentation (R0 baseline).
+// Zero-cost and disabled by default; see perf/streamPerf.ts.
+export {
+  isStreamPerfEnabled,
+  enableStreamPerf,
+  disableStreamPerf,
+  resetStreamPerfCounters,
+  getStreamPerfCounters,
+  recordChatDisplayRender,
+  recordTurnCardRender,
+  type StreamPerfCounters,
+} from './perf/streamPerf'

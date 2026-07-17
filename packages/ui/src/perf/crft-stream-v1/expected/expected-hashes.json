@@ -1,0 +1,125 @@
+{
+  "generatorId": "CRFT-STREAM-V1",
+  "generatorVersion": "1.0.0",
+  "seed": 1129465428,
+  "seedHex": "0x43524654",
+  "harnessSlug": "chat-stream-perf",
+  "counts": {
+    "total": 1500,
+    "user": 100,
+    "finalAssistant": 100,
+    "tool": 900,
+    "intermediate": 300,
+    "special": 100
+  },
+  "toolPayloadDistribution": {
+    "bytes2KiB": 850,
+    "bytes32KiB": 45,
+    "bytes192KiB": 5
+  },
+  "byteTotals": {
+    "toolResultBytes": 4198400,
+    "contentBytes": 68772
+  },
+  "traceEventCount": 1411,
+  "fixtureSha256": "0c101f54ab8fa476bec9c50a0dc5f88741771ea18a91f4b088201f8bd8647a58",
+  "oracle": {
+    "baseGroupingHash": "7f41b37adb651c08dec1351329ec03537db37b165beb50a56ca124df915b026b",
+    "baseOrderedMessagesHash": "1f57ccf29cc407e41b3e887b0c1d35f1bbba17a28314d61361c9d91b83e7da10",
+    "barriers": [
+      {
+        "seq": 0,
+        "label": "primary-stream-start",
+        "orderedMessagesHash": "b2c8114e83f50ace13fd23c867af67131028455ae762b3584ae0256118bb89c2",
+        "groupingHash": "4d69d1687405ff80ac397e7e3137555d77cc7c88166931a4d09b61776ff5d8fc"
+      },
+      {
+        "seq": 300,
+        "label": "primary-delta-300",
+        "orderedMessagesHash": "a6fa4ae033a539907c1a5fc0db584bbf1bd008a56a666beb302de24a3c4ae51e",
+        "groupingHash": "5087babf8dff2abd1138be3d6d93d00beed5e1e694e4c43f7eca32ba716c026f"
+      },
+      {
+        "seq": 600,
+        "label": "primary-delta-600",
+        "orderedMessagesHash": "326afdc98ce1b85768a1d53951a3c36086be61fc2307896115d644d7746d1fc0",
+        "groupingHash": "05a9ce22619e36d9de8e5c20c9bf10db3d87e5b67cbf4a2cbf2d64945d6a85fe"
+      },
+      {
+        "seq": 900,
+        "label": "primary-delta-900",
+        "orderedMessagesHash": "e271924a415489f2c1863279468c1a53821e8d4a2e20fa486fb5cebf80e1eb8d",
+        "groupingHash": "ca625fb53506de5e6a6127cb888ca7a0f7371e015ed1dbd4f5eb1b005e2eab3e"
+      },
+      {
+        "seq": 1200,
+        "label": "primary-delta-1200",
+        "orderedMessagesHash": "9fe68342ef1afb90bdca283dce5b4d196f9939b46b33aa04deb400b2918d2213",
+        "groupingHash": "65cbee79aaba08293e551f650631a56890ba1cc66a8ef0019bfdd062ba960409"
+      },
+      {
+        "seq": 1201,
+        "label": "primary-text-complete",
+        "orderedMessagesHash": "97fb7bc9db36d61b9f8b51f08536b3bc0be338dd897329ce2bec4943dfe190f6",
+        "groupingHash": "2bbf6c77a53ea21a397f83b49933155b762b2cff20490feea6cd95b7de410d70"
+      },
+      {
+        "seq": 1202,
+        "label": "secondary-user-boundary",
+        "orderedMessagesHash": "f99819ee62f30985179079a62e805555313994635abddacfc3ff50e069141804",
+        "groupingHash": "4219bbacafa112216f731cd4b647741f9ad34ddf42cc1151dcef8a74cb25c182"
+      },
+      {
+        "seq": 1403,
+        "label": "secondary-delta-200",
+        "orderedMessagesHash": "bdabe50f60f2ec37f563bdd73c86eda51bc6be78d8e72634053bc6277d57adb9",
+        "groupingHash": "21106a9f57e6cb23af7e0e893d07c6aae74c642b58c035c26a930b99c3922dbb"
+      },
+      {
+        "seq": 1404,
+        "label": "late-tool-complete",
+        "orderedMessagesHash": "41062cfe855fa87e0b7546ccb181add6b715c829043c77bcfb75a0a1c3a316bb",
+        "groupingHash": "4bff95c4654522773ef6e09c989bb6d5975fb2ad66cfea970bcd8309179958d2"
+      },
+      {
+        "seq": 1405,
+        "label": "annotation-update",
+        "orderedMessagesHash": "41062cfe855fa87e0b7546ccb181add6b715c829043c77bcfb75a0a1c3a316bb",
+        "groupingHash": "4bff95c4654522773ef6e09c989bb6d5975fb2ad66cfea970bcd8309179958d2"
+      },
+      {
+        "seq": 1406,
+        "label": "trace-compaction-complete",
+        "orderedMessagesHash": "11d085be0d600c31b661cbb7875e972dc3e63a2ff39c21369a23403400f22a2b",
+        "groupingHash": "4bff95c4654522773ef6e09c989bb6d5975fb2ad66cfea970bcd8309179958d2"
+      },
+      {
+        "seq": 1407,
+        "label": "interruption",
+        "orderedMessagesHash": "8b45cb02472a051ec87c76144b44d41d4884054ae32f0790c798d3ae2fe8c0a0",
+        "groupingHash": "b6eefd2ad0a2653845e65a99a47a5d9cdc809cffd20bb00d986bb8883dca7296"
+      },
+      {
+        "seq": 1408,
+        "label": "hidden-insert",
+        "orderedMessagesHash": "8b45cb02472a051ec87c76144b44d41d4884054ae32f0790c798d3ae2fe8c0a0",
+        "groupingHash": "b6eefd2ad0a2653845e65a99a47a5d9cdc809cffd20bb00d986bb8883dca7296"
+      },
+      {
+        "seq": 1409,
+        "label": "hidden-remove",
+        "orderedMessagesHash": "8b45cb02472a051ec87c76144b44d41d4884054ae32f0790c798d3ae2fe8c0a0",
+        "groupingHash": "b6eefd2ad0a2653845e65a99a47a5d9cdc809cffd20bb00d986bb8883dca7296"
+      },
+      {
+        "seq": 1410,
+        "label": "full-session-replacement",
+        "orderedMessagesHash": "e765ad4a142fe7912ce7b884fe932ed6fea2db0df6377c4acc44af7137eaf79b",
+        "groupingHash": "f960b1a8b8cf9df7d8d2f0992712ef9cd9bcab65541f75124f728f9343c29eb8"
+      }
+    ],
+    "finalGroupingHash": "f960b1a8b8cf9df7d8d2f0992712ef9cd9bcab65541f75124f728f9343c29eb8",
+    "finalOrderedMessagesHash": "e765ad4a142fe7912ce7b884fe932ed6fea2db0df6377c4acc44af7137eaf79b",
+    "finalTranscriptHash": "79837ad28b47a3bab0c98905e0f68dda9808d74bb300805def6c57066dd8b92f"
+  }
+}

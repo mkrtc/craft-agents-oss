@@ -50,6 +50,16 @@ export function PlaygroundApp() {
   } = useTheme()
   const [presetThemes, setPresetThemes] = React.useState<PresetTheme[]>([])
   const [selectedId, setSelectedId] = React.useState<string | null>(() => {
+    // URL param takes precedence (e.g. ?component=chat-stream-perf for the
+    // CRFT-STREAM-V1 perf harness). Enables deterministic, scriptable launch.
+    try {
+      const fromUrl = new URLSearchParams(window.location.search).get('component')
+      if (fromUrl && getComponentById(fromUrl)) {
+        return fromUrl
+      }
+    } catch {
+      // Ignore malformed URLs
+    }
     // Try to restore from localStorage
     try {
       const stored = localStorage.getItem(SELECTED_STORAGE_KEY)
