@@ -216,6 +216,7 @@ export const CHANNEL_MAP = {
   watchSessionFiles: invoke(RPC_CHANNELS.sessions.WATCH_FILES),
   unwatchSessionFiles: invoke(RPC_CHANNELS.sessions.UNWATCH_FILES),
   onSessionFilesChanged: listener(RPC_CHANNELS.sessions.FILES_CHANGED),
+  onSessionFilesWatchStatus: listener(RPC_CHANNELS.sessions.FILES_WATCH_STATUS),
 
   // Sources
   getSources: invoke(RPC_CHANNELS.sources.GET),

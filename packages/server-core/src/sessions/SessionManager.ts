@@ -1,6 +1,6 @@
 import type { EventSink, RpcServer } from '@craft-agent/server-core/transport'
 import { CLIENT_BROWSER_INVOKE } from '@craft-agent/server-core/transport'
-import type { ISessionManager, IBrowserPaneManager, ExecutePromptAutomationInput } from '@craft-agent/server-core/handlers'
+import type { ISessionManager, IBrowserPaneManager, ExecutePromptAutomationInput, WorkspaceRemovalHooks } from '@craft-agent/server-core/handlers'
 import { RemoteBrowserPaneManager } from './RemoteBrowserPaneManager'
 import { validateFilePath, getWorkspaceAllowedDirs } from '@craft-agent/server-core/handlers'
 import { createScopedLogger, CONSOLE_LOGGER, type PlatformServices, type Logger } from '@craft-agent/server-core/runtime'
@@ -92,7 +92,7 @@ import { isParentTaskTool } from '@craft-agent/shared/utils/toolNames'
 import { restoreFiles } from '@craft-agent/shared/utils/bundle-files'
 import { getCredentialManager } from '@craft-agent/shared/credentials'
 import { CraftMcpClient, McpClientPool, McpPoolServer } from '@craft-agent/shared/mcp'
-import { type Session, type SessionEvent, type FileAttachment, type SendMessageOptions, type UnreadSummary, type RemoteSessionTransferPayload, type ImportRemoteSessionTransferResult, RPC_CHANNELS, generateMessageId } from '@craft-agent/shared/protocol'
+import { type Session, type SessionEvent, type FileAttachment, type SendMessageOptions, type UnreadSummary, type RemoteSessionTransferPayload, type ImportRemoteSessionTransferResult, type WorkspaceRemovalResult, type WorkspaceRemovalCode, RPC_CHANNELS, generateMessageId } from '@craft-agent/shared/protocol'
 import { messageToStored, storedToMessage, type Message, type StoredAttachment, type ToolDisplayMeta, type TokenUsage } from '@craft-agent/core/types'
 import { formatPathsToRelative, formatToolInputPaths, perf, encodeIconToDataUrlAsync, getEmojiIcon, resetSummarizationClient, resolveToolIcon, readFileAttachment, selectSpreadMessages, normalizePath } from '@craft-agent/shared/utils'
 import { loadAllSkills, loadSkillBySlug, invalidateSkillsCache, listSkillSummaries, resolveSkillFilePathBySlug, type LoadedSkill, type SkillSummary } from '@craft-agent/shared/skills'
@@ -1373,6 +1373,39 @@ function readTaskToolResults(workspaceRoot: string, slug: string, runId?: string
   }
 }
 
+type WorkspaceLifecycleState = 'active' | 'removing' | 'removed'
+type WorkspaceAdmissionKind = 'session' | 'task' | 'automation' | 'background'
+
+interface WorkspaceLifecycle {
+  state: WorkspaceLifecycleState
+  inFlight: Record<WorkspaceAdmissionKind, number>
+  removalPromise?: Promise<WorkspaceRemovalResult>
+  teardownStarted: boolean
+}
+
+export class WorkspaceAdmissionError extends Error {
+  readonly code = 'workspace-admission-closed'
+
+  constructor(readonly workspaceId: string, readonly kind: WorkspaceAdmissionKind) {
+    super(`Workspace ${workspaceId} is not accepting ${kind} work`)
+    this.name = 'WorkspaceAdmissionError'
+  }
+}
+
+function newWorkspaceLifecycle(state: WorkspaceLifecycleState = 'active'): WorkspaceLifecycle {
+  return {
+    state,
+    inFlight: { session: 0, task: 0, automation: 0, background: 0 },
+    teardownStarted: false,
+  }
+}
+
+function runtimeDisposalFailed(result: RuntimeDisposeResult | undefined): boolean {
+  return result?.outcome === 'timed_out'
+    || result?.errorCode === 'runtime_dispose_failed'
+    || result?.errorCode === 'runtime_dispose_timed_out'
+}
+
 export class SessionManager implements ISessionManager {
   private sessions: Map<string, ManagedSession> = new Map()
   // Delta batching for performance - reduces IPC events from 50+/sec to ~20/sec
@@ -1408,6 +1441,8 @@ export class SessionManager implements ISessionManager {
    * marked as unread when assistant completes - if user is viewing it, don't mark unread.
    */
   private activeViewingSession: Map<string, string> = new Map()
+  /** Canonical per-workspace admission/removal ownership. */
+  private workspaceLifecycles: Map<string, WorkspaceLifecycle> = new Map()
   /** Coordinates startup initialization waiters from IPC handlers. */
   private initGate = new InitGate()
   // O(1) index: taskId → sessionId for background task output lookup (avoids O(n) session scan)
@@ -1454,6 +1489,7 @@ export class SessionManager implements ISessionManager {
     sessionId: string
     topicName: string
   }) => Promise<void>
+  private workspaceReattachedHandler?: (workspaceId: string) => Promise<void>
 
   /**
    * Centralized setter for session processing state.
@@ -1668,6 +1704,10 @@ export class SessionManager implements ISessionManager {
     fn: (input: { workspaceId: string; sessionId: string; topicName: string }) => Promise<void>,
   ): void {
     this.automationBinder = fn
+  }
+
+  setWorkspaceReattachedHandler(fn: (workspaceId: string) => Promise<void>): void {
+    this.workspaceReattachedHandler = fn
   }
 
   private taskConductor?: TaskConductorService
@@ -2101,6 +2141,12 @@ export class SessionManager implements ISessionManager {
    * workspaceId must be the global config ID (what the renderer knows).
    */
   setupConfigWatcher(workspaceRootPath: string, workspaceId: string): void {
+    const existingLifecycle = this.workspaceLifecycles.get(workspaceId)
+    if (existingLifecycle?.state === 'removing') {
+      throw new WorkspaceAdmissionError(workspaceId, 'background')
+    }
+    const reattached = this.activateWorkspaceLifecycle(workspaceId)
+
     // Check if already watching this workspace
     if (this.configWatchers.has(workspaceRootPath)) {
       return // Already watching this workspace
@@ -2177,6 +2223,33 @@ export class SessionManager implements ISessionManager {
         sessionLog.info('Default permissions changed')
         this.broadcastDefaultPermissionsChanged()
       },
+      onWatchStateChange: (state) => {
+        const details = {
+          event: state.status === 'degraded' ? 'config_watch_degraded' : 'config_watch_active',
+          workspaceId,
+          status: state.status,
+          pathClass: state.pathClass,
+          priority: state.priority,
+          reason: state.reason,
+          errorCode: state.errorCode,
+        }
+        if (state.status === 'degraded') sessionLog.warn('[config-watch] degraded', details)
+        else sessionLog.info('[config-watch] active', details)
+      },
+      onWatchDiagnostic: (diagnostic) => {
+        if (diagnostic.type !== 'degraded') return
+        sessionLog.warn('[config-watch] diagnostic', {
+          event: 'config_watch_diagnostic',
+          workspaceId,
+          type: diagnostic.type,
+          pathClass: diagnostic.pathClass,
+          priority: diagnostic.priority,
+          reason: diagnostic.reason,
+          errorCode: diagnostic.errorCode,
+          activeDirectoryCount: diagnostic.activeDirectoryCount,
+          capacity: diagnostic.capacity,
+        })
+      },
       onSkillsListChange: async (skills) => {
         sessionLog.info(`Skills list changed in ${workspaceRootPath} (${skills.length} skills)`)
         this.broadcastSkillsChanged(workspaceId, skills)
@@ -2246,7 +2319,14 @@ export class SessionManager implements ISessionManager {
     }
 
     const watcher = new ConfigWatcher(workspaceRootPath, callbacks)
-    watcher.start()
+    try {
+      watcher.start()
+    } catch (error) {
+      if (error instanceof Error && error.name === 'WatchCapacityError') {
+        ;(error as Error & { code: string }).code = 'required-watch-budget'
+      }
+      throw error
+    }
     this.configWatchers.set(workspaceRootPath, watcher)
 
     // Initialize AutomationSystem for this workspace (includes scheduler, handlers, and event logging)
@@ -2256,6 +2336,8 @@ export class SessionManager implements ISessionManager {
         workspaceId,
         enableScheduler: true,
         onPromptsReady: async (prompts) => {
+          const releaseAutomationAdmission = this.acquireWorkspaceAdmission(workspaceId, 'automation')
+          try {
           // Execute prompt automations by creating new sessions
           const settled = await Promise.allSettled(
             prompts.map((pending) =>
@@ -2288,13 +2370,16 @@ export class SessionManager implements ISessionManager {
               error: result.status === 'rejected' ? String(result.reason) : undefined,
             })
 
-            appendAutomationHistoryEntry(workspaceRootPath, entry).catch(e => sessionLog.warn('[Automations] Failed to write history:', e))
+            await appendAutomationHistoryEntry(workspaceRootPath, entry).catch(e => sessionLog.warn('[Automations] Failed to write history:', e))
 
             if (result.status === 'rejected') {
               sessionLog.error(`[Automations] Failed to execute prompt action ${idx + 1}:`, result.reason)
             } else {
               sessionLog.info(`[Automations] Created session ${result.value.sessionId} from prompt action`)
             }
+          }
+          } finally {
+            releaseAutomationAdmission()
           }
         },
         onError: (event, error) => {
@@ -2303,6 +2388,20 @@ export class SessionManager implements ISessionManager {
       })
       this.automationSystems.set(workspaceRootPath, automationSystem)
       sessionLog.info(`Initialized AutomationSystem for workspace ${workspaceId}`)
+    }
+
+    if (reattached) {
+      const workspace = getWorkspaceByNameOrId(workspaceId)
+      if (workspace) {
+        const loaded = this.loadWorkspaceSessionsFromDisk(workspace)
+        sessionLog.info(`[workspace-detach] reattached clean workspace ownership`, { workspaceId, loadedSessions: loaded })
+        void this.workspaceReattachedHandler?.(workspaceId).catch((error) => {
+          sessionLog.error('[workspace-detach] external workspace reattach failed', {
+            workspaceId,
+            error: error instanceof Error ? error.message : String(error),
+          })
+        })
+      }
     }
   }
 
@@ -2765,70 +2864,60 @@ export class SessionManager implements ISessionManager {
     }
   }
 
-  // Load all existing sessions from disk into memory (metadata only - messages are lazy-loaded)
-  private loadSessionsFromDisk(): void {
-    try {
-      const workspaces = getWorkspaces()
-      let totalSessions = 0
+  private loadWorkspaceSessionsFromDisk(workspace: Workspace): number {
+    const workspaceRootPath = workspace.rootPath
+    const sessionMetadata = listStoredSessions(workspaceRootPath)
+    const wsConfig = loadWorkspaceConfig(workspaceRootPath)
+    const wsDefaultWorkingDir = wsConfig?.defaults?.workingDirectory
+    let loaded = 0
 
-      // Iterate over each workspace and load its sessions
-      for (const workspace of workspaces) {
-        const workspaceRootPath = workspace.rootPath
-        const sessionMetadata = listStoredSessions(workspaceRootPath)
-        // Load workspace config once per workspace for default working directory
-        const wsConfig = loadWorkspaceConfig(workspaceRootPath)
-        const wsDefaultWorkingDir = wsConfig?.defaults?.workingDirectory
+    for (const meta of sessionMetadata) {
+      if (this.sessions.has(meta.id)) continue
+      const managed = createManagedSession(meta, workspace, {
+        enabledSourceSlugs: meta.enabledSourceSlugs,
+        workingDirectory: meta.workingDirectory ?? wsDefaultWorkingDir,
+      })
 
-        for (const meta of sessionMetadata) {
-          // Create managed session from metadata only (messages lazy-loaded on demand)
-          // This dramatically reduces memory usage at startup - messages are loaded
-          // when getSession() is called for a specific session
-          const managed = createManagedSession(meta, workspace, {
-            // The header carries the session's explicit source selection (persisted at
-            // creation / by setSessionSources). Seed it now so the renderer's very first
-            // session list shows the right chips — sessions without one hydrate any legacy
-            // body value on message load (see hydrateMessagesForColdPersist).
-            enabledSourceSlugs: meta.enabledSourceSlugs,
-            workingDirectory: meta.workingDirectory ?? wsDefaultWorkingDir,
-          })
-
-          // Migration: clear orphaned llmConnection references (e.g., after connection was deleted)
-          if (managed.llmConnection) {
-            const conn = resolveSessionConnection(managed.llmConnection, undefined)
-            if (!conn) {
-              sessionLog.warn(`Session ${meta.id} has orphaned llmConnection "${managed.llmConnection}", clearing`)
-              managed.llmConnection = undefined
-              managed.connectionLocked = false
-            }
-          }
-
-          // Initialize mode-manager state for restored sessions even before agent creation.
-          // This keeps diagnostics/effective mode aligned with persisted session metadata.
-          setPermissionMode(meta.id, managed.permissionMode ?? 'ask', { changedBy: 'restore' })
-          if (managed.previousPermissionMode) {
-            hydratePreviousPermissionMode(meta.id, managed.previousPermissionMode)
-          }
-
-          this.sessions.set(meta.id, managed)
-          const header = readSessionHeader(getSessionFilePath(workspaceRootPath, meta.id))
-          if (header) sessionPersistenceQueue.initializeBaseline(meta.id, header)
-
-          // Initialize session metadata in AutomationSystem for diffing
-          const automationSystem = this.automationSystems.get(workspaceRootPath)
-          if (automationSystem) {
-            automationSystem.setInitialSessionMetadata(meta.id, {
-              permissionMode: meta.permissionMode,
-              labels: meta.labels,
-              isFlagged: meta.isFlagged,
-              sessionStatus: meta.sessionStatus,
-              sessionName: managed.name,
-            })
-          }
-
-          totalSessions++
+      if (managed.llmConnection) {
+        const conn = resolveSessionConnection(managed.llmConnection, undefined)
+        if (!conn) {
+          sessionLog.warn(`Session ${meta.id} has orphaned llmConnection "${managed.llmConnection}", clearing`)
+          managed.llmConnection = undefined
+          managed.connectionLocked = false
         }
       }
 
+      setPermissionMode(meta.id, managed.permissionMode ?? 'ask', { changedBy: 'restore' })
+      if (managed.previousPermissionMode) {
+        hydratePreviousPermissionMode(meta.id, managed.previousPermissionMode)
+      }
+
+      this.sessions.set(meta.id, managed)
+      const header = readSessionHeader(getSessionFilePath(workspaceRootPath, meta.id))
+      if (header) sessionPersistenceQueue.initializeBaseline(meta.id, header)
+
+      const automationSystem = this.automationSystems.get(workspaceRootPath)
+      if (automationSystem) {
+        automationSystem.setInitialSessionMetadata(meta.id, {
+          permissionMode: meta.permissionMode,
+          labels: meta.labels,
+          isFlagged: meta.isFlagged,
+          sessionStatus: meta.sessionStatus,
+          sessionName: managed.name,
+        })
+      }
+      loaded += 1
+    }
+    return loaded
+  }
+
+  // Load all existing sessions from disk into memory (metadata only - messages are lazy-loaded)
+  private loadSessionsFromDisk(): void {
+    try {
+      let totalSessions = 0
+      for (const workspace of getWorkspaces()) {
+        totalSessions += this.loadWorkspaceSessionsFromDisk(workspace)
+      }
       sessionLog.info(`Loaded ${totalSessions} sessions from disk (metadata only)`)
     } catch (error) {
       sessionLog.error('Failed to load sessions from disk:', error)
@@ -3428,6 +3517,10 @@ export class SessionManager implements ISessionManager {
     return getSessionStoragePath(managed.workspace.rootPath, sessionId)
   }
 
+  getSessionWorkspaceId(sessionId: string): string | undefined {
+    return this.sessions.get(sessionId)?.workspace.id
+  }
+
   async createSession(
     workspaceId: string,
     options?: import('@craft-agent/shared/protocol').CreateSessionOptions,
@@ -3440,7 +3533,8 @@ export class SessionManager implements ISessionManager {
       initialTransferredSessionSummary?: string
     },
   ): Promise<Session> {
-    this.assertRuntimeAdmission()
+    const releaseAdmission = this.acquireWorkspaceAdmission(workspaceId, 'session')
+    try {
     const workspace = getWorkspaceByNameOrId(workspaceId)
     if (!workspace) {
       throw new Error(`Workspace ${workspaceId} not found`)
@@ -3944,6 +4038,9 @@ export class SessionManager implements ISessionManager {
     }
 
     return managedToSession(managed, isBranch ? { messages: managed.messages } : undefined)
+    } finally {
+      releaseAdmission()
+    }
   }
 
   /**
@@ -3968,6 +4065,271 @@ export class SessionManager implements ISessionManager {
     if (this.closing) {
       throw new Error('Session runtime manager is shutting down')
     }
+  }
+
+  private lifecycleFor(workspaceId: string): WorkspaceLifecycle {
+    let lifecycle = this.workspaceLifecycles.get(workspaceId)
+    if (!lifecycle) {
+      lifecycle = newWorkspaceLifecycle()
+      this.workspaceLifecycles.set(workspaceId, lifecycle)
+    }
+    return lifecycle
+  }
+
+  private activateWorkspaceLifecycle(workspaceId: string): boolean {
+    const lifecycle = this.workspaceLifecycles.get(workspaceId)
+    if (!lifecycle) {
+      this.workspaceLifecycles.set(workspaceId, newWorkspaceLifecycle())
+      return false
+    }
+    if (lifecycle.state !== 'removed') return false
+    this.workspaceLifecycles.set(workspaceId, newWorkspaceLifecycle())
+    return true
+  }
+
+  assertWorkspaceAdmission(workspaceId: string, kind: 'task' | 'background'): void {
+    this.assertRuntimeAdmission()
+    const lifecycle = this.lifecycleFor(workspaceId)
+    if (lifecycle.state !== 'active') throw new WorkspaceAdmissionError(workspaceId, kind)
+  }
+
+  private acquireWorkspaceAdmission(workspaceId: string, kind: WorkspaceAdmissionKind): () => void {
+    this.assertRuntimeAdmission()
+    const lifecycle = this.lifecycleFor(workspaceId)
+    if (lifecycle.state !== 'active') throw new WorkspaceAdmissionError(workspaceId, kind)
+    lifecycle.inFlight[kind] += 1
+    let released = false
+    return () => {
+      if (released) return
+      released = true
+      lifecycle.inFlight[kind] = Math.max(0, lifecycle.inFlight[kind] - 1)
+    }
+  }
+
+  private workspaceActivityCode(workspaceId: string): Extract<WorkspaceRemovalCode, 'active-session' | 'active-task' | 'active-background'> | null {
+    const lifecycle = this.lifecycleFor(workspaceId)
+    const workspaceSessions = [...this.sessions.values()].filter((managed) => managed.workspace.id === workspaceId)
+    const sessionIds = new Set(workspaceSessions.map((managed) => managed.id))
+
+    if (
+      lifecycle.inFlight.task > 0
+      || this.getTaskConductorService().hasNonTerminalRuns(workspaceId)
+    ) {
+      return 'active-task'
+    }
+
+    if (
+      lifecycle.inFlight.automation > 0
+      || lifecycle.inFlight.background > 0
+      || workspaceSessions.some((managed) =>
+        this.hasRunningBackgroundWork(managed)
+        || managed.backgroundShellCommands.size > 0
+        || managed.authRetryInProgress
+      )
+      || [...this.agentRefreshLocks.keys()].some((sessionId) => sessionIds.has(sessionId))
+    ) {
+      return 'active-background'
+    }
+
+    if (
+      lifecycle.inFlight.session > 0
+      || workspaceSessions.some((managed) => managed.isProcessing || managed.messageQueue.length > 0)
+      || [...this.messageLoadingPromises.keys()].some((sessionId) => sessionIds.has(sessionId))
+    ) {
+      return 'active-session'
+    }
+
+    return null
+  }
+
+  private classifyWorkspaceRemovalFailure(
+    error: unknown,
+    hooks: WorkspaceRemovalHooks,
+  ): Extract<WorkspaceRemovalCode, 'teardown-failed' | 'required-watch-budget'> {
+    const classified = hooks.classifyFailure?.(error)
+    if (classified) return classified
+    if (
+      typeof error === 'object'
+      && error !== null
+      && 'code' in error
+      && (error as { code?: unknown }).code === 'required-watch-budget'
+    ) {
+      return 'required-watch-budget'
+    }
+    return 'teardown-failed'
+  }
+
+  private async releaseWorkspaceResources(workspace: Workspace): Promise<void> {
+    const lifecycle = this.lifecycleFor(workspace.id)
+    lifecycle.teardownStarted = true
+
+    const watcher = this.configWatchers.get(workspace.rootPath)
+    if (watcher) {
+      watcher.stop()
+      this.configWatchers.delete(workspace.rootPath)
+    }
+
+    const automationSystem = this.automationSystems.get(workspace.rootPath)
+    if (automationSystem) {
+      automationSystem.dispose()
+      this.automationSystems.delete(workspace.rootPath)
+    }
+
+    this.getTaskConductorService().releaseWorkspace(workspace.id)
+
+    const managedSessions = [...this.sessions.values()].filter((managed) => managed.workspace.id === workspace.id)
+    for (const managed of managedSessions) {
+      managed.deleting = true
+      this.persistSession(managed)
+      await this.flushSession(managed.id)
+
+      const deltaTimer = this.deltaFlushTimers.get(managed.id)
+      if (deltaTimer) clearTimeout(deltaTimer)
+      this.deltaFlushTimers.delete(managed.id)
+      this.pendingDeltas.delete(managed.id)
+      this.clearAdminRememberApprovalsForSession(managed.id)
+      this.clearPendingPermissionRequestsForSession(managed.id)
+      this.clearExternalMetadataGuardTimer(managed.id)
+      this.messageLoadingPromises.delete(managed.id)
+      this.agentRefreshLocks.delete(managed.id)
+
+      if (managed.stopTimer) clearTimeout(managed.stopTimer)
+      managed.stopTimer = undefined
+      if (managed.activeTurn?.watchdogTimer) clearTimeout(managed.activeTurn.watchdogTimer)
+      managed.activeTurn = undefined
+      if (managed.autoRetryTimer) clearTimeout(managed.autoRetryTimer)
+      managed.autoRetryTimer = undefined
+      managed.autoRetryPending = undefined
+      managed.pendingExternalMetadata = undefined
+
+      const sessionBpm = this.getBrowserPaneManagerForSession(managed.id)
+      sessionBpm?.destroyForSession(managed.id)
+      this.remoteBpms.delete(managed.id)
+      this.browserHostByCanvas.delete(managed.id)
+
+      const hadRuntime = Boolean(managed.agent || managed.poolServer || managed.mcpPool || managed.runtimeGeneration)
+      const disposal = await this.disposeManagedAgentRuntime(managed, 'workspace_detach')
+      if ((hadRuntime && !disposal) || runtimeDisposalFailed(disposal)) {
+        const error = new Error(`Workspace runtime teardown failed for session ${managed.id}`)
+        ;(error as Error & { code: string }).code = disposal?.errorCode ?? 'runtime-dispose-failed'
+        throw error
+      }
+
+      sessionPersistenceQueue.cancel(managed.id)
+      unregisterSessionScopedToolCallbacks(managed.id)
+      managed.messageQueue.length = 0
+      managed.backgroundShellCommands.clear()
+      managed.backgroundTaskRegistry.clear()
+      managed.backgroundTaskOutputs.clear()
+      for (const [taskId, ownerSessionId] of this.taskOutputIndex) {
+        if (ownerSessionId === managed.id) this.taskOutputIndex.delete(taskId)
+      }
+      this.sessions.delete(managed.id)
+    }
+
+    this.activeViewingSession.delete(workspace.id)
+  }
+
+  removeWorkspace(workspaceId: string, hooks: WorkspaceRemovalHooks): Promise<WorkspaceRemovalResult> {
+    const lifecycle = this.lifecycleFor(workspaceId)
+    if (lifecycle.removalPromise) return lifecycle.removalPromise
+
+    const removal = (async (): Promise<WorkspaceRemovalResult> => {
+      const workspace = getWorkspaceByNameOrId(workspaceId)
+      if (!workspace || lifecycle.state === 'removed') {
+        lifecycle.state = 'removed'
+        let credentialCleanupPending = false
+        try {
+          await hooks.cleanupCredentials?.()
+        } catch (error) {
+          credentialCleanupPending = true
+          sessionLog.warn('[workspace-detach] retryable credential cleanup failed', {
+            workspaceId,
+            error: error instanceof Error ? error.message : String(error),
+          })
+        }
+        return {
+          ok: true,
+          code: 'already-removed',
+          ...(credentialCleanupPending ? { credentialCleanupPending: true } : {}),
+        }
+      }
+
+      lifecycle.state = 'removing'
+      lifecycle.teardownStarted = false
+
+      try {
+        hooks.freezeExternalAdmission?.()
+        const activity = this.workspaceActivityCode(workspaceId)
+          ?? (hooks.hasExternalActivity?.() ? 'active-background' : null)
+        if (activity) {
+          try {
+            hooks.resumeExternalAdmission?.()
+            lifecycle.state = 'active'
+          } catch (error) {
+            sessionLog.error('[workspace-detach] failed to resume external admission after refusal', {
+              workspaceId,
+              error: error instanceof Error ? error.message : String(error),
+            })
+            lifecycle.state = 'removing'
+            return { ok: false, code: 'teardown-failed', retryable: true }
+          }
+          return { ok: false, code: activity, retryable: true }
+        }
+
+        await this.releaseWorkspaceResources(workspace)
+        await hooks.releaseExternalResources?.()
+
+        // Config detach is intentionally the final teardown mutation.
+        const detached = await hooks.detachConfig()
+        lifecycle.state = 'removed'
+
+        let credentialCleanupPending = false
+        try {
+          await hooks.cleanupCredentials?.()
+        } catch (error) {
+          credentialCleanupPending = true
+          sessionLog.warn('[workspace-detach] retryable credential cleanup failed after detach', {
+            workspaceId,
+            error: error instanceof Error ? error.message : String(error),
+          })
+        }
+
+        return {
+          ok: true,
+          code: detached ? 'success' : 'already-removed',
+          ...(credentialCleanupPending ? { credentialCleanupPending: true } : {}),
+        }
+      } catch (error) {
+        const code = this.classifyWorkspaceRemovalFailure(error, hooks)
+        sessionLog.error('[workspace-detach] teardown failed', {
+          workspaceId,
+          code,
+          teardownStarted: lifecycle.teardownStarted,
+          error: error instanceof Error ? error.message : String(error),
+        })
+
+        if (!lifecycle.teardownStarted) {
+          try {
+            hooks.resumeExternalAdmission?.()
+            lifecycle.state = 'active'
+          } catch {
+            lifecycle.state = 'removing'
+          }
+        } else {
+          // Resource ownership may already be partially released. Keep admission
+          // closed and retry idempotently; do not fake a rollback.
+          lifecycle.state = 'removing'
+        }
+        return { ok: false, code, retryable: true }
+      }
+    })()
+
+    lifecycle.removalPromise = removal
+    void removal.finally(() => {
+      if (lifecycle.removalPromise === removal) lifecycle.removalPromise = undefined
+    })
+    return removal
   }
 
   /** Adopt legacy/test-injected fields into one exact bundle before disposal. */
@@ -4011,31 +4373,61 @@ export class SessionManager implements ISessionManager {
     if (generation.agent) generation.agent.onRuntimeExit = null
 
     const work = (async (): Promise<RuntimeDisposeResult | undefined> => {
+      const startedAt = Date.now()
+      let resourceFailure = false
       const [agentResult] = await Promise.all([
         generation.agent
           ? disposeBackendRuntime(generation.agent, { reason, deadline }).catch((error) => {
+              resourceFailure = true
               sessionLog.warn(`Failed to dispose agent for ${managed.id} during ${reason}: ${error instanceof Error ? error.message : error}`)
               return undefined
             })
           : Promise.resolve(undefined),
         generation.poolServer?.stop().catch((error) => {
+          resourceFailure = true
           sessionLog.warn(`Failed to stop pool server for ${managed.id} during ${reason}: ${error instanceof Error ? error.message : error}`)
         }),
         generation.mcpPool?.disconnectAll().catch((error) => {
+          resourceFailure = true
           sessionLog.warn(`Failed to disconnect MCP pool for ${managed.id} during ${reason}: ${error instanceof Error ? error.message : error}`)
         }),
       ])
+      const fallbackResult: RuntimeDisposeResult = {
+        outcome: 'limited_observability',
+        observedExit: false,
+        attemptedGraceful: false,
+        forced: false,
+        durationMs: Math.max(0, Date.now() - startedAt),
+      }
+      const result: RuntimeDisposeResult | undefined = resourceFailure
+        ? {
+            ...(agentResult ?? fallbackResult),
+            errorCode: 'runtime_dispose_failed',
+          }
+        : (agentResult ?? (generation.poolServer || generation.mcpPool ? fallbackResult : undefined))
+
+      if (reason === 'workspace_detach' && runtimeDisposalFailed(result)) {
+        // Preserve exact ownership so a fail-forward detach retry can make a
+        // real second disposal attempt instead of forgetting a leaked runtime.
+        generation.state = 'ready'
+        return result
+      }
+
       generation.state = 'disposed'
       generation.agent = undefined
       generation.poolServer = undefined
       generation.mcpPool = undefined
       generation.envOverrides = undefined
       this.runtimeRegistry.delete(generation.token)
-      return agentResult
+      return result
     })()
 
     generation.disposePromise = work
-    return work
+    const result = await work
+    if (reason === 'workspace_detach' && runtimeDisposalFailed(result)) {
+      generation.disposePromise = undefined
+    }
+    return result
   }
 
   /**
@@ -4070,7 +4462,15 @@ export class SessionManager implements ISessionManager {
       unregisterSessionScopedToolCallbacks(managed.id)
     }
 
-    return this.disposeRuntimeGeneration(managed, generation, reason, deadline)
+    const result = await this.disposeRuntimeGeneration(managed, generation, reason, deadline)
+    if (reason === 'workspace_detach' && runtimeDisposalFailed(result)) {
+      managed.runtimeGeneration = generation
+      managed.agent = generation.agent ?? null
+      managed.poolServer = generation.poolServer
+      managed.mcpPool = generation.mcpPool
+      managed.envOverrides = generation.envOverrides
+    }
+    return result
   }
 
   private hasPendingPermissionForSession(sessionId: string): boolean {
@@ -6911,6 +7311,8 @@ export class SessionManager implements ISessionManager {
     if (managed.deleting) {
       throw new Error(`Session ${sessionId} is being deleted`)
     }
+    const releaseAdmission = this.acquireWorkspaceAdmission(managed.workspace.id, 'session')
+    try {
     // An explicit send/retry resumes FIFO after crash/watchdog/auth pause. Existing
     // queued message identities remain intact and are never silently discarded.
     if (!existingMessageId && managed.runtimeQueuePaused) managed.runtimeQueuePaused = false
@@ -7691,6 +8093,9 @@ export class SessionManager implements ISessionManager {
         this.persistSession(managed)
       }
     }
+    } finally {
+      releaseAdmission()
+    }
   }
 
   async cancelProcessing(sessionId: string, silent = false): Promise<void> {
@@ -8022,6 +8427,10 @@ export class SessionManager implements ISessionManager {
     const managed = this.sessions.get(sessionId)
     if (!managed || managed.messageQueue.length === 0 || managed.runtimeQueuePaused || managed.deleting || this.closing) return
 
+    // Reserve admission before removing the queued item. This closes the
+    // queue-shift → setImmediate gap where detach could otherwise observe an
+    // empty queue before replay acquires sendMessage admission.
+    const releaseReplayAdmission = this.acquireWorkspaceAdmission(managed.workspace.id, 'session')
     const next = managed.messageQueue.shift()!
     sessionLog.info('replay queued', {
       sessionId,
@@ -8049,8 +8458,11 @@ export class SessionManager implements ISessionManager {
 
     // Process message (use setImmediate to allow current stack to clear)
     setImmediate(() => {
-      if (this.closing || managed.deleting) return
-      this.sendMessage(
+      if (this.closing || managed.deleting) {
+        releaseReplayAdmission()
+        return
+      }
+      void this.sendMessage(
         sessionId,
         next.message,
         next.attachments,
@@ -8082,7 +8494,7 @@ export class SessionManager implements ISessionManager {
         // sendMessage setup/stream paths own terminalization; only backstop a
         // still-active turn here to avoid duplicate complete/error finalizers.
         if (managed.isProcessing) void this.onProcessingStopped(sessionId, 'error', managed.activeTurn)
-      })
+      }).finally(releaseReplayAdmission)
     })
   }
 
@@ -9458,6 +9870,16 @@ export class SessionManager implements ISessionManager {
         break
 
       case 'task_backgrounded':
+        try {
+          this.assertWorkspaceAdmission(workspaceId, 'background')
+        } catch (error) {
+          sessionLog.warn('[workspace-detach] rejected late background task admission', {
+            workspaceId,
+            sessionId,
+            taskId: event.taskId,
+          })
+          break
+        }
         // Record in the running-task registry so a cross-subprocess "status?"
         // query can enumerate live tasks (WS3). The renderer still shows the
         // chip via its own atom; this is the main-process source of truth.
@@ -9627,6 +10049,16 @@ export class SessionManager implements ISessionManager {
       }
 
       case 'shell_backgrounded':
+        try {
+          this.assertWorkspaceAdmission(workspaceId, 'background')
+        } catch {
+          sessionLog.warn('[workspace-detach] rejected late background shell admission', {
+            workspaceId,
+            sessionId,
+            shellId: event.shellId,
+          })
+          break
+        }
         // Store the command for later process killing
         if (event.command && managed) {
           managed.backgroundShellCommands.set(event.shellId, event.command)
@@ -9852,6 +10284,8 @@ export class SessionManager implements ISessionManager {
   async executePromptAutomation(
     input: ExecutePromptAutomationInput,
   ): Promise<{ sessionId: string }> {
+    const releaseAdmission = this.acquireWorkspaceAdmission(input.workspaceId, 'automation')
+    try {
     const {
       workspaceId,
       workspaceRootPath,
@@ -9952,6 +10386,9 @@ export class SessionManager implements ISessionManager {
     })
 
     return { sessionId: session.id }
+    } finally {
+      releaseAdmission()
+    }
   }
 
   /**
@@ -10469,6 +10906,7 @@ export class SessionManager implements ISessionManager {
       this.pendingPermissionRequests.clear()
       this.adminRememberApprovals.clear()
       this.agentRefreshLocks.clear()
+      this.workspaceLifecycles.clear()
       for (const sessionId of this.sessions.keys()) unregisterSessionScopedToolCallbacks(sessionId)
 
       sessionLog.info('Cleanup complete')

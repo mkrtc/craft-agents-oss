@@ -138,6 +138,36 @@ function injectAdapter(harness: Harness, adapter: PlatformAdapter): void {
   state.gateway.registerAdapter(adapter)
 }
 
+describe('MessagingGatewayRegistry workspace lifecycle', () => {
+  it('freezes admission, reports in-flight work, resumes, and removes idempotently', async () => {
+    const h = makeRegistry()
+    await pairSupergroup(h)
+    const state = (h.registry as any).workspaces.get(h.workspaceId)
+    let release!: () => void
+    const barrier = new Promise<void>((resolve) => { release = resolve })
+    const work = state.gateway.runAcceptedWork(() => barrier)
+
+    expect(h.registry.hasInFlightWork(h.workspaceId)).toBe(true)
+    h.registry.freezeWorkspace(h.workspaceId)
+    expect(state.gateway.admissionOpen).toBe(false)
+    h.registry.resumeWorkspace(h.workspaceId)
+    expect(state.gateway.admissionOpen).toBe(true)
+
+    release()
+    await work
+    expect(h.registry.hasInFlightWork(h.workspaceId)).toBe(false)
+
+    h.registry.freezeWorkspace(h.workspaceId)
+    await h.registry.removeWorkspace(h.workspaceId)
+    await h.registry.removeWorkspace(h.workspaceId)
+    expect((h.registry as any).workspaces.has(h.workspaceId)).toBe(false)
+
+    await h.registry.initializeWorkspace(h.workspaceId)
+    const reattached = (h.registry as any).workspaces.get(h.workspaceId)
+    expect(reattached.gateway.admissionOpen).toBe(true)
+  })
+})
+
 describe('MessagingGatewayRegistry.bindAutomationSession', () => {
   it('returns invalid-name for empty / whitespace / overlong topic names', async () => {
     const h = makeRegistry()

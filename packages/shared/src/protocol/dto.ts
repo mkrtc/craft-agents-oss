@@ -628,6 +628,29 @@ export interface SessionFileWatchStatus {
   }
 }
 
+/** Stable, renderer-safe outcome codes for non-destructive workspace detach. */
+export type WorkspaceRemovalCode =
+  | 'active-session'
+  | 'active-task'
+  | 'active-background'
+  | 'teardown-failed'
+  | 'required-watch-budget'
+  | 'success'
+  | 'already-removed'
+
+export type WorkspaceRemovalResult =
+  | {
+      ok: true
+      code: 'success' | 'already-removed'
+      /** Credential cleanup runs after detach and can be retried independently. */
+      credentialCleanupPending?: boolean
+    }
+  | {
+      ok: false
+      code: Exclude<WorkspaceRemovalCode, 'success' | 'already-removed'>
+      retryable: boolean
+    }
+
 export interface FileSearchResult {
   name: string
   path: string

@@ -256,6 +256,14 @@ export const mockElectronAPI = {
     }
   },
 
+  onSessionFilesWatchStatus: (callback: (sessionId: string, status: import('../../shared/types').SessionFileWatchStatus) => void) => {
+    console.log('[Playground] onSessionFilesWatchStatus subscribed')
+    void callback
+    return () => {
+      console.log('[Playground] onSessionFilesWatchStatus unsubscribed')
+    }
+  },
+
   browserPane: {
     focus: async (instanceId: string) => {
       console.log('[Playground] browserPane.focus called:', instanceId)

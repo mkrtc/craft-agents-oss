@@ -10,6 +10,7 @@ import type { LoadedProject } from '../projects/types'
 import { RPC_CHANNELS } from './channels'
 import type {
   SessionEvent,
+  SessionFileWatchStatus,
   UnreadSummary,
   UpdateInfo,
   BrowserInstanceInfo,
@@ -22,6 +23,7 @@ export interface BroadcastEventMap {
   [RPC_CHANNELS.sessions.EVENT]: [event: SessionEvent]
   [RPC_CHANNELS.sessions.UNREAD_SUMMARY_CHANGED]: [summary: UnreadSummary]
   [RPC_CHANNELS.sessions.FILES_CHANGED]: [sessionId: string]
+  [RPC_CHANNELS.sessions.FILES_WATCH_STATUS]: [sessionId: string, status: SessionFileWatchStatus]
 
   // Domain change broadcasts (global via broadcastToAll)
   [RPC_CHANNELS.sources.CHANGED]: [workspaceId: string, sources: LoadedSource[]]

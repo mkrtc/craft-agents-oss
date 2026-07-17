@@ -22,9 +22,28 @@ import type {
   PermissionModeState,
   UnreadSummary,
   ShareResult,
+  WorkspaceRemovalResult,
+  WorkspaceRemovalCode,
 } from '@craft-agent/shared/protocol'
 import type { SessionBundle, DispatchMode, SessionHeader } from '@craft-agent/shared/sessions'
 import type { EventSink } from '../transport'
+
+export interface WorkspaceRemovalHooks {
+  /** Close external admission (messaging, client file observers) before the final activity check. */
+  freezeExternalAdmission?: () => void
+  /** Re-open external admission when removal is refused before teardown starts. */
+  resumeExternalAdmission?: () => void
+  /** External messaging/dispatch work that is already in flight. */
+  hasExternalActivity?: () => boolean
+  /** Dispose workspace-owned resources outside SessionManager. */
+  releaseExternalResources?: () => Promise<void>
+  /** Last-step global config mutation. Must not delete workspace data. */
+  detachConfig: () => boolean | Promise<boolean>
+  /** Best-effort cleanup after detach; failure never rolls config back. */
+  cleanupCredentials?: () => Promise<void>
+  /** Optional test/host classifier for a teardown failure. */
+  classifyFailure?: (error: unknown) => Extract<WorkspaceRemovalCode, 'teardown-failed' | 'required-watch-budget'>
+}
 
 export interface ISessionManager {
   // ---------------------------------------------------------------------------
@@ -43,6 +62,7 @@ export interface ISessionManager {
 
   getSessions(workspaceId?: string): Session[]
   getSession(sessionId: string): Promise<Session | null>
+  getSessionWorkspaceId(sessionId: string): string | undefined
   /** Creates a session and (unless `internal.emitCreatedEvent === false`) announces it to the
    *  renderer so it hydrates full metadata instead of fabricating a "New Chat" placeholder. */
   createSession(
@@ -253,6 +273,10 @@ export interface ISessionManager {
    * Workaround for Bun's fs.watch on Linux not detecting atomic renames.
    */
   notifyConfigFileChange(workspaceRootPath: string, relativePath: string): void
+  /** Reject task/background admission while a workspace is removing or removed. */
+  assertWorkspaceAdmission(workspaceId: string, kind: 'task' | 'background'): void
+  /** Race-safe, single-flight, non-destructive workspace detach. */
+  removeWorkspace(workspaceId: string, hooks: WorkspaceRemovalHooks): Promise<WorkspaceRemovalResult>
 
   // ---------------------------------------------------------------------------
   // Server-level observability
@@ -290,6 +314,8 @@ export interface ISessionManager {
   setAutomationBinder?(
     fn: (input: { workspaceId: string; sessionId: string; topicName: string }) => Promise<void>,
   ): void
+  /** Recreate external workspace ownership after a detached workspace is re-added. */
+  setWorkspaceReattachedHandler?(fn: (workspaceId: string) => Promise<void>): void
 }
 
 /**

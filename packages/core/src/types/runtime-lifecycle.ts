@@ -24,6 +24,7 @@ export const RUNTIME_DISPOSE_REASONS = [
   'backend_crash',
   'watchdog',
   'manual',
+  'workspace_detach',
 ] as const;
 
 export type RuntimeDisposeReason = typeof RUNTIME_DISPOSE_REASONS[number];

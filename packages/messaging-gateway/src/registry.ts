@@ -93,6 +93,8 @@ interface WorkspaceState {
 
 export class MessagingGatewayRegistry implements IMessagingGatewayRegistry {
   private readonly workspaces = new Map<string, WorkspaceState>()
+  private readonly frozenWorkspaces = new Set<string>()
+  private readonly workspaceWorkCounts = new Map<string, number>()
   private readonly pairing = new PairingCodeManager()
   private readonly log: MessagingLogger
 
@@ -116,6 +118,7 @@ export class MessagingGatewayRegistry implements IMessagingGatewayRegistry {
         })
       }
     })
+    opts.sessionManager.setWorkspaceReattachedHandler?.((workspaceId) => this.initializeWorkspace(workspaceId))
   }
 
   // -------------------------------------------------------------------------
@@ -123,9 +126,14 @@ export class MessagingGatewayRegistry implements IMessagingGatewayRegistry {
   // -------------------------------------------------------------------------
 
   async initializeWorkspace(workspaceId: string): Promise<void> {
-    if (this.workspaces.has(workspaceId)) return
+    this.frozenWorkspaces.delete(workspaceId)
+    if (this.workspaces.has(workspaceId)) {
+      this.workspaces.get(workspaceId)!.gateway.setAdmissionOpen(true)
+      return
+    }
 
     const state = this.bootstrapWorkspace(workspaceId)
+    state.gateway.setAdmissionOpen(true)
     const config = state.configStore.get()
     if (!config.enabled) return
 
@@ -142,13 +150,7 @@ export class MessagingGatewayRegistry implements IMessagingGatewayRegistry {
         state: 'connecting',
         lastError: undefined,
       })
-      void this.tryConnectTelegram(workspaceId, state).catch((err) => {
-        this.log.error('background Telegram connect failed', {
-          event: 'telegram_connect_failed',
-          workspaceId,
-          error: err,
-        })
-      })
+      this.trackWorkspaceWork(workspaceId, () => this.tryConnectTelegram(workspaceId, state), 'telegram_connect_failed')
     }
 
     if (isPlatformConfigured(config, 'lark')) {
@@ -158,13 +160,7 @@ export class MessagingGatewayRegistry implements IMessagingGatewayRegistry {
         state: 'connecting',
         lastError: undefined,
       })
-      void this.tryConnectLark(workspaceId, state).catch((err) => {
-        this.log.error('background Lark connect failed', {
-          event: 'lark_connect_failed',
-          workspaceId,
-          error: err,
-        })
-      })
+      this.trackWorkspaceWork(workspaceId, () => this.tryConnectLark(workspaceId, state), 'lark_connect_failed')
     }
 
     if (isPlatformConfigured(config, 'whatsapp')) {
@@ -175,19 +171,19 @@ export class MessagingGatewayRegistry implements IMessagingGatewayRegistry {
           state: 'connecting',
           lastError: undefined,
         })
-        void this.startWhatsAppAdapter(workspaceId, state, { persistConfig: false, reason: 'restore' }).catch((err) => {
-          this.log.error('background WhatsApp restore failed', {
-            event: 'whatsapp_restore_failed',
-            workspaceId,
-            error: err,
-          })
-          this.setPlatformRuntime(workspaceId, state, 'whatsapp', {
-            configured: true,
-            connected: false,
-            state: 'error',
-            lastError: err instanceof Error ? err.message : String(err),
-          })
-        })
+        this.trackWorkspaceWork(
+          workspaceId,
+          () => this.startWhatsAppAdapter(workspaceId, state, { persistConfig: false, reason: 'restore' }),
+          'whatsapp_restore_failed',
+          (err) => {
+            this.setPlatformRuntime(workspaceId, state, 'whatsapp', {
+              configured: true,
+              connected: false,
+              state: 'error',
+              lastError: err instanceof Error ? err.message : String(err),
+            })
+          },
+        )
       } else {
         this.setPlatformRuntime(workspaceId, state, 'whatsapp', {
           configured: true,
@@ -199,9 +195,28 @@ export class MessagingGatewayRegistry implements IMessagingGatewayRegistry {
     }
   }
 
+  freezeWorkspace(workspaceId: string): void {
+    this.frozenWorkspaces.add(workspaceId)
+    this.workspaces.get(workspaceId)?.gateway.setAdmissionOpen(false)
+  }
+
+  resumeWorkspace(workspaceId: string): void {
+    this.frozenWorkspaces.delete(workspaceId)
+    this.workspaces.get(workspaceId)?.gateway.setAdmissionOpen(true)
+  }
+
+  hasInFlightWork(workspaceId: string): boolean {
+    return (this.workspaceWorkCounts.get(workspaceId) ?? 0) > 0
+      || (this.workspaces.get(workspaceId)?.gateway.hasInFlightWork() ?? false)
+  }
+
   async removeWorkspace(workspaceId: string): Promise<void> {
+    this.freezeWorkspace(workspaceId)
     const state = this.workspaces.get(workspaceId)
-    if (!state) return
+    if (!state) {
+      this.pairing.clearWorkspace(workspaceId)
+      return
+    }
     await state.gateway.stop()
     this.pairing.clearWorkspace(workspaceId)
     this.workspaces.delete(workspaceId)
@@ -953,6 +968,27 @@ export class MessagingGatewayRegistry implements IMessagingGatewayRegistry {
   // Internal helpers
   // -------------------------------------------------------------------------
 
+  private trackWorkspaceWork(
+    workspaceId: string,
+    work: () => Promise<void>,
+    failureEvent: string,
+    onFailure?: (error: unknown) => void,
+  ): void {
+    this.workspaceWorkCounts.set(workspaceId, (this.workspaceWorkCounts.get(workspaceId) ?? 0) + 1)
+    void work().catch((error) => {
+      this.log.error('background messaging workspace work failed', {
+        event: failureEvent,
+        workspaceId,
+        error,
+      })
+      onFailure?.(error)
+    }).finally(() => {
+      const remaining = (this.workspaceWorkCounts.get(workspaceId) ?? 1) - 1
+      if (remaining <= 0) this.workspaceWorkCounts.delete(workspaceId)
+      else this.workspaceWorkCounts.set(workspaceId, remaining)
+    })
+  }
+
   private bootstrapWorkspace(workspaceId: string): WorkspaceState {
     const existing = this.workspaces.get(workspaceId)
     if (existing) return existing
@@ -999,6 +1035,8 @@ export class MessagingGatewayRegistry implements IMessagingGatewayRegistry {
       onBindingChanged: () => this.emitBindingChanged(workspaceId),
       onPendingChanged: () => this.emitPendingChanged(workspaceId),
     })
+
+    gateway.setAdmissionOpen(!this.frozenWorkspaces.has(workspaceId))
 
     const topicRegistry = new TopicRegistry(
       storageDir,

@@ -33,6 +33,8 @@ import {
   writeNodeOutput,
   readNodeOutput,
   readRunLog,
+  listTaskSlugs,
+  listRunIds,
   loadTaskSpec,
   writeRunSpecSnapshot,
   DEFAULT_REPAIR_ATTEMPTS,
@@ -61,6 +63,8 @@ export interface ConductorSessionHost {
   getSessionFinalText(sessionId: string): string | undefined;
   /** Resolved working directory of a session, so children inherit the orchestrator's cwd. */
   getSessionWorkingDirectory(sessionId: string): string | undefined;
+  /** Reject new task run/resume admission while a workspace is being detached. */
+  assertWorkspaceAdmission?(workspaceId: string, kind: 'task'): void;
 }
 
 export interface TaskRunnerDeps {
@@ -937,5 +941,40 @@ export class TaskRunner {
     const run = this.runs.get(this.key(safeSlug, safeRunId));
     if (!run) return Promise.reject(new Error(`No active run ${safeSlug}:${safeRunId}`));
     return run.waitUntilSettled();
+  }
+
+  /**
+   * True for running, paused, verifying, or dispatch-in-flight runs. Persisted
+   * run logs are included so an app restart cannot make a paused run invisible
+   * to workspace-detach safety checks.
+   */
+  hasNonTerminalRuns(): boolean {
+    for (const run of this.runs.values()) {
+      if (!isTerminalRunStatus(run.snapshot().status)) return true;
+    }
+
+    for (const slug of listTaskSlugs(this.deps.workspaceRoot)) {
+      for (const runId of listRunIds(this.deps.workspaceRoot, slug)) {
+        const log = readRunLog(this.deps.workspaceRoot, slug, runId);
+        let started = false;
+        let terminal = false;
+        for (const entry of log) {
+          if (entry.kind === 'run-started') started = true;
+          if (entry.kind === 'run-stopped' || entry.kind === 'run-completed' || entry.kind === 'run-failed') {
+            terminal = true;
+          }
+        }
+        if (started && !terminal) return true;
+      }
+    }
+    return false;
+  }
+
+  /** Release terminal in-memory run ownership. Safe and idempotent. */
+  release(): void {
+    if (this.hasNonTerminalRuns()) {
+      throw new Error(`Cannot release task runner for workspace ${this.deps.workspaceId}: non-terminal runs remain`);
+    }
+    this.runs.clear();
   }
 }

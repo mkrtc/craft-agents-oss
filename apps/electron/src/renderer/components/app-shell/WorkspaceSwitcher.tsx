@@ -22,6 +22,7 @@ import { waitForTransportConnected } from '@/lib/transport-wait'
 import { useWorkspaceIcons } from "@/hooks/useWorkspaceIcon"
 import { useTransportConnectionState } from "@/hooks/useTransportConnectionState"
 import type { Workspace } from "../../../shared/types"
+import { removeWorkspaceWithToast } from './workspace-removal-toast'
 
 interface WorkspaceSwitcherProps {
   variant?: 'sidebar' | 'topbar'
@@ -142,12 +143,15 @@ export function WorkspaceSwitcher({
       toast.error(t('toast.cannotRemoveActiveWorkspace'))
       return
     }
-    const removed = await window.electronAPI.removeWorkspace(workspace.id)
-    if (removed) {
-      toast.success(t('toast.removedWorkspace', { name: workspace.name }))
-      onWorkspaceRemoved?.()
-    }
-  }, [activeWorkspaceId, onWorkspaceRemoved])
+    await removeWorkspaceWithToast(workspace, {
+      remove: (workspaceId) => window.electronAPI.removeWorkspace(workspaceId),
+      translate: (key, options) => t(key, options),
+      success: (message) => { toast.success(message) },
+      error: (message) => { toast.error(message) },
+      warning: (message) => { toast.warning(message) },
+      onRemoved: onWorkspaceRemoved,
+    })
+  }, [activeWorkspaceId, onWorkspaceRemoved, t])
 
   const handleCloseCreationScreen = useCallback(() => {
     setShowCreationScreen(false)
@@ -168,7 +172,7 @@ export function WorkspaceSwitcher({
 
     handleCloseCreationScreen()
     toast.success(t('toast.workspaceReconnected'))
-  }, [activeWorkspaceId, handleCloseCreationScreen, onSelect])
+  }, [activeWorkspaceId, handleCloseCreationScreen, onSelect, t])
 
   return (
     <>

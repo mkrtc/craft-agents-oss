@@ -108,6 +108,18 @@ export interface MessagingConfigInfo {
 }
 
 export interface IMessagingGatewayRegistry {
+  /** Freeze new inbound/outbound messaging dispatch before workspace activity is checked. */
+  freezeWorkspace(workspaceId: string): void
+
+  /** Re-open messaging after an activity refusal or compensated pre-detach failure. */
+  resumeWorkspace(workspaceId: string): void
+
+  /** True while any accepted messaging callback/render is still in flight. */
+  hasInFlightWork(workspaceId: string): boolean
+
+  /** Stop adapters and release all workspace messaging ownership. Idempotent. */
+  removeWorkspace(workspaceId: string): Promise<void>
+
   /** Get bindings for a workspace. */
   getBindings(workspaceId: string): MessagingBindingInfo[]
 

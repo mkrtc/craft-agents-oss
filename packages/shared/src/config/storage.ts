@@ -874,7 +874,14 @@ export function syncWorkspaces(): void {
   }
 }
 
-export async function removeWorkspace(workspaceId: string): Promise<boolean> {
+/**
+ * Detach a workspace from the global config only.
+ *
+ * This is deliberately non-destructive: workspace roots and managed
+ * `~/.craft-agent/workspaces/<id>` session/project data are never removed.
+ * Runtime owners must be quiesced before calling this last-step mutation.
+ */
+export function detachWorkspaceConfig(workspaceId: string): boolean {
   const config = loadStoredConfig();
   if (!config) return false;
 
@@ -882,29 +889,20 @@ export async function removeWorkspace(workspaceId: string): Promise<boolean> {
   if (index === -1) return false;
 
   config.workspaces.splice(index, 1);
-
-  // If we removed the active workspace, switch to first available
   if (config.activeWorkspaceId === workspaceId) {
     config.activeWorkspaceId = config.workspaces[0]?.id || null;
   }
 
   saveConfig(config);
-
-  // Clean up credential store credentials for this workspace
-  const manager = getCredentialManager();
-  await manager.deleteWorkspaceCredentials(workspaceId);
-
-  // Delete workspace data directory (sessions, plans, etc.)
-  const workspaceDataDir = join(getWorkspacesDir(), workspaceId);
-  if (existsSync(workspaceDataDir)) {
-    try {
-      rmSync(workspaceDataDir, { recursive: true });
-    } catch (error) {
-      console.error(`[storage] Failed to delete workspace data directory: ${workspaceDataDir}`, error);
-    }
-  }
-
   return true;
+}
+
+/**
+ * Best-effort, independently retryable credential cleanup for an already
+ * detached workspace. It never mutates workspace config or user data.
+ */
+export async function cleanupWorkspaceCredentials(workspaceId: string): Promise<void> {
+  await getCredentialManager().deleteWorkspaceCredentials(workspaceId);
 }
 
 // Note: renameWorkspace() was removed - workspace names are now stored only in folder config

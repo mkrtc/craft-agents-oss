@@ -86,7 +86,7 @@ import { existsSync, readFileSync } from 'fs'
 import { RPC_CHANNELS } from '@craft-agent/shared/protocol'
 import { SessionManager, setSessionPlatform, setSessionRuntimeHooks } from '@craft-agent/server-core/sessions'
 import { registerAllRpcHandlers } from './handlers/index'
-import { registerCoreRpcHandlers, cleanupSessionFileWatchForClient } from '@craft-agent/server-core/handlers/rpc'
+import { registerCoreRpcHandlers, cleanupSessionFileWatchForClient, cleanupSessionFileWatchesForWorkspace } from '@craft-agent/server-core/handlers/rpc'
 import type { PlatformServices } from '../runtime/platform'
 import { createElectronPlatform } from './platform'
 import type { HandlerDeps } from './handlers/handler-deps'
@@ -810,10 +810,23 @@ app.whenReady().then(async () => {
 
       // IPC handlers — preload uses sendSync to get WS connection details
 
-      // Remove workspace from config (cleanup stale entries)
+      // Race-safe, non-destructive workspace detach. SessionManager owns the
+      // canonical admission lifecycle; config mutation is the final teardown step.
       ipcMain.handle('workspace:remove', async (_event, workspaceId: string) => {
-        const { removeWorkspace: remove } = await import('@craft-agent/shared/config')
-        return remove(workspaceId)
+        const { detachWorkspaceConfig, cleanupWorkspaceCredentials } = await import('@craft-agent/shared/config')
+        const messagingRegistry = messagingHandle?.registry
+
+        return instance.sessionManager.removeWorkspace(workspaceId, {
+          freezeExternalAdmission: () => messagingRegistry?.freezeWorkspace(workspaceId),
+          resumeExternalAdmission: () => messagingRegistry?.resumeWorkspace(workspaceId),
+          hasExternalActivity: () => messagingRegistry?.hasInFlightWork(workspaceId) ?? false,
+          releaseExternalResources: async () => {
+            cleanupSessionFileWatchesForWorkspace(workspaceId)
+            await messagingRegistry?.removeWorkspace(workspaceId)
+          },
+          detachConfig: () => detachWorkspaceConfig(workspaceId),
+          cleanupCredentials: () => cleanupWorkspaceCredentials(workspaceId),
+        })
       })
 
       // Cross-server RPC — invoke a channel on an arbitrary remote server

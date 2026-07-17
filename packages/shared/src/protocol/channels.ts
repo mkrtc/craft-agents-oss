@@ -42,6 +42,7 @@ export const RPC_CHANNELS = {
     WATCH_FILES: 'sessions:watchFiles',
     UNWATCH_FILES: 'sessions:unwatchFiles',
     FILES_CHANGED: 'sessions:filesChanged',
+    FILES_WATCH_STATUS: 'sessions:filesWatchStatus',
     SEARCH_CONTENT: 'sessions:searchContent',
     EXPORT: 'sessions:export',
     IMPORT: 'sessions:import',

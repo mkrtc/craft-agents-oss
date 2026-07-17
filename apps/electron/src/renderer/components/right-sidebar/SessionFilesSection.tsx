@@ -18,19 +18,20 @@ import * as React from 'react'
 import { useTranslation } from 'react-i18next'
 import { useState, useEffect, useCallback, useRef, memo } from 'react'
 import { AnimatePresence, motion, type Variants } from 'motion/react'
-import { File, Folder, FolderOpen, FileText, Image, FileCode, ChevronRight, ExternalLink } from 'lucide-react'
+import { File, Folder, FolderOpen, FileText, Image, FileCode, ChevronRight, ExternalLink, RefreshCw } from 'lucide-react'
+import { toast } from 'sonner'
 import {
   ContextMenu,
   ContextMenuTrigger,
   StyledContextMenuContent,
   StyledContextMenuItem,
 } from '@/components/ui/styled-context-menu'
-import type { SessionFile } from '../../../shared/types'
+import type { SessionFile, SessionFileWatchStatus } from '../../../shared/types'
 import { cn } from '@/lib/utils'
 import * as storage from '@/lib/local-storage'
 import { useAppShellContext } from '@/context/AppShellContext'
 import { getFileManagerName } from '@/lib/platform'
-import { restoreSessionFileWatch } from './session-files-watch'
+import { getSessionFileWatchPresentation, restoreSessionFileWatch } from './session-files-watch'
 
 /**
  * Stagger animation variants for child items - matches LeftSidebar pattern
@@ -426,7 +427,9 @@ export function SessionFilesSection({ sessionId, className, sessionFolderPath, h
   const [isLoading, setIsLoading] = useState(false)
   const [expandedPaths, setExpandedPaths] = useState<Set<string>>(new Set())
   const [hasSavedExpandedState, setHasSavedExpandedState] = useState(false)
+  const [watchStatus, setWatchStatus] = useState<SessionFileWatchStatus>()
   const mountedRef = useRef(true)
+  const lastWatchToastRef = useRef<string>()
 
   // Load expanded paths from storage when session changes.
   // If no value exists yet, we default to "expand all" after files load.
@@ -489,14 +492,32 @@ export function SessionFilesSection({ sessionId, className, sessionFolderPath, h
     }
   }, [sessionId, hasSavedExpandedState, saveExpandedPaths])
 
+  const applyWatchStatus = useCallback((status: SessionFileWatchStatus | undefined) => {
+    if (!mountedRef.current || !status) return
+    setWatchStatus(status)
+    const presentation = getSessionFileWatchPresentation(status)
+    if (!presentation) {
+      lastWatchToastRef.current = undefined
+      return
+    }
+    const signature = `${status.mode}:${status.reason ?? 'unknown'}`
+    if (lastWatchToastRef.current === signature) return
+    lastWatchToastRef.current = signature
+    toast.warning(t(presentation.toastKey))
+  }, [t])
+
   // Initial load and file watcher setup
   useEffect(() => {
     mountedRef.current = true
     loadFiles()
 
     if (sessionId) {
+      setWatchStatus(undefined)
+      lastWatchToastRef.current = undefined
       // Start watching for file changes
-      void window.electronAPI.watchSessionFiles(sessionId)
+      void window.electronAPI.watchSessionFiles(sessionId).then(applyWatchStatus).catch((error) => {
+        console.error('[SessionFiles] Failed to start file watch:', error)
+      })
 
       // Listen for file change events
       const unsubscribe = window.electronAPI.onSessionFilesChanged((changedSessionId) => {
@@ -505,14 +526,19 @@ export function SessionFilesSection({ sessionId, className, sessionFolderPath, h
         }
       })
 
+      const unsubscribeWatchStatus = window.electronAPI.onSessionFilesWatchStatus((changedSessionId, status) => {
+        if (changedSessionId === sessionId) applyWatchStatus(status)
+      })
+
       const unsubscribeReconnect = window.electronAPI.onReconnected(() => {
         if (!mountedRef.current) return
-        void restoreSessionFileWatch(sessionId, loadFiles)
+        void restoreSessionFileWatch(sessionId, loadFiles).then(applyWatchStatus)
       })
 
       return () => {
         mountedRef.current = false
         unsubscribe()
+        unsubscribeWatchStatus()
         unsubscribeReconnect()
         void window.electronAPI.unwatchSessionFiles()
       }
@@ -521,7 +547,7 @@ export function SessionFilesSection({ sessionId, className, sessionFolderPath, h
     return () => {
       mountedRef.current = false
     }
-  }, [sessionId, loadFiles])
+  }, [sessionId, loadFiles, applyWatchStatus])
 
   // Use the link interceptor (via context) so file clicks show in-app previews
   // instead of always opening in the file manager / default app.
@@ -571,6 +597,8 @@ export function SessionFilesSection({ sessionId, className, sessionFolderPath, h
     return null
   }
 
+  const watchPresentation = getSessionFileWatchPresentation(watchStatus)
+
   return (
     <div className={cn('flex flex-col h-full min-h-0', className)}>
       {/* Header - matches sidebar styling with select-none, extra top padding for visual balance */}
@@ -584,6 +612,22 @@ export function SessionFilesSection({ sessionId, className, sessionFolderPath, h
               className="text-xs text-foreground/50 hover:text-foreground/80 hover:underline underline-offset-2 transition-colors"
             >
               {t("chat.viewInFileManager", { fileManager: fileManagerName })}
+            </button>
+          )}
+        </div>
+      )}
+
+      {watchPresentation && (
+        <div className="mx-3 mb-2 flex items-center gap-2 rounded-md bg-muted/60 px-2.5 py-2 text-[11px] text-muted-foreground">
+          <span className="min-w-0 flex-1">{t(watchPresentation.messageKey)}</span>
+          {watchPresentation.manualRefresh && (
+            <button
+              type="button"
+              onClick={() => void loadFiles()}
+              className="inline-flex shrink-0 items-center gap-1 text-foreground/70 hover:text-foreground"
+            >
+              <RefreshCw className="h-3 w-3" />
+              {t('chat.refreshSessionFiles')}
             </button>
           )}
         </div>

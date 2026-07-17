@@ -912,6 +912,71 @@ describe('TaskConductorService', () => {
     expect(service.getRunState('ws', 'svc', 'r1')?.status).toBe('running');
   });
 
+  it('treats paused and verifying runs as nonterminal and releases terminal ownership idempotently', async () => {
+    saveTaskSpec(root, specOf({ id: 'life', title: 'Life', goal: 'g', nodes: [{ id: 'a', prompt: 'a' }] }));
+    const service = new TaskConductorService({ host, workspaceResolver });
+
+    service.run('ws', 'life', { runId: 'paused', verifyOnComplete: false });
+    await tick();
+    service.pause('ws', 'life', 'paused');
+    expect(service.hasNonTerminalRuns('ws')).toBe(true);
+    expect(() => service.releaseWorkspace('ws')).toThrow(/non-terminal/);
+    await service.stop('ws', 'life', 'paused');
+    service.releaseWorkspace('ws');
+    service.releaseWorkspace('ws');
+
+    service.run('ws', 'life', { runId: 'verifying', orchestratorSessionId: 'orch' });
+    await tick();
+    host.complete('a', { finalText: 'done' });
+    await tick();
+    expect(service.getRunState('ws', 'life', 'verifying')?.status).toBe('verifying');
+    expect(service.hasNonTerminalRuns('ws')).toBe(true);
+    expect(() => service.releaseWorkspace('ws')).toThrow(/non-terminal/);
+    host.completeSession('orch', { finalText: 'VERDICT: PASS' });
+    await tick();
+    expect(service.hasNonTerminalRuns('ws')).toBe(false);
+    service.releaseWorkspace('ws');
+    service.releaseWorkspace('ws');
+  });
+
+  it('counts barrier-controlled child dispatch as nonterminal before createSession resolves', async () => {
+    saveTaskSpec(root, specOf({ id: 'dispatch', title: 'Dispatch', goal: 'g', nodes: [{ id: 'a', prompt: 'a' }] }));
+    let releaseCreate!: () => void;
+    const createGate = new Promise<void>((resolve) => { releaseCreate = resolve; });
+    host.createSession = async (_workspaceId, options) => {
+      const id = `sess-${options.name}`;
+      host.created.push({ id, options });
+      await createGate;
+      return { id };
+    };
+    const service = new TaskConductorService({ host, workspaceResolver });
+
+    service.run('ws', 'dispatch', { runId: 'r1', verifyOnComplete: false });
+    expect(service.hasNonTerminalRuns('ws')).toBe(true);
+    expect(() => service.releaseWorkspace('ws')).toThrow(/non-terminal/);
+    releaseCreate();
+    await tick();
+    await service.stop('ws', 'dispatch', 'r1');
+    service.releaseWorkspace('ws');
+  });
+
+  it('detects persisted nonterminal runs and rejects run/resume after admission closes', async () => {
+    saveTaskSpec(root, specOf({ id: 'persisted', title: 'Persisted', goal: 'g', nodes: [{ id: 'a', prompt: 'a' }] }));
+    const first = new TaskConductorService({ host, workspaceResolver });
+    first.run('ws', 'persisted', { runId: 'r1', verifyOnComplete: false });
+    await tick();
+    first.pause('ws', 'persisted', 'r1');
+
+    const restarted = new TaskConductorService({ host: new MockHost(), workspaceResolver });
+    expect(restarted.hasNonTerminalRuns('ws')).toBe(true);
+
+    const closedHost = new MockHost() as MockHost & { assertWorkspaceAdmission: () => void };
+    closedHost.assertWorkspaceAdmission = () => { throw new Error('workspace admission closed'); };
+    const closed = new TaskConductorService({ host: closedHost, workspaceResolver });
+    expect(() => closed.run('ws', 'persisted', { runId: 'r2' })).toThrow('workspace admission closed');
+    expect(() => closed.resume('ws', 'persisted', 'r1')).toThrow('workspace admission closed');
+  });
+
   it('fallback singleton returns the same service for the same host', () => {
     const a = getOrCreateTaskConductorService({ host, workspaceResolver });
     const b = getOrCreateTaskConductorService({ host, workspaceResolver });

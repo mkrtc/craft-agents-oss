@@ -18,6 +18,7 @@ import {
 interface ClientSessionWatchState {
   observer: SessionFileObserver
   sessionId: string
+  workspaceId: string
   status: import('@craft-agent/shared/protocol').SessionFileWatchStatus
 }
 
@@ -53,6 +54,15 @@ export function cleanupSessionFileWatchForClient(clientId: string): void {
   if (!state) return
   state.observer.close()
   clientSessionWatches.delete(clientId)
+}
+
+/** Release every bounded watcher/poller lease owned by a detached workspace. */
+export function cleanupSessionFileWatchesForWorkspace(workspaceId: string): void {
+  for (const [clientId, state] of clientSessionWatches) {
+    if (state.workspaceId !== workspaceId) continue
+    state.observer.close()
+    clientSessionWatches.delete(clientId)
+  }
 }
 
 export const HANDLED_CHANNELS = [
@@ -437,7 +447,8 @@ export function registerSessionsHandlers(server: RpcServer, deps: HandlerDeps): 
     cleanupSessionFileWatchForClient(clientId)
 
     const sessionPath = sessionManager.getSessionPath(sessionId)
-    if (!sessionPath) return undefined
+    const workspaceId = sessionManager.getSessionWorkspaceId(sessionId)
+    if (!sessionPath || !workspaceId) return undefined
 
     let state: ClientSessionWatchState
     const observer = new SessionFileObserver(sessionPath, {
@@ -448,17 +459,42 @@ export function registerSessionsHandlers(server: RpcServer, deps: HandlerDeps): 
       },
       onStatusChange: (status) => {
         const current = clientSessionWatches.get(clientId)
-        if (current?.observer === observer) current.status = status
+        if (current?.observer !== observer) return
+        const previous = current.status
+        current.status = status
+        if (status.degraded) {
+          log.warn('[session-files-watch] degraded', {
+            event: 'session_files_watch_degraded',
+            sessionId,
+            workspaceId,
+            mode: status.mode,
+            reason: status.reason,
+          })
+        } else if (previous.degraded) {
+          log.info('[session-files-watch] recovered', {
+            event: 'session_files_watch_recovered',
+            sessionId,
+            workspaceId,
+          })
+        }
+        pushTyped(
+          server,
+          RPC_CHANNELS.sessions.FILES_WATCH_STATUS,
+          { to: 'client', clientId },
+          sessionId,
+          status,
+        )
       },
       onRemoved: () => {
-        const current = clientSessionWatches.get(clientId)
-        if (current?.observer === observer) clientSessionWatches.delete(clientId)
+        // Keep the inert state until UNWATCH/client cleanup so the subsequent
+        // manual-refresh status can still reach the renderer.
       },
     })
 
     state = {
       observer,
       sessionId,
+      workspaceId,
       status: observer.getStatus(),
     }
     clientSessionWatches.set(clientId, state)

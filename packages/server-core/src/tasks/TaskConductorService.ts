@@ -56,6 +56,7 @@ export class TaskConductorService {
   }
 
   run(workspaceId: string, slug: string, opts: RunOptions = {}): RunSnapshot {
+    this.deps.host.assertWorkspaceAdmission?.(workspaceId, 'task');
     return this.runnerFor(workspaceId).run(slug, opts);
   }
 
@@ -64,6 +65,7 @@ export class TaskConductorService {
   }
 
   resume(workspaceId: string, slug: string, runId: string): void {
+    this.deps.host.assertWorkspaceAdmission?.(workspaceId, 'task');
     this.runnerFor(workspaceId).resume(slug, runId);
   }
 
@@ -77,6 +79,30 @@ export class TaskConductorService {
 
   waitUntilSettled(workspaceId: string, slug: string, runId: string): Promise<RunSnapshot> {
     return this.runnerFor(workspaceId).waitUntilSettled(slug, runId);
+  }
+
+  /** Includes persisted paused/verifying/running runs after restart. */
+  hasNonTerminalRuns(workspaceId: string): boolean {
+    const existing = this.runners.get(workspaceId);
+    if (existing) return existing.hasNonTerminalRuns();
+
+    const ws = this.workspaceResolver(workspaceId);
+    if (!ws) return false;
+    const runnerDeps: TaskRunnerDeps = {
+      host: this.deps.host,
+      workspaceId: ws.id,
+      workspaceRoot: ws.rootPath,
+    };
+    const probe = new TaskRunner(runnerDeps);
+    return probe.hasNonTerminalRuns();
+  }
+
+  /** Drop terminal runner ownership. Safe to call repeatedly. */
+  releaseWorkspace(workspaceId: string): void {
+    const runner = this.runners.get(workspaceId);
+    if (!runner) return;
+    runner.release();
+    this.runners.delete(workspaceId);
   }
 }
 

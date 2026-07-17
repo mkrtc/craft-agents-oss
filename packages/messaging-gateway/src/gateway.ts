@@ -141,6 +141,8 @@ export class MessagingGateway {
   private readonly pendingCompactAccepts = new Map<string, PendingCompactAccept>()
   private readonly adapters = new Map<PlatformType, PlatformAdapter>()
   private readonly log: MessagingLogger
+  private admissionOpen = true
+  private inFlightWork = 0
   private started = false
   /**
    * Access-control surface — `getWorkspaceConfig` is called per-button so
@@ -279,6 +281,24 @@ export class MessagingGateway {
     return this.adapters.get(platform)?.isConnected() ?? false
   }
 
+  setAdmissionOpen(open: boolean): void {
+    this.admissionOpen = open
+  }
+
+  hasInFlightWork(): boolean {
+    return this.inFlightWork > 0
+  }
+
+  private async runAcceptedWork(work: () => Promise<void>): Promise<void> {
+    if (!this.admissionOpen) return
+    this.inFlightWork += 1
+    try {
+      await work()
+    } finally {
+      this.inFlightWork -= 1
+    }
+  }
+
   // -------------------------------------------------------------------------
   // Lifecycle
   // -------------------------------------------------------------------------
@@ -293,6 +313,7 @@ export class MessagingGateway {
   }
 
   async stop(): Promise<void> {
+    this.admissionOpen = false
     if (!this.started) return
     this.started = false
 
@@ -316,16 +337,18 @@ export class MessagingGateway {
 
   private wireAdapter(adapter: PlatformAdapter): void {
     adapter.onMessage(async (msg: IncomingMessage) => {
-      const isCommand = msg.text.trim().startsWith('/')
-      if (isCommand) {
-        const handled = await this.commands.handleCommand(adapter, msg)
-        if (handled) return
-      }
-      await this.router.route(adapter, msg)
+      await this.runAcceptedWork(async () => {
+        const isCommand = msg.text.trim().startsWith('/')
+        if (isCommand) {
+          const handled = await this.commands.handleCommand(adapter, msg)
+          if (handled) return
+        }
+        await this.router.route(adapter, msg)
+      })
     })
 
     adapter.onButtonPress(async (press: ButtonPress) => {
-      await this.handleButtonPress(adapter.platform, press)
+      await this.runAcceptedWork(() => this.handleButtonPress(adapter.platform, press))
     })
 
     this.log.info('adapter registered', {
@@ -352,7 +375,7 @@ export class MessagingGateway {
       event.type === 'info' &&
       (event as { statusType?: string }).statusType === 'compaction_complete'
     ) {
-      void this.finishPendingCompactAccept(event.sessionId)
+      void this.runAcceptedWork(() => this.finishPendingCompactAccept(event.sessionId))
     }
 
     // Drop stale permission prompts for this session. The agent halts while
@@ -377,7 +400,7 @@ export class MessagingGateway {
         })
         continue
       }
-      this.renderer.handle(event, binding, adapter).catch((err) => {
+      void this.runAcceptedWork(() => this.renderer.handle(event, binding, adapter)).catch((err) => {
         this.log.error('renderer failed to emit event to chat', {
           event: 'renderer_failed',
           sessionId: event.sessionId,

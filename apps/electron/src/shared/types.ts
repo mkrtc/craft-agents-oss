@@ -207,6 +207,7 @@ import type {
   SkillFile,
   SessionFile,
   SessionFileWatchStatus,
+  WorkspaceRemovalResult,
   OAuthResult,
   McpToolsResult,
   GitBashStatus,
@@ -289,7 +290,7 @@ export interface ElectronAPI {
 
   // App lifecycle
   relaunchApp(): Promise<void>
-  removeWorkspace(workspaceId: string): Promise<boolean>
+  removeWorkspace(workspaceId: string): Promise<WorkspaceRemovalResult>
   invokeOnServer(url: string, token: string, channel: string, ...args: any[]): Promise<any>
 
   // Remote session transfer (main-process orchestrated, supports chunked upload)
@@ -495,6 +496,7 @@ export interface ElectronAPI {
   watchSessionFiles(sessionId: string): Promise<SessionFileWatchStatus | undefined>
   unwatchSessionFiles(): Promise<void>
   onSessionFilesChanged(callback: (sessionId: string) => void): () => void
+  onSessionFilesWatchStatus(callback: (sessionId: string, status: SessionFileWatchStatus) => void): () => void
 
   // Sources
   getSources(workspaceId: string): Promise<LoadedSource[]>
