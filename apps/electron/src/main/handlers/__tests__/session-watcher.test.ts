@@ -68,6 +68,7 @@ function createTestHarness(sessionPaths: Map<string, string>) {
   const deps: HandlerDeps = {
     sessionManager: {
       getSessionPath: (sessionId: string) => sessionPaths.get(sessionId) ?? null,
+      getSessionWorkspaceId: (sessionId: string) => sessionPaths.has(sessionId) ? 'ws-1' : null,
       waitForInit: async () => {},
       getSessions: () => [],
     } as unknown as HandlerDeps['sessionManager'],
@@ -126,9 +127,14 @@ describe('session file watcher isolation', () => {
     // Wait for debounce + fs.watch delay
     await new Promise(r => setTimeout(r, 300))
 
-    // Only client-a should have received the notification
-    const clientAPushes = pushCalls.filter(p => p.target?.clientId === 'client-a')
-    const clientBPushes = pushCalls.filter(p => p.target?.clientId === 'client-b')
+    // Only client-a should have received a file-change notification.
+    // Watch-status pushes are expected for both clients and are covered separately.
+    const clientAPushes = pushCalls.filter(p =>
+      p.target?.clientId === 'client-a' && p.channel === RPC_CHANNELS.sessions.FILES_CHANGED
+    )
+    const clientBPushes = pushCalls.filter(p =>
+      p.target?.clientId === 'client-b' && p.channel === RPC_CHANNELS.sessions.FILES_CHANGED
+    )
     expect(clientAPushes.length).toBeGreaterThanOrEqual(1)
     expect(clientBPushes.length).toBe(0)
 
@@ -147,7 +153,9 @@ describe('session file watcher isolation', () => {
     await new Promise(r => setTimeout(r, 300))
 
     // Client B should still receive notifications
-    const clientBAfter = pushCalls.filter(p => p.target?.clientId === 'client-b')
+    const clientBAfter = pushCalls.filter(p =>
+      p.target?.clientId === 'client-b' && p.channel === RPC_CHANNELS.sessions.FILES_CHANGED
+    )
     expect(clientBAfter.length).toBeGreaterThanOrEqual(1)
 
     // Disconnect cleanup for client B
@@ -211,13 +219,13 @@ describe('session file watcher isolation', () => {
     writeFileSync(join(dir, '.hidden'), 'secret')
     await new Promise(r => setTimeout(r, 300))
 
-    expect(pushCalls.length).toBe(0)
+    expect(pushCalls.filter(p => p.channel === RPC_CHANNELS.sessions.FILES_CHANGED)).toHaveLength(0)
 
     // Write a normal file — should trigger notification
     writeFileSync(join(dir, 'result.txt'), 'output')
     await new Promise(r => setTimeout(r, 300))
 
-    expect(pushCalls.length).toBeGreaterThanOrEqual(1)
+    expect(pushCalls.filter(p => p.channel === RPC_CHANNELS.sessions.FILES_CHANGED).length).toBeGreaterThanOrEqual(1)
 
     cleanupSessionFileWatchForClient('client-a')
   })

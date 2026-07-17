@@ -52,6 +52,10 @@ describe('sessions file watchers', () => {
           if (sessionId === 'session-b') return sessionDirB
           return null
         },
+        getSessionWorkspaceId: (sessionId: string) => {
+          if (sessionId === 'session-a' || sessionId === 'session-b') return 'workspace-test'
+          return null
+        },
       } as unknown as HandlerDeps['sessionManager'],
       platform: {
         appRootPath: '',
