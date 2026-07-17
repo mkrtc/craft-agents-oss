@@ -41,6 +41,7 @@ import {
   generateCrftStreamV1,
   applyTraceEvent,
   computeOracle,
+  validateReplay,
   GENERATOR_ID,
   GENERATOR_VERSION,
   PRIMARY_VARIANT,
@@ -371,15 +372,13 @@ export function ChatStreamingPerfHarness() {
 
       const counters = getStreamPerfCounters()
 
-      // Oracle check: recompute final hashes from a clean replay and compare.
-      const finalMessages = fixture.trace.reduce((acc, e) => applyTraceEvent(acc, e), fixture.messages)
-      const freshOracle = computeOracle(fixture)
-      const finalGroupingHash = freshOracle.finalGroupingHash
-      const finalTranscriptHash = freshOracle.finalTranscriptHash
-      void finalMessages
-      const mismatches: string[] = []
-      if (finalGroupingHash !== expectedOracle.finalGroupingHash) mismatches.push('finalGroupingHash')
-      if (finalTranscriptHash !== expectedOracle.finalTranscriptHash) mismatches.push('finalTranscriptHash')
+      // Oracle check: validate the ACTUAL replayed `live` state (built by this
+      // loop's own incremental applyTraceEvent + setMessages calls) against an
+      // independent pure-fold replay of the same `events`, plus the frozen R0
+      // baseline when the full uncapped trace ran. See validateReplay's doc for
+      // why a fresh `computeOracle(fixture)` recompute cannot catch replay bugs.
+      const replay = validateReplay(fixture, events, live, expectedOracle)
+      const { pass: oraclePass, mismatches, groupingHash: finalGroupingHash, transcriptHash: finalTranscriptHash } = replay
 
       const sortedLat = [...latencies].sort((a, b) => a - b)
       const sortedLong = [...longTasks].sort((a, b) => a - b)
@@ -403,7 +402,7 @@ export function ChatStreamingPerfHarness() {
           max: sortedLat.length ? sortedLat[sortedLat.length - 1]! : 0,
           samples: sortedLat.length,
         },
-        oracle: { pass: mismatches.length === 0, finalGroupingHash, finalTranscriptHash, mismatches },
+        oracle: { pass: oraclePass, finalGroupingHash, finalTranscriptHash, mismatches },
         deltasApplied: applied,
         wallClockMs: wallEnd - wallStart,
         documentHiddenDuringRun: hiddenObserved,

@@ -15,7 +15,7 @@ import type { ActivityItem, AssistantTurn, Turn } from '../../components/chat/tu
 import { sha256 } from '../sha256'
 import { applyTraceEvent } from './reducer'
 import * as C from './constants'
-import type { CrftStreamFixture, CrftStreamOracle, OracleBarrier } from './types'
+import type { CrftStreamFixture, CrftStreamOracle, OracleBarrier, TraceEvent } from './types'
 
 // Cache content digests by exact string. Base-fixture content is stable across
 // barriers, so this collapses repeated hashing to the first occurrence.
@@ -145,4 +145,55 @@ export function computeOracle(fixture: CrftStreamFixture): CrftStreamOracle {
     finalGroupingHash: hashGrouping(messages),
     finalTranscriptHash: hashTranscript(messages),
   }
+}
+
+// ---------------------------------------------------------------------------
+// Replay validation (for live harnesses, e.g. the Lane A UI harness)
+// ---------------------------------------------------------------------------
+
+export interface ReplayValidationResult {
+  pass: boolean
+  mismatches: string[]
+  groupingHash: string
+  transcriptHash: string
+}
+
+/**
+ * Validates `liveMessages` — the state a harness actually produced by applying
+ * `events` incrementally (e.g. one-event-per-render, via its own UI loop) —
+ * against an independent pure-fold replay of the same events over the same
+ * base fixture. When `events` is the full, uncapped `fixture.trace`, this also
+ * checks against the frozen R0 baseline (`expectedOracle`).
+ *
+ * This is the check that actually catches replay/reducer regressions: calling
+ * `computeOracle(fixture)` fresh and comparing it to another `computeOracle(fixture)`
+ * call compares two invocations of the same pure function on the same frozen
+ * input, so it always matches regardless of what `liveMessages` contains and
+ * regardless of whether `events` was capped (e.g. via a deltaLimit param).
+ */
+export function validateReplay(
+  fixture: CrftStreamFixture,
+  events: TraceEvent[],
+  liveMessages: Message[],
+  expectedOracle: CrftStreamOracle,
+): ReplayValidationResult {
+  const independentReplay = events.reduce((acc, e) => applyTraceEvent(acc, e), fixture.messages)
+  const groupingHash = hashGrouping(liveMessages)
+  const transcriptHash = hashTranscript(liveMessages)
+  const expectedGroupingHash = hashGrouping(independentReplay)
+  const expectedTranscriptHash = hashTranscript(independentReplay)
+
+  const mismatches: string[] = []
+  if (groupingHash !== expectedGroupingHash) mismatches.push('groupingHash')
+  if (transcriptHash !== expectedTranscriptHash) mismatches.push('transcriptHash')
+
+  // Only compare against the frozen full-trace baseline when nothing was
+  // actually capped/dropped — a partial (deltaLimit-capped) run cannot match
+  // the full-trace final hashes by construction.
+  if (events.length === fixture.trace.length) {
+    if (groupingHash !== expectedOracle.finalGroupingHash) mismatches.push('finalGroupingHash')
+    if (transcriptHash !== expectedOracle.finalTranscriptHash) mismatches.push('finalTranscriptHash')
+  }
+
+  return { pass: mismatches.length === 0, mismatches, groupingHash, transcriptHash }
 }

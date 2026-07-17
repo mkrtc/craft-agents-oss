@@ -14,6 +14,8 @@ export {
   hashOrderedMessages,
   hashGrouping,
   hashTranscript,
+  validateReplay,
+  type ReplayValidationResult,
 } from './oracle'
 export { buildManifest } from './manifest'
 export { analyzeChurn, type ChurnAnalysisResult } from './churn-analysis'
