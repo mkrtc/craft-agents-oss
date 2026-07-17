@@ -27,15 +27,23 @@ jobs:
     name: Prepare release
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    outputs:
+      run_attempt: ${{ steps.release-ready.outputs.run_attempt }}
 
     steps:
-      - name: Checkout
+      - name: Checkout release tag
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
 
       - name: Validate release tag
         shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_REF: ${{ github.ref }}
+          PINNED_SHA: ${{ github.sha }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
         run: |
           set -euo pipefail
 
@@ -50,30 +58,121 @@ jobs:
             exit 1
           fi
 
+          release_sha="$(git rev-parse "$RELEASE_TAG^{}")"
+          checkout_sha="$(git rev-parse HEAD)"
+          if [[ "$checkout_sha" != "$release_sha" ]]; then
+            echo "::error::Checkout ($checkout_sha) does not match peeled tag commit ($release_sha)"
+            exit 1
+          fi
+
+          if [[ "$EVENT_NAME" == "push" ]]; then
+            if [[ "$EVENT_REF" != "refs/tags/$RELEASE_TAG" ]]; then
+              echo "::error::Tag-push run is pinned to $EVENT_REF, not refs/tags/$RELEASE_TAG"
+              exit 1
+            fi
+            pinned_sha="$(git rev-parse "$PINNED_SHA^{}")"
+            if [[ "$pinned_sha" != "$release_sha" ]]; then
+              echo "::error::Peeled tag commit ($release_sha) does not match pinned run SHA ($pinned_sha)"
+              exit 1
+            fi
+          fi
+
+          if (( RUN_ATTEMPT > 1 )) && [[ "$EVENT_NAME" != "push" ]]; then
+            echo "::error::Release recovery is allowed only by re-running the same pinned tag-push workflow run"
+            exit 1
+          fi
+
           expected_version="${RELEASE_TAG#v}"
-          package_version="$(git show "$RELEASE_TAG:apps/electron/package.json" | python3 -c 'import json, sys; print(json.load(sys.stdin)["version"])')"
+          notes_file="apps/electron/resources/release-notes/${expected_version}.md"
+          package_version="$(python3 -c 'import json; print(json.load(open("apps/electron/package.json"))["version"])')"
           if [[ "$package_version" != "$expected_version" ]]; then
             echo "::error::apps/electron/package.json version ($package_version) does not match tag ($expected_version)"
             exit 1
           fi
+          if [[ ! -f "$notes_file" ]]; then
+            echo "::error::Release notes file does not exist at tag: $notes_file"
+            exit 1
+          fi
 
-      - name: Ensure draft GitHub Release exists
+          {
+            echo "EXPECTED_VERSION=$expected_version"
+            echo "NOTES_FILE=$notes_file"
+            echo "RELEASE_SHA=$release_sha"
+          } >> "$GITHUB_ENV"
+
+      - name: Create or recover draft GitHub Release
+        id: release-ready
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
         run: |
           set -euo pipefail
 
-          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo "Release $RELEASE_TAG already exists"
-          else
+          if (( RUN_ATTEMPT == 1 )); then
+            if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+              echo "::error::Release or draft already exists for first attempt: $RELEASE_TAG"
+              exit 1
+            fi
+
             gh release create "$RELEASE_TAG" \
               --repo "$GITHUB_REPOSITORY" \
               --draft \
               --verify-tag \
               --title "Craft Agents $RELEASE_TAG" \
-              --notes "Automated Electron release for $RELEASE_TAG. Assets are built by GitHub Actions."
+              --notes-file "$NOTES_FILE"
+          else
+            if [[ "$EVENT_NAME" != "push" ]]; then
+              echo "::error::Only a re-run of the same pinned tag-push workflow may recover a draft"
+              exit 1
+            fi
+            if ! gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+              echo "::error::Retry requires the existing draft for $RELEASE_TAG"
+              exit 1
+            fi
           fi
+
+          release_json="$RUNNER_TEMP/release.json"
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" > "$release_json"
+          python3 - "$release_json" "$NOTES_FILE" "$RELEASE_TAG" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          release = json.loads(Path(sys.argv[1]).read_text())
+          expected_body = Path(sys.argv[2]).read_text()
+          expected_tag = sys.argv[3]
+          expected_title = f"Craft Agents {expected_tag}"
+
+          checks = {
+              "tag_name": release.get("tag_name") == expected_tag,
+              "name": release.get("name") == expected_title,
+              "body": (release.get("body") or "") == expected_body,
+              "draft": release.get("draft") is True,
+              "prerelease": release.get("prerelease") is False,
+          }
+          failures = [name for name, ok in checks.items() if not ok]
+          if failures:
+              raise SystemExit(f"Release metadata mismatch: {', '.join(failures)}")
+          print(release["id"])
+          PY
+
+          release_id="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["id"])' "$release_json")"
+          if (( RUN_ATTEMPT > 1 )); then
+            while IFS= read -r asset_id; do
+              [[ -z "$asset_id" ]] && continue
+              echo "Deleting partial draft asset id=$asset_id"
+              gh api --method DELETE "repos/$GITHUB_REPOSITORY/releases/assets/$asset_id"
+            done < <(gh api --paginate "repos/$GITHUB_REPOSITORY/releases/$release_id/assets?per_page=100" --jq '.[].id')
+          fi
+
+          remaining_assets="$(gh api "repos/$GITHUB_REPOSITORY/releases/$release_id/assets?per_page=100" --jq 'length')"
+          if [[ "$remaining_assets" != "0" ]]; then
+            echo "::error::Draft asset cleanup incomplete; $remaining_assets assets remain"
+            exit 1
+          fi
+          echo "run_attempt=$RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
 
   build-linux-x64:
     name: Build Linux x64
@@ -82,6 +181,18 @@ jobs:
     needs: prepare-release
 
     steps:
+      - name: Require preparation from this attempt
+        shell: bash
+        env:
+          PREPARE_ATTEMPT: ${{ needs.prepare-release.outputs.run_attempt }}
+          CURRENT_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          if [[ "$PREPARE_ATTEMPT" != "$CURRENT_ATTEMPT" ]]; then
+            echo "::error::Retry must use Re-run all jobs so draft cleanup runs before every builder"
+            exit 1
+          fi
+
       - name: Checkout release tag
         uses: actions/checkout@v4
         with:
@@ -104,18 +215,17 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          shopt -s nullglob
 
           files=(
-            apps/electron/release/Craft-Agents-*.AppImage
+            apps/electron/release/Craft-Agents-x64.AppImage
             apps/electron/release/latest-linux.yml
-            apps/electron/release/*.blockmap
           )
-
-          if [[ ${#files[@]} -eq 0 ]]; then
-            echo "::error::No Linux release assets found"
-            exit 1
-          fi
+          for file in "${files[@]}"; do
+            if [[ ! -f "$file" ]]; then
+              echo "::error::Missing Linux release asset: $file"
+              exit 1
+            fi
+          done
 
           gh release upload "$RELEASE_TAG" "${files[@]}" --repo "$GITHUB_REPOSITORY" --clobber
 
@@ -126,6 +236,18 @@ jobs:
     needs: prepare-release
 
     steps:
+      - name: Require preparation from this attempt
+        shell: bash
+        env:
+          PREPARE_ATTEMPT: ${{ needs.prepare-release.outputs.run_attempt }}
+          CURRENT_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          if [[ "$PREPARE_ATTEMPT" != "$CURRENT_ATTEMPT" ]]; then
+            echo "::error::Retry must use Re-run all jobs so draft cleanup runs before every builder"
+            exit 1
+          fi
+
       - name: Checkout release tag
         uses: actions/checkout@v4
         with:
@@ -142,32 +264,28 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: bash apps/electron/scripts/build-dmg.sh arm64
 
-      - name: Upload macOS release assets
+      - name: Upload macOS arm64 release assets
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          shopt -s nullglob
 
           files=(
             apps/electron/release/Craft-Agents-arm64.dmg
             apps/electron/release/Craft-Agents-arm64.zip
+            apps/electron/release/Craft-Agents-arm64.dmg.blockmap
+            apps/electron/release/Craft-Agents-arm64.zip.blockmap
             apps/electron/release/latest-mac.yml
-            apps/electron/release/Craft-Agents-arm64.*.blockmap
           )
-
-          existing=()
           for file in "${files[@]}"; do
-            [[ -f "$file" ]] && existing+=("$file")
+            if [[ ! -f "$file" ]]; then
+              echo "::error::Missing macOS arm64 release asset: $file"
+              exit 1
+            fi
           done
 
-          if [[ ${#existing[@]} -eq 0 ]]; then
-            echo "::error::No macOS release assets found"
-            exit 1
-          fi
-
-          gh release upload "$RELEASE_TAG" "${existing[@]}" --repo "$GITHUB_REPOSITORY" --clobber
+          gh release upload "$RELEASE_TAG" "${files[@]}" --repo "$GITHUB_REPOSITORY" --clobber
 
   build-macos-x64:
     name: Build macOS x64 assets
@@ -176,6 +294,18 @@ jobs:
     needs: prepare-release
 
     steps:
+      - name: Require preparation from this attempt
+        shell: bash
+        env:
+          PREPARE_ATTEMPT: ${{ needs.prepare-release.outputs.run_attempt }}
+          CURRENT_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          if [[ "$PREPARE_ATTEMPT" != "$CURRENT_ATTEMPT" ]]; then
+            echo "::error::Retry must use Re-run all jobs so draft cleanup runs before every builder"
+            exit 1
+          fi
+
       - name: Checkout release tag
         uses: actions/checkout@v4
         with:
@@ -198,30 +328,23 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          shopt -s nullglob
 
-          # Do not upload this job's latest-mac.yml: electron-updater reads a
-          # single latest-mac.yml per release, and clobbering the arm64 manifest
-          # would break Apple Silicon auto-update. The x64 DMG/ZIP are still
-          # published for manual Intel Mac installs while a dedicated multi-arch
-          # manifest strategy is implemented separately.
+          # A single latest-mac.yml is published by the arm64 job. The x64
+          # artifacts remain available for manual Intel Mac installation.
           files=(
             apps/electron/release/Craft-Agents-x64.dmg
             apps/electron/release/Craft-Agents-x64.zip
-            apps/electron/release/Craft-Agents-x64.*.blockmap
+            apps/electron/release/Craft-Agents-x64.dmg.blockmap
+            apps/electron/release/Craft-Agents-x64.zip.blockmap
           )
-
-          existing=()
           for file in "${files[@]}"; do
-            [[ -f "$file" ]] && existing+=("$file")
+            if [[ ! -f "$file" ]]; then
+              echo "::error::Missing macOS x64 release asset: $file"
+              exit 1
+            fi
           done
 
-          if [[ ${#existing[@]} -eq 0 ]]; then
-            echo "::error::No macOS x64 release assets found"
-            exit 1
-          fi
-
-          gh release upload "$RELEASE_TAG" "${existing[@]}" --repo "$GITHUB_REPOSITORY" --clobber
+          gh release upload "$RELEASE_TAG" "${files[@]}" --repo "$GITHUB_REPOSITORY" --clobber
 
   build-windows-x64:
     name: Build Windows x64
@@ -230,6 +353,16 @@ jobs:
     needs: prepare-release
 
     steps:
+      - name: Require preparation from this attempt
+        shell: pwsh
+        env:
+          PREPARE_ATTEMPT: ${{ needs.prepare-release.outputs.run_attempt }}
+          CURRENT_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          if ($env:PREPARE_ATTEMPT -ne $env:CURRENT_ATTEMPT) {
+            throw "Retry must use Re-run all jobs so draft cleanup runs before every builder"
+          }
+
       - name: Checkout release tag
         uses: actions/checkout@v4
         with:
@@ -253,32 +386,224 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
 
-          $patterns = @(
-            "apps/electron/release/Craft-Agents-*.exe",
-            "apps/electron/release/latest.yml",
-            "apps/electron/release/*.blockmap"
+          $files = @(
+            "apps/electron/release/Craft-Agents-x64.exe",
+            "apps/electron/release/Craft-Agents-x64.exe.blockmap",
+            "apps/electron/release/latest.yml"
           )
-
-          $files = @()
-          foreach ($pattern in $patterns) {
-            $files += Get-ChildItem -Path $pattern -File -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName }
-          }
-
-          if ($files.Count -eq 0) {
-            Write-Error "No Windows release assets found"
+          foreach ($file in $files) {
+            if (-not (Test-Path -LiteralPath $file -PathType Leaf)) {
+              throw "Missing Windows release asset: $file"
+            }
           }
 
           & gh release upload $env:RELEASE_TAG @files --repo $env:GITHUB_REPOSITORY --clobber
+          if ($LASTEXITCODE -ne 0) {
+            throw "Failed to upload Windows release assets"
+          }
 
-  publish-release:
-    name: Publish release
+  verify-release-assets:
+    name: Verify release assets
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
     needs:
       - build-linux-x64
       - build-macos-arm64
       - build-macos-x64
       - build-windows-x64
+    env:
+      GH_TOKEN: ${{ github.token }}
+
+    steps:
+      - name: Checkout release tag
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Validate release tag and metadata
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PINNED_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          git fetch --force --tags origin
+          release_sha="$(git rev-parse "$RELEASE_TAG^{}")"
+          checkout_sha="$(git rev-parse HEAD)"
+          if [[ "$checkout_sha" != "$release_sha" ]]; then
+            echo "::error::Verification checkout ($checkout_sha) does not match peeled tag commit ($release_sha)"
+            exit 1
+          fi
+          if [[ "$EVENT_NAME" == "push" ]]; then
+            pinned_sha="$(git rev-parse "$PINNED_SHA^{}")"
+            if [[ "$pinned_sha" != "$release_sha" ]]; then
+              echo "::error::Peeled tag commit ($release_sha) does not match pinned run SHA ($pinned_sha)"
+              exit 1
+            fi
+          fi
+
+          expected_version="${RELEASE_TAG#v}"
+          notes_file="apps/electron/resources/release-notes/${expected_version}.md"
+          if [[ ! -f "$notes_file" ]]; then
+            echo "::error::Missing release notes: $notes_file"
+            exit 1
+          fi
+          {
+            echo "EXPECTED_VERSION=$expected_version"
+            echo "NOTES_FILE=$notes_file"
+            echo "RELEASE_SHA=$release_sha"
+          } >> "$GITHUB_ENV"
+
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" > "$RUNNER_TEMP/release.json"
+          release_id="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["id"])' "$RUNNER_TEMP/release.json")"
+          gh api "repos/$GITHUB_REPOSITORY/releases/$release_id/assets?per_page=100" > "$RUNNER_TEMP/assets.json"
+
+      - name: Download release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/release-assets"
+          gh release download "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --dir "$RUNNER_TEMP/release-assets" \
+            --clobber
+
+      - name: Verify exact assets and updater manifests
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cat > "$RUNNER_TEMP/verify-release-assets.ts" <<'TS'
+          import { createHash } from 'node:crypto';
+          import { createRequire } from 'node:module';
+          import { basename, join } from 'node:path';
+          import { readFileSync, readdirSync, statSync } from 'node:fs';
+
+          const require = createRequire(join(process.cwd(), 'package.json'));
+          const yaml = require('js-yaml') as typeof import('js-yaml');
+
+          function assert(condition: unknown, message: string): asserts condition {
+            if (!condition) throw new Error(message);
+          }
+
+          const releaseTag = process.env.RELEASE_TAG!;
+          const expectedVersion = process.env.EXPECTED_VERSION!;
+          const notesFile = process.env.NOTES_FILE!;
+          const runnerTemp = process.env.RUNNER_TEMP!;
+          const assetDir = join(runnerTemp, 'release-assets');
+          assert(releaseTag === `v${expectedVersion}`, 'release tag/version mismatch');
+
+          const release = JSON.parse(readFileSync(join(runnerTemp, 'release.json'), 'utf8'));
+          const apiAssets = JSON.parse(readFileSync(join(runnerTemp, 'assets.json'), 'utf8'));
+          const expectedBody = readFileSync(notesFile, 'utf8');
+          assert(release.tag_name === releaseTag, `release tag mismatch: ${release.tag_name}`);
+          assert(release.name === `Craft Agents ${releaseTag}`, `release title mismatch: ${release.name}`);
+          assert((release.body ?? '') === expectedBody, 'release body does not exactly match versioned notes');
+          assert(release.draft === true, 'release must remain a draft during verification');
+          assert(release.prerelease === false, 'release must not be a prerelease');
+
+          const expectedAssets = [
+            'Craft-Agents-x64.AppImage',
+            'latest-linux.yml',
+            'Craft-Agents-arm64.dmg',
+            'Craft-Agents-arm64.zip',
+            'Craft-Agents-arm64.dmg.blockmap',
+            'Craft-Agents-arm64.zip.blockmap',
+            'latest-mac.yml',
+            'Craft-Agents-x64.dmg',
+            'Craft-Agents-x64.zip',
+            'Craft-Agents-x64.dmg.blockmap',
+            'Craft-Agents-x64.zip.blockmap',
+            'Craft-Agents-x64.exe',
+            'Craft-Agents-x64.exe.blockmap',
+            'latest.yml',
+          ].sort();
+
+          assert(Array.isArray(apiAssets), 'GitHub assets response must be an array');
+          assert(apiAssets.length === 14, `expected 14 GitHub assets, found ${apiAssets.length}`);
+          const apiNames = apiAssets.map((asset: any) => asset.name);
+          assert(new Set(apiNames).size === apiNames.length, 'GitHub asset names must be unique');
+          assert(JSON.stringify([...apiNames].sort()) === JSON.stringify(expectedAssets), 'GitHub asset set is not exact');
+
+          const downloadedNames = readdirSync(assetDir).sort();
+          assert(JSON.stringify(downloadedNames) === JSON.stringify(expectedAssets), 'downloaded asset set is not exact');
+
+          let verifiedApiDigests = 0;
+          for (const asset of apiAssets) {
+            assert(asset.state === 'uploaded', `asset is not fully uploaded: ${asset.name}`);
+            assert(Number.isInteger(asset.size) && asset.size > 0, `invalid API size for ${asset.name}`);
+            const file = join(assetDir, asset.name);
+            const size = statSync(file).size;
+            assert(size === asset.size, `API size mismatch for ${asset.name}: ${asset.size} != ${size}`);
+            if (asset.digest != null && asset.digest !== '') {
+              assert(/^sha256:[0-9a-f]{64}$/.test(asset.digest), `invalid GitHub digest for ${asset.name}`);
+              const actual = `sha256:${createHash('sha256').update(readFileSync(file)).digest('hex')}`;
+              assert(actual === asset.digest, `GitHub SHA-256 mismatch for ${asset.name}`);
+              verifiedApiDigests++;
+            }
+          }
+
+          const manifests = [
+            { name: 'latest-linux.yml', files: ['Craft-Agents-x64.AppImage'] },
+            { name: 'latest-mac.yml', files: ['Craft-Agents-arm64.dmg', 'Craft-Agents-arm64.zip'] },
+            { name: 'latest.yml', files: ['Craft-Agents-x64.exe'] },
+          ];
+
+          for (const spec of manifests) {
+            const document = yaml.load(readFileSync(join(assetDir, spec.name), 'utf8')) as any;
+            assert(document && typeof document === 'object', `${spec.name} must contain a YAML object`);
+            assert(document.version === expectedVersion, `${spec.name} version mismatch: ${document.version}`);
+            assert(Array.isArray(document.files) && document.files.length > 0, `${spec.name} files must be nonempty`);
+
+            const urls = document.files.map((entry: any) => entry?.url);
+            assert(urls.every((url: unknown) => typeof url === 'string' && url.length > 0), `${spec.name} has an empty file URL`);
+            assert(new Set(urls).size === urls.length, `${spec.name} file URLs must be unique`);
+            assert(
+              JSON.stringify([...urls].sort()) === JSON.stringify([...spec.files].sort()),
+              `${spec.name} file set is not exact: ${urls.join(', ')}`,
+            );
+            assert(typeof document.path === 'string' && document.path.length > 0, `${spec.name} path must be nonempty`);
+            assert(urls.includes(document.path), `${spec.name} path must identify one files[] entry`);
+            assert(basename(document.path) === document.path, `${spec.name} path must be a release asset filename`);
+
+            for (const entry of document.files) {
+              assert(basename(entry.url) === entry.url, `${spec.name} contains a non-filename URL: ${entry.url}`);
+              const file = join(assetDir, entry.url);
+              const size = statSync(file).size;
+              assert(Number.isInteger(entry.size) && entry.size > 0, `${spec.name} has invalid size for ${entry.url}`);
+              assert(entry.size === size, `${spec.name} size mismatch for ${entry.url}: ${entry.size} != ${size}`);
+              assert(typeof entry.sha512 === 'string', `${spec.name} lacks SHA-512 for ${entry.url}`);
+              const decoded = Buffer.from(entry.sha512, 'base64');
+              assert(decoded.length === 64 && decoded.toString('base64') === entry.sha512, `${spec.name} has invalid SHA-512 base64 for ${entry.url}`);
+              const actual = createHash('sha512').update(readFileSync(file)).digest('base64');
+              assert(actual === entry.sha512, `${spec.name} SHA-512 mismatch for ${entry.url}`);
+            }
+
+            const primary = document.files.find((entry: any) => entry.url === document.path);
+            assert(primary, `${spec.name} primary path entry is missing`);
+            assert(document.sha512 === primary.sha512, `${spec.name} top-level SHA-512 does not match path entry`);
+          }
+
+          console.log(`Verified 14 exact assets, 3 updater manifests, and ${verifiedApiDigests} available GitHub SHA-256 digests.`);
+          TS
+
+          bun "$RUNNER_TEMP/verify-release-assets.ts"
+
+  publish-release:
+    name: Publish release
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: verify-release-assets
 
     steps:
       - name: Publish GitHub Release

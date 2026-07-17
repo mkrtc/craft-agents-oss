@@ -6,9 +6,6 @@ This file accumulates release notes for the next unreleased version. PRs that ad
 
 ## Improvements
 
-- **Safe workspace detach** — Removing a workspace now waits for active sessions, tasks, background operations, automations, and messaging work to finish; tears down workspace-owned runtimes before detaching configuration; preserves all session and project files; and reports actionable, localized retry guidance.
-- **Visible file-watch fallback** — The session file panel now reports when descriptor limits force periodic polling or manual refresh, with a direct Refresh action when automatic updates are unavailable.
-
 ## Bug Fixes
 
 ## Breaking Changes
