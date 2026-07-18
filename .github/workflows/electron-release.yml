@@ -29,6 +29,7 @@ jobs:
     timeout-minutes: 10
     outputs:
       run_attempt: ${{ steps.release-ready.outputs.run_attempt }}
+      release_id: ${{ steps.release-ready.outputs.release_id }}
 
     steps:
       - name: Checkout release tag
@@ -110,8 +111,42 @@ jobs:
         run: |
           set -euo pipefail
 
+          all_releases="$RUNNER_TEMP/all-releases.json"
+          release_json="$RUNNER_TEMP/release.json"
+          marked_notes="$RUNNER_TEMP/release-notes-marked.md"
+
+          python3 - "$NOTES_FILE" "$marked_notes" "$GITHUB_RUN_ID" <<'PY'
+          import sys
+          from pathlib import Path
+
+          body = Path(sys.argv[1]).read_text()
+          marker = f"<!-- craft-release-run:{sys.argv[3]} -->"
+          Path(sys.argv[2]).write_text(body + ("" if body.endswith("\n") else "\n") + f"\n{marker}\n")
+          PY
+
+          find_release() {
+            gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/releases?per_page=100" > "$all_releases"
+            python3 - "$all_releases" "$RELEASE_TAG" "$release_json" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          pages = json.loads(Path(sys.argv[1]).read_text())
+          releases = [release for page in pages for release in page]
+          matches = [release for release in releases if release.get("tag_name") == sys.argv[2]]
+          if len(matches) > 1:
+              raise SystemExit(f"Expected at most one exact-tag release, found {len(matches)}")
+          if matches:
+              Path(sys.argv[3]).write_text(json.dumps(matches[0]))
+          else:
+              Path(sys.argv[3]).unlink(missing_ok=True)
+          print(len(matches))
+          PY
+          }
+
+          match_count="$(find_release)"
           if (( RUN_ATTEMPT == 1 )); then
-            if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            if [[ "$match_count" != "0" ]]; then
               echo "::error::Release or draft already exists for first attempt: $RELEASE_TAG"
               exit 1
             fi
@@ -120,22 +155,23 @@ jobs:
               --repo "$GITHUB_REPOSITORY" \
               --draft \
               --verify-tag \
+              --target "$RELEASE_SHA" \
               --title "Craft Agents $RELEASE_TAG" \
-              --notes-file "$NOTES_FILE"
+              --notes-file "$marked_notes"
+            match_count="$(find_release)"
           else
             if [[ "$EVENT_NAME" != "push" ]]; then
               echo "::error::Only a re-run of the same pinned tag-push workflow may recover a draft"
               exit 1
             fi
-            if ! gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-              echo "::error::Retry requires the existing draft for $RELEASE_TAG"
-              exit 1
-            fi
           fi
 
-          release_json="$RUNNER_TEMP/release.json"
-          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" > "$release_json"
-          python3 - "$release_json" "$NOTES_FILE" "$RELEASE_TAG" <<'PY'
+          if [[ "$match_count" != "1" || ! -f "$release_json" ]]; then
+            echo "::error::Expected exactly one draft for $RELEASE_TAG, found $match_count"
+            exit 1
+          fi
+
+          python3 - "$release_json" "$marked_notes" "$RELEASE_TAG" "$RELEASE_SHA" <<'PY'
           import json
           import sys
           from pathlib import Path
@@ -143,19 +179,20 @@ jobs:
           release = json.loads(Path(sys.argv[1]).read_text())
           expected_body = Path(sys.argv[2]).read_text()
           expected_tag = sys.argv[3]
-          expected_title = f"Craft Agents {expected_tag}"
-
+          expected_sha = sys.argv[4]
           checks = {
               "tag_name": release.get("tag_name") == expected_tag,
-              "name": release.get("name") == expected_title,
+              "name": release.get("name") == f"Craft Agents {expected_tag}",
+              "target_commitish": release.get("target_commitish") == expected_sha,
               "body": (release.get("body") or "") == expected_body,
               "draft": release.get("draft") is True,
               "prerelease": release.get("prerelease") is False,
+              "published_at": release.get("published_at") is None,
+              "id": isinstance(release.get("id"), int) and release["id"] > 0,
           }
           failures = [name for name, ok in checks.items() if not ok]
           if failures:
               raise SystemExit(f"Release metadata mismatch: {', '.join(failures)}")
-          print(release["id"])
           PY
 
           release_id="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["id"])' "$release_json")"
@@ -173,6 +210,7 @@ jobs:
             exit 1
           fi
           echo "run_attempt=$RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
+          echo "release_id=$release_id" >> "$GITHUB_OUTPUT"
 
   build-linux-x64:
     name: Build Linux x64
@@ -213,6 +251,7 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ needs.prepare-release.outputs.release_id }}
         run: |
           set -euo pipefail
 
@@ -225,9 +264,19 @@ jobs:
               echo "::error::Missing Linux release asset: $file"
               exit 1
             fi
+            name="${file##*/}"
+            [[ "$name" =~ ^[A-Za-z0-9._-]+$ ]] || { echo "::error::Unsafe asset name: $name"; exit 1; }
+            response="$RUNNER_TEMP/upload-$name.json"
+            code="$(curl --silent --show-error --connect-timeout 30 --max-time 1800 \
+              --output "$response" --write-out '%{http_code}' --request POST \
+              --header "Authorization: Bearer $GH_TOKEN" \
+              --header 'Accept: application/vnd.github+json' \
+              --header 'X-GitHub-Api-Version: 2022-11-28' \
+              --header 'Content-Type: application/octet-stream' \
+              --data-binary "@$file" \
+              "https://uploads.github.com/repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets?name=$name")"
+            if [[ "$code" != "201" ]]; then cat "$response"; echo "::error::Asset upload failed for $name (HTTP $code)"; exit 1; fi
           done
-
-          gh release upload "$RELEASE_TAG" "${files[@]}" --repo "$GITHUB_REPOSITORY" --clobber
 
   build-macos-arm64:
     name: Build macOS arm64
@@ -268,6 +317,7 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ needs.prepare-release.outputs.release_id }}
         run: |
           set -euo pipefail
 
@@ -283,9 +333,19 @@ jobs:
               echo "::error::Missing macOS arm64 release asset: $file"
               exit 1
             fi
+            name="${file##*/}"
+            [[ "$name" =~ ^[A-Za-z0-9._-]+$ ]] || { echo "::error::Unsafe asset name: $name"; exit 1; }
+            response="$RUNNER_TEMP/upload-$name.json"
+            code="$(curl --silent --show-error --connect-timeout 30 --max-time 1800 \
+              --output "$response" --write-out '%{http_code}' --request POST \
+              --header "Authorization: Bearer $GH_TOKEN" \
+              --header 'Accept: application/vnd.github+json' \
+              --header 'X-GitHub-Api-Version: 2022-11-28' \
+              --header 'Content-Type: application/octet-stream' \
+              --data-binary "@$file" \
+              "https://uploads.github.com/repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets?name=$name")"
+            if [[ "$code" != "201" ]]; then cat "$response"; echo "::error::Asset upload failed for $name (HTTP $code)"; exit 1; fi
           done
-
-          gh release upload "$RELEASE_TAG" "${files[@]}" --repo "$GITHUB_REPOSITORY" --clobber
 
   build-macos-x64:
     name: Build macOS x64 assets
@@ -326,6 +386,7 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ needs.prepare-release.outputs.release_id }}
         run: |
           set -euo pipefail
 
@@ -342,9 +403,19 @@ jobs:
               echo "::error::Missing macOS x64 release asset: $file"
               exit 1
             fi
+            name="${file##*/}"
+            [[ "$name" =~ ^[A-Za-z0-9._-]+$ ]] || { echo "::error::Unsafe asset name: $name"; exit 1; }
+            response="$RUNNER_TEMP/upload-$name.json"
+            code="$(curl --silent --show-error --connect-timeout 30 --max-time 1800 \
+              --output "$response" --write-out '%{http_code}' --request POST \
+              --header "Authorization: Bearer $GH_TOKEN" \
+              --header 'Accept: application/vnd.github+json' \
+              --header 'X-GitHub-Api-Version: 2022-11-28' \
+              --header 'Content-Type: application/octet-stream' \
+              --data-binary "@$file" \
+              "https://uploads.github.com/repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets?name=$name")"
+            if [[ "$code" != "201" ]]; then cat "$response"; echo "::error::Asset upload failed for $name (HTTP $code)"; exit 1; fi
           done
-
-          gh release upload "$RELEASE_TAG" "${files[@]}" --repo "$GITHUB_REPOSITORY" --clobber
 
   build-windows-x64:
     name: Build Windows x64
@@ -383,6 +454,7 @@ jobs:
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ needs.prepare-release.outputs.release_id }}
         run: |
           $ErrorActionPreference = "Stop"
 
@@ -391,15 +463,25 @@ jobs:
             "apps/electron/release/Craft-Agents-x64.exe.blockmap",
             "apps/electron/release/latest.yml"
           )
+          $headers = @{
+            Authorization = "Bearer $env:GH_TOKEN"
+            Accept = "application/vnd.github+json"
+            "X-GitHub-Api-Version" = "2022-11-28"
+          }
           foreach ($file in $files) {
             if (-not (Test-Path -LiteralPath $file -PathType Leaf)) {
               throw "Missing Windows release asset: $file"
             }
-          }
-
-          & gh release upload $env:RELEASE_TAG @files --repo $env:GITHUB_REPOSITORY --clobber
-          if ($LASTEXITCODE -ne 0) {
-            throw "Failed to upload Windows release assets"
+            $name = [IO.Path]::GetFileName($file)
+            if ($name -notmatch '^[A-Za-z0-9._-]+$') {
+              throw "Unsafe asset name: $name"
+            }
+            $encodedName = [Uri]::EscapeDataString($name)
+            $uri = "https://uploads.github.com/repos/$env:GITHUB_REPOSITORY/releases/$env:RELEASE_ID/assets?name=$encodedName"
+            $response = Invoke-RestMethod -Method Post -Uri $uri -Headers $headers -ContentType "application/octet-stream" -InFile $file
+            if (-not $response.id -or $response.name -ne $name) {
+              throw "Unexpected upload response for $name"
+            }
           }
 
   verify-release-assets:
@@ -407,12 +489,14 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     needs:
+      - prepare-release
       - build-linux-x64
       - build-macos-arm64
       - build-macos-x64
       - build-windows-x64
     env:
       GH_TOKEN: ${{ github.token }}
+      RELEASE_ID: ${{ needs.prepare-release.outputs.release_id }}
 
     steps:
       - name: Checkout release tag
@@ -464,19 +548,38 @@ jobs:
             echo "RELEASE_SHA=$release_sha"
           } >> "$GITHUB_ENV"
 
-          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" > "$RUNNER_TEMP/release.json"
-          release_id="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["id"])' "$RUNNER_TEMP/release.json")"
-          gh api "repos/$GITHUB_REPOSITORY/releases/$release_id/assets?per_page=100" > "$RUNNER_TEMP/assets.json"
+          gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" > "$RUNNER_TEMP/release.json"
+          actual_release_id="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["id"])' "$RUNNER_TEMP/release.json")"
+          if [[ "$actual_release_id" != "$RELEASE_ID" ]]; then
+            echo "::error::Numeric release ID mismatch: $actual_release_id != $RELEASE_ID"
+            exit 1
+          fi
+          gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets?per_page=100" > "$RUNNER_TEMP/assets.json"
 
       - name: Download release assets
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/release-assets"
-          gh release download "$RELEASE_TAG" \
-            --repo "$GITHUB_REPOSITORY" \
-            --dir "$RUNNER_TEMP/release-assets" \
-            --clobber
+          asset_dir="$RUNNER_TEMP/release-assets"
+          mkdir -p "$asset_dir"
+          python3 - "$RUNNER_TEMP/assets.json" <<'PY' > "$RUNNER_TEMP/assets.tsv"
+          import json
+          import re
+          import sys
+          from pathlib import Path
+
+          for asset in json.loads(Path(sys.argv[1]).read_text()):
+              name = asset.get("name", "")
+              if not re.fullmatch(r"[A-Za-z0-9._-]+", name):
+                  raise SystemExit(f"Unsafe asset name: {name!r}")
+              print(f"{asset['id']}\t{name}")
+          PY
+          while IFS=$'\t' read -r asset_id asset_name; do
+            gh api \
+              --header 'Accept: application/octet-stream' \
+              "repos/$GITHUB_REPOSITORY/releases/assets/$asset_id" \
+              > "$asset_dir/$asset_name"
+          done < "$RUNNER_TEMP/assets.tsv"
 
       - name: Verify exact assets and updater manifests
         shell: bash
@@ -505,10 +608,13 @@ jobs:
 
           const release = JSON.parse(readFileSync(join(runnerTemp, 'release.json'), 'utf8'));
           const apiAssets = JSON.parse(readFileSync(join(runnerTemp, 'assets.json'), 'utf8'));
-          const expectedBody = readFileSync(notesFile, 'utf8');
+          const notesBody = readFileSync(notesFile, 'utf8');
+          const expectedBody = notesBody + (notesBody.endsWith('\n') ? '' : '\n') + `\n<!-- craft-release-run:${process.env.GITHUB_RUN_ID} -->\n`;
+          assert(String(release.id) === process.env.RELEASE_ID, `release ID mismatch: ${release.id}`);
           assert(release.tag_name === releaseTag, `release tag mismatch: ${release.tag_name}`);
+          assert(release.target_commitish === process.env.RELEASE_SHA, `release target mismatch: ${release.target_commitish}`);
           assert(release.name === `Craft Agents ${releaseTag}`, `release title mismatch: ${release.name}`);
-          assert((release.body ?? '') === expectedBody, 'release body does not exactly match versioned notes');
+          assert((release.body ?? '') === expectedBody, 'draft body/ownership marker does not exactly match');
           assert(release.draft === true, 'release must remain a draft during verification');
           assert(release.prerelease === false, 'release must not be a prerelease');
 
@@ -603,13 +709,82 @@ jobs:
     name: Publish release
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    needs: verify-release-assets
+    needs:
+      - prepare-release
+      - verify-release-assets
+    env:
+      RELEASE_ID: ${{ needs.prepare-release.outputs.release_id }}
 
     steps:
-      - name: Publish GitHub Release
+      - name: Checkout release tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+
+      - name: Publish GitHub Release by numeric ID
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest
+
+          expected_version="${RELEASE_TAG#v}"
+          notes_file="apps/electron/resources/release-notes/${expected_version}.md"
+          publish_json="$RUNNER_TEMP/publish-release.json"
+          python3 - "$notes_file" "$RELEASE_TAG" "$publish_json" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          payload = {
+              "name": f"Craft Agents {sys.argv[2]}",
+              "body": Path(sys.argv[1]).read_text(),
+              "draft": False,
+              "prerelease": False,
+              "make_latest": "true",
+          }
+          Path(sys.argv[3]).write_text(json.dumps(payload))
+          PY
+          gh api --method PATCH \
+            "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" \
+            --input "$publish_json" > "$RUNNER_TEMP/published-release.json"
+
+          verified=false
+          for attempt in {1..12}; do
+            if gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" > "$RUNNER_TEMP/public-release.json" \
+              && gh api "repos/$GITHUB_REPOSITORY/releases/latest" > "$RUNNER_TEMP/latest-release.json"; then
+              if python3 - "$RUNNER_TEMP/public-release.json" "$RUNNER_TEMP/latest-release.json" "$notes_file" "$RELEASE_TAG" "$RELEASE_ID" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          release = json.loads(Path(sys.argv[1]).read_text())
+          latest = json.loads(Path(sys.argv[2]).read_text())
+          expected_body = Path(sys.argv[3]).read_text()
+          expected_tag = sys.argv[4]
+          expected_id = int(sys.argv[5])
+          checks = {
+              "id": release.get("id") == expected_id,
+              "tag": release.get("tag_name") == expected_tag,
+              "title": release.get("name") == f"Craft Agents {expected_tag}",
+              "body": (release.get("body") or "") == expected_body,
+              "published": release.get("draft") is False and release.get("published_at") is not None,
+              "not_prerelease": release.get("prerelease") is False,
+              "latest": latest.get("id") == expected_id and latest.get("tag_name") == expected_tag,
+          }
+          failures = [name for name, ok in checks.items() if not ok]
+          if failures:
+              raise SystemExit(f"Published release verification pending: {', '.join(failures)}")
+          PY
+              then
+                verified=true
+                break
+              fi
+            fi
+            echo "Published release not fully visible yet (attempt $attempt/12)"
+            sleep 5
+          done
+          if [[ "$verified" != "true" ]]; then
+            echo "::error::Published release did not become exact/latest within 60 seconds"
+            exit 1
+          fi
