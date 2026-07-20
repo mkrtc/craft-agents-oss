@@ -1,6 +1,6 @@
 import type { EventSink, RpcServer } from '@craft-agent/server-core/transport'
 import { CLIENT_BROWSER_INVOKE } from '@craft-agent/server-core/transport'
-import type { ISessionManager, IBrowserPaneManager, ExecutePromptAutomationInput, WorkspaceRemovalHooks } from '@craft-agent/server-core/handlers'
+import type { ISessionManager, IBrowserPaneManager, ExecutePromptAutomationInput, WorkspaceRemovalHooks, ShutdownCancellationResult } from '@craft-agent/server-core/handlers'
 import { RemoteBrowserPaneManager } from './RemoteBrowserPaneManager'
 import { validateFilePath, getWorkspaceAllowedDirs } from '@craft-agent/server-core/handlers'
 import { createScopedLogger, CONSOLE_LOGGER, type PlatformServices, type Logger } from '@craft-agent/server-core/runtime'
@@ -3064,6 +3064,115 @@ export class SessionManager implements ISessionManager {
   // Flush all pending sessions (call on app quit).
   async flushAllSessions(): Promise<void> {
     await sessionPersistenceQueue.flushAll()
+  }
+
+  beginTerminalShutdown(): void {
+    this.closing = true
+  }
+
+  async cancelAllProcessingForShutdown(
+    options?: { deadline?: number; graceMs?: number },
+  ): Promise<ShutdownCancellationResult> {
+    // Fence every new session/turn synchronously before the first await. Deferred
+    // automation and queued replay paths also observe `closing`.
+    this.beginTerminalShutdown()
+
+    const deadline = options?.deadline ?? (Date.now() + this.runtimeLifecycleConfig.shutdownTimeoutMs)
+    const graceMs = Math.max(0, options?.graceMs ?? 5_000)
+    const targets = [...this.sessions.values()]
+      .filter(managed => managed.isProcessing)
+      .map(managed => ({
+        managed,
+        turn: managed.activeTurn,
+        generation: managed.runtimeGeneration,
+      }))
+
+    const result: ShutdownCancellationResult = {
+      targeted: targets.length,
+      cancelled: 0,
+      forced: 0,
+      failures: [],
+    }
+
+    const waitUntil = async (promise: Promise<unknown>, until: number): Promise<boolean> => {
+      const remaining = Math.max(0, until - Date.now())
+      if (remaining === 0) return false
+      let timer: ReturnType<typeof setTimeout> | undefined
+      try {
+        return await Promise.race([
+          promise.then(() => true, () => true),
+          new Promise<false>((resolve) => {
+            timer = setTimeout(() => resolve(false), remaining)
+          }),
+        ])
+      } finally {
+        if (timer) clearTimeout(timer)
+      }
+    }
+
+    await Promise.all(targets.map(async ({ managed, turn, generation }) => {
+      let cancellationError: unknown
+      try {
+        await this.cancelProcessing(managed.id)
+      } catch (error) {
+        cancellationError = error
+        sessionLog.warn(`UserStop signal failed during shutdown for ${managed.id}: ${error instanceof Error ? error.message : error}`)
+      }
+
+      // The ordinary stop path has a detached five-second backstop. Terminal
+      // shutdown owns an awaited exact-generation fallback instead.
+      if (managed.stopTimer) {
+        clearTimeout(managed.stopTimer)
+        managed.stopTimer = undefined
+      }
+
+      const gracefulDeadline = Math.min(deadline, Date.now() + graceMs)
+      while (managed.isProcessing && Date.now() < gracefulDeadline) {
+        await new Promise(resolve => setTimeout(resolve, Math.min(25, gracefulDeadline - Date.now())))
+      }
+
+      let forced = false
+      if (managed.isProcessing) {
+        forced = true
+        result.forced++
+        sessionLog.warn(`Shutdown cancellation grace expired for ${managed.id}; forcing exact runtime cleanup`)
+      }
+
+      const terminal = managed.isProcessing
+        ? this.onProcessingStopped(managed.id, 'timeout', turn)
+        : (turn?.terminalPromise ?? Promise.resolve())
+      const retirement = generation
+        ? this.disposeManagedAgentRuntime(managed, 'manual', generation, deadline)
+        : Promise.resolve()
+      const lifecycle = Promise.allSettled([terminal, retirement])
+      const retired = await waitUntil(lifecycle, deadline)
+      const rejected = retired
+        ? (await lifecycle).find((entry): entry is PromiseRejectedResult => entry.status === 'rejected')
+        : undefined
+
+      if (!retired) {
+        result.failures.push({ sessionId: managed.id, error: 'Runtime retirement timed out' })
+      } else if (rejected) {
+        result.failures.push({
+          sessionId: managed.id,
+          error: rejected.reason instanceof Error ? rejected.reason.message : String(rejected.reason),
+        })
+      } else if (managed.isProcessing) {
+        result.failures.push({ sessionId: managed.id, error: 'Session remained processing after forced cancellation' })
+      } else {
+        result.cancelled++
+      }
+
+      if (cancellationError && !forced && !result.failures.some(entry => entry.sessionId === managed.id)) {
+        result.failures.push({
+          sessionId: managed.id,
+          error: cancellationError instanceof Error ? cancellationError.message : String(cancellationError),
+        })
+      }
+    }))
+
+    sessionLog.info('Shutdown active-turn cancellation complete', result)
+    return result
   }
 
   // ============================================
@@ -8144,7 +8253,13 @@ export class SessionManager implements ISessionManager {
 
     // Force-abort via Query.close() - sends soft interrupt to the backend
     if (managed.agent) {
-      managed.agent.forceAbort(AbortReason.UserStop)
+      try {
+        managed.agent.forceAbort(AbortReason.UserStop)
+      } catch (error) {
+        // Preserve interruption state/events and let the exact-generation
+        // timeout/disposal fallback retire an uncooperative backend.
+        sessionLog.warn(`UserStop signal failed for ${sessionId}: ${error instanceof Error ? error.message : error}`)
+      }
     }
 
     // Only show "Response interrupted" message when user explicitly clicked Stop

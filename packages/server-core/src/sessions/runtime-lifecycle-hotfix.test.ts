@@ -253,6 +253,79 @@ describe('SessionManager runtime lifecycle hotfix', () => {
     expect((sm as any).sessions.has(deleteManaged.id)).toBe(false)
   })
 
+  it('cancels and awaits every active turn before terminal shutdown continues', async () => {
+    const sm = new SessionManager()
+    const entries = ['active-a', 'active-b'].map((id) => {
+      const managed = makeManaged(sm, id)
+      const c = calls()
+      const generation = attachRuntime(sm, managed, c)
+      managed.isProcessing = true
+      managed.processingGeneration = 1
+      const turn = (sm as any).beginTurn(managed)
+      turn.agent = managed.agent
+      turn.runtimeEpoch = generation.epoch
+      managed.messages.push({ id: `${id}-queued`, role: 'user', content: 'later', timestamp: 1 })
+      managed.messageQueue.push({ message: 'later', messageId: `${id}-queued` })
+
+      managed.agent.forceAbort = () => {
+        c.forceAbort++
+        queueMicrotask(() => {
+          void (async () => {
+            await (sm as any).onProcessingStopped(id, 'interrupted', turn)
+            await (sm as any).disposeManagedAgentRuntime(managed, 'manual', generation)
+          })()
+        })
+      }
+      return { managed, c }
+    })
+
+    const cancellation = sm.cancelAllProcessingForShutdown({
+      deadline: Date.now() + 2_000,
+      graceMs: 250,
+    })
+
+    // Admission closes synchronously, before cancellation awaits any backend.
+    expect(() => (sm as any).assertRuntimeAdmission()).toThrow('shutting down')
+    const result = await cancellation
+
+    expect(result).toEqual({ targeted: 2, cancelled: 2, forced: 0, failures: [] })
+    for (const { managed, c } of entries) {
+      expect(managed.isProcessing).toBe(false)
+      expect(managed.messageQueue).toEqual([])
+      expect(managed.messages.some((message: any) => message.content === 'later')).toBe(false)
+      expect(managed.messages.some((message: any) => message.content === 'Response interrupted')).toBe(true)
+      expect(c).toMatchObject({ forceAbort: 1, dispose: 1, poolStop: 1, mcpDisconnect: 1 })
+    }
+  })
+
+  it('forces exact runtime retirement after bounded cancellation grace', async () => {
+    const sm = new SessionManager()
+    const managed = makeManaged(sm, 'unresponsive')
+    const c = calls()
+    const generation = attachRuntime(sm, managed, c)
+    managed.isProcessing = true
+    managed.processingGeneration = 1
+    const turn = (sm as any).beginTurn(managed)
+    turn.agent = managed.agent
+    turn.runtimeEpoch = generation.epoch
+
+    const result = await sm.cancelAllProcessingForShutdown({
+      deadline: Date.now() + 2_000,
+      graceMs: 0,
+    })
+
+    expect(result).toEqual({ targeted: 1, cancelled: 1, forced: 1, failures: [] })
+    expect(managed.isProcessing).toBe(false)
+    expect(c).toMatchObject({ forceAbort: 1, dispose: 1, poolStop: 1, mcpDisconnect: 1 })
+  })
+
+  it('closes admission and returns immediately when no sessions are active', async () => {
+    const sm = new SessionManager()
+    const result = await sm.cancelAllProcessingForShutdown({ deadline: Date.now() + 100, graceMs: 0 })
+    expect(result).toEqual({ targeted: 0, cancelled: 0, forced: 0, failures: [] })
+    expect(() => (sm as any).assertRuntimeAdmission()).toThrow('shutting down')
+  })
+
   it('disposes partial construction and cleanup is same-promise, parallel, and closes admission', async () => {
     const sm = new SessionManager()
     const partial = makeManaged(sm, 'partial')
