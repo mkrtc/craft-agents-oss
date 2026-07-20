@@ -6,6 +6,7 @@ import {
   ChevronDown,
   ChevronRight,
   Image as ImageIcon,
+  ArrowRightLeft,
 } from 'lucide-react'
 import { Spinner } from '@craft-agent/ui'
 import {
@@ -43,12 +44,14 @@ import {
   stripPiPrefixForDisplay,
 } from './model-picker-helpers'
 import { useModelVisionToggle } from './useModelVisionToggle'
+import { buildContinueWithTargets } from './continue-with-utils'
 
 interface CompactModelSelectorProps {
   currentModel: string
   currentConnection?: string
   onModelChange: (model: string, connection?: string) => void
   onConnectionChange?: (connectionSlug: string) => void
+  onRequestContinue?: () => void
   thinkingLevel?: ThinkingLevel
   onThinkingLevelChange?: (level: ThinkingLevel) => void
   isEmptySession?: boolean
@@ -65,6 +68,7 @@ export function CompactModelSelector({
   currentConnection,
   onModelChange,
   onConnectionChange,
+  onRequestContinue,
   thinkingLevel = 'medium',
   onThinkingLevelChange,
   isEmptySession = false,
@@ -85,6 +89,10 @@ export function CompactModelSelector({
     currentConnection,
     workspaceDefaultConnection,
     llmConnections,
+  )
+  const hasContinuationTarget = React.useMemo(
+    () => buildContinueWithTargets(llmConnections, effectiveConnection).length > 0,
+    [llmConnections, effectiveConnection],
   )
 
   const effectiveConnectionDetails = React.useMemo(() => {
@@ -392,6 +400,24 @@ export function CompactModelSelector({
                 </DrawerClose>
               )
             })
+          )}
+
+          {!isEmptySession && hasContinuationTarget && onRequestContinue && (
+            <>
+              <div className="px-3 pt-4 pb-1 text-xs font-medium text-foreground/60 uppercase tracking-wide select-none">
+                {t('chat.continueWith.section')}
+              </div>
+              <DrawerClose asChild>
+                <button
+                  type="button"
+                  onClick={onRequestContinue}
+                  className="flex items-center gap-2 w-full px-3 py-2 rounded-lg text-left transition-colors hover:bg-foreground/5"
+                >
+                  <ArrowRightLeft className="h-4 w-4" />
+                  <span className="text-sm font-medium">{t('chat.continueWith.action')}</span>
+                </button>
+              </DrawerClose>
+            </>
           )}
 
           {/* === Thinking section === */}

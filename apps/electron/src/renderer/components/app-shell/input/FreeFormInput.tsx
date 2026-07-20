@@ -11,6 +11,7 @@ import {
   ChevronUp,
   AlertCircle,
   Image as ImageIcon,
+  ArrowRightLeft,
 } from 'lucide-react'
 import { Icon_Home, Spinner } from '@craft-agent/ui'
 
@@ -69,6 +70,7 @@ import { CompactWorkingDirectorySelector } from '@/components/ui/CompactWorkingD
 import { ConnectionIcon } from '@/components/icons/ConnectionIcon'
 import { FreeFormInputContextBadge } from './FreeFormInputContextBadge'
 import { derivePickerMode } from './picker-mode'
+import { buildContinueWithTargets } from './continue-with-utils'
 import type { FileAttachment, LoadedSource, LoadedSkill } from '../../../../shared/types'
 import type { PermissionMode } from '@craft-agent/shared/agent/modes'
 import { type ThinkingLevel, THINKING_LEVELS, getThinkingLevelNameKey } from '@craft-agent/shared/agent/thinking-levels'
@@ -236,6 +238,8 @@ export interface FreeFormInputProps {
   currentConnection?: string
   /** Callback when connection changes (only works when session is empty) */
   onConnectionChange?: (connectionSlug: string) => void
+  /** Create a new chat on another connection while preserving summarized context. */
+  onRequestContinue?: () => void
   /** When true, the session's locked connection has been removed */
   connectionUnavailable?: boolean
   /**
@@ -302,6 +306,7 @@ export function FreeFormInput({
   enableCompactModelPicker = false,
   currentConnection,
   onConnectionChange,
+  onRequestContinue,
   connectionUnavailable = false,
   isCollapsedInCompact = false,
   onRequestExpand,
@@ -407,6 +412,10 @@ export function FreeFormInput({
 
   // Effective connection: canonical fallback chain (session → workspace default → global default → first)
   const effectiveConnection = resolveEffectiveConnectionSlug(currentConnection, workspaceDefaultConnection, llmConnections)
+  const hasContinuationTarget = React.useMemo(
+    () => buildContinueWithTargets(llmConnections, effectiveConnection).length > 0,
+    [llmConnections, effectiveConnection],
+  )
 
   // Effective connection details (with fallbacks) for model list
   // Unlike currentConnectionDetails which is null when no explicit connection is set,
@@ -1758,6 +1767,7 @@ export function FreeFormInput({
               currentConnection={currentConnection}
               onModelChange={onModelChange}
               onConnectionChange={onConnectionChange}
+              onRequestContinue={onRequestContinue}
               thinkingLevel={thinkingLevel}
               onThinkingLevelChange={onThinkingLevelChange}
               isEmptySession={isEmptySession}
@@ -2281,6 +2291,22 @@ export function FreeFormInput({
                       </StyledDropdownMenuItem>
                     )
                   })}
+                </>
+              )}
+
+              {!isEmptySession && hasContinuationTarget && onRequestContinue && (
+                <>
+                  <StyledDropdownMenuSeparator className="my-1" />
+                  <StyledDropdownMenuItem
+                    onSelect={() => {
+                      setModelDropdownOpen(false)
+                      onRequestContinue()
+                    }}
+                    className="flex items-center gap-2 px-2 py-2 rounded-lg cursor-pointer"
+                  >
+                    <ArrowRightLeft className="h-3.5 w-3.5" />
+                    <span className="font-medium text-sm">{t('chat.continueWith.action')}</span>
+                  </StyledDropdownMenuItem>
                 </>
               )}
 

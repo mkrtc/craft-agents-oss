@@ -150,6 +150,8 @@ interface ChatDisplayProps {
   // Connection selection (locked after first message)
   /** Callback when LLM connection changes (only works when session is empty) */
   onConnectionChange?: (connectionSlug: string) => void
+  /** Request a new session on another provider with summarized context. */
+  onRequestContinue?: () => void
   /** Ref for the input, used for external focus control */
   textareaRef?: React.RefObject<RichTextInputHandle>
   /** When true, disables input (e.g., when agent needs activation) */
@@ -453,6 +455,7 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
   currentModel,
   onModelChange,
   onConnectionChange,
+  onRequestContinue,
   textareaRef: externalTextareaRef,
   disabled = false,
   pendingPermission,
@@ -2181,6 +2184,7 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
               isEmptySession: session.messages.length === 0,
               currentConnection: session.llmConnection,
               onConnectionChange,
+              onRequestContinue,
               contextStatus: {
                 isCompacting: session.currentStatus?.statusType === 'compacting',
                 inputTokens: session.tokenUsage?.inputTokens,
