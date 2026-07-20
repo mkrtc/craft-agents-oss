@@ -21,6 +21,8 @@ concurrency:
 env:
   RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
   BUN_VERSION: '1.3.10'
+  DRAFT_VISIBILITY_MAX_ATTEMPTS: '12'
+  DRAFT_VISIBILITY_DELAY_SECONDS: '5'
 
 jobs:
   prepare-release:
@@ -158,7 +160,30 @@ jobs:
               --target "$RELEASE_SHA" \
               --title "Craft Agents $RELEASE_TAG" \
               --notes-file "$marked_notes"
-            match_count="$(find_release)"
+
+            if [[ ! "$DRAFT_VISIBILITY_MAX_ATTEMPTS" =~ ^[1-9][0-9]*$ ]] ||
+               [[ ! "$DRAFT_VISIBILITY_DELAY_SECONDS" =~ ^[1-9][0-9]*$ ]]; then
+              echo "::error::Draft visibility polling bounds must be positive integers"
+              exit 1
+            fi
+
+            for (( lookup_attempt = 1; lookup_attempt <= DRAFT_VISIBILITY_MAX_ATTEMPTS; lookup_attempt++ )); do
+              match_count="$(find_release)"
+              if [[ "$match_count" == "1" && -f "$release_json" ]]; then
+                echo "Draft became visible on lookup attempt $lookup_attempt/$DRAFT_VISIBILITY_MAX_ATTEMPTS"
+                break
+              fi
+              if [[ "$match_count" != "0" ]]; then
+                echo "::error::Unexpected exact-tag release count while polling: $match_count"
+                exit 1
+              fi
+              if (( lookup_attempt == DRAFT_VISIBILITY_MAX_ATTEMPTS )); then
+                echo "::error::Timed out waiting for draft visibility after $DRAFT_VISIBILITY_MAX_ATTEMPTS attempts"
+                exit 1
+              fi
+              echo "Draft not visible yet (attempt $lookup_attempt/$DRAFT_VISIBILITY_MAX_ATTEMPTS); retrying in ${DRAFT_VISIBILITY_DELAY_SECONDS}s"
+              sleep "$DRAFT_VISIBILITY_DELAY_SECONDS"
+            done
           else
             if [[ "$EVENT_NAME" != "push" ]]; then
               echo "::error::Only a re-run of the same pinned tag-push workflow may recover a draft"
