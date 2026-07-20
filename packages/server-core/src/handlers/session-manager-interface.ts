@@ -47,6 +47,13 @@ export interface WorkspaceRemovalHooks {
   classifyFailure?: (error: unknown) => Extract<WorkspaceRemovalCode, 'teardown-failed' | 'required-watch-budget'>
 }
 
+export interface ShutdownCancellationResult {
+  targeted: number
+  cancelled: number
+  forced: number
+  failures: Array<{ sessionId: string; error: string }>
+}
+
 export interface ISessionManager {
   // ---------------------------------------------------------------------------
   // Lifecycle
@@ -57,6 +64,10 @@ export interface ISessionManager {
   cleanup(options?: { deadline?: number; skipFlush?: boolean }): Promise<void>
   setEventSink(sink: EventSink): void
   flushAllSessions(): Promise<void>
+  /** Synchronously closes runtime admission for terminal app shutdown. */
+  beginTerminalShutdown(): void
+  /** Cancels every active turn through normal UserStop semantics and awaits exact runtime retirement. */
+  cancelAllProcessingForShutdown(options?: { deadline?: number; graceMs?: number }): Promise<ShutdownCancellationResult>
 
   // ---------------------------------------------------------------------------
   // Session CRUD

@@ -119,6 +119,7 @@ import { getPiModelsForAuthProvider, getAllPiModels } from '@craft-agent/shared/
 import { initNotificationService, initBadgeIcon, initInstanceBadge, updateBadgeCount } from './notifications'
 import { checkForUpdatesOnLaunch, setAutoUpdateEventSink, isUpdating, setBeforeUpdateQuitHook } from './auto-update'
 import { createQuitLifecycle } from './quit-lifecycle'
+import { runPreUpdateCleanup } from './pre-update-cleanup'
 import type { EventSink } from '@craft-agent/server-core/transport'
 import { validateGitBashPath, checkVCRedistInstalled } from '@craft-agent/server-core/services'
 
@@ -1324,17 +1325,32 @@ async function runQuitCleanup(
 }
 
 async function runPreUpdateQuitCleanup(): Promise<void> {
-  // Snapshot first while BrowserWindows still exist. This is the critical state
-  // save that must not be overwritten by an empty before-quit snapshot later.
-  captureAndSaveWindowState('pre-update')
+  const cancellation = await runPreUpdateCleanup({
+    // Snapshot first while BrowserWindows still exist. This save must not be
+    // overwritten by electron-updater's later empty before-quit snapshot.
+    captureWindowState: () => { captureAndSaveWindowState('pre-update') },
+    // Recoverable phase: failure aborts install before admission is closed.
+    flushRecoverableState: () => flushPendingSessions('pre-update', true),
+    // Terminal phase begins only after preflight succeeds.
+    enterTerminalShutdown: () => {
+      windowManager?.setAppQuitting(true)
+      sessionManager?.beginTerminalShutdown()
+    },
+    cancelActiveTurns: async () => sessionManager?.cancelAllProcessingForShutdown({
+      // Start the terminal budget after recoverable preflight completes; a slow
+      // flush must not consume cancellation time before admission even closes.
+      deadline: Date.now() + resolveRuntimeLifecycleConfig().shutdownTimeoutMs,
+    }),
+    cleanupRuntimes: () => runQuitCleanup('pre-update', { skipSessionFlush: true }),
+    log: autoUpdateLog,
+  })
 
-  // Preflight flush is separate from terminal shutdown. On failure the updater
-  // aborts while runtime admission/window behavior remain fully open.
-  await flushPendingSessions('pre-update', true)
-
-  // Only a successful preflight may enter the terminal closing state.
-  windowManager?.setAppQuitting(true)
-  await runQuitCleanup('pre-update', { skipSessionFlush: true })
+  autoUpdateLog.info('pre-update active-turn cancellation', cancellation ?? {
+    targeted: 0,
+    cancelled: 0,
+    forced: 0,
+    failures: [],
+  })
 }
 
 const quitLifecycle = createQuitLifecycle({
