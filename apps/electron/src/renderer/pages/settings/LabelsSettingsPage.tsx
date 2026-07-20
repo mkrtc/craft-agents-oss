@@ -17,8 +17,10 @@ import { PanelHeader } from '@/components/app-shell/PanelHeader'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { HeaderMenu } from '@/components/ui/HeaderMenu'
 import { EditPopover, EditButton, getEditConfig } from '@/components/ui/EditPopover'
+import { CreateLabelDialog } from '@/components/labels/CreateLabelDialog'
+import { Button } from '@/components/ui/button'
 import { getDocUrl } from '@craft-agent/shared/docs/doc-links'
-import { Loader2 } from 'lucide-react'
+import { Loader2, Plus } from 'lucide-react'
 import { useAppShellContext, useActiveWorkspace } from '@/context/AppShellContext'
 import { useLabels } from '@/hooks/useLabels'
 import {
@@ -42,6 +44,7 @@ export default function LabelsSettingsPage() {
   const { activeWorkspaceId } = useAppShellContext()
   const activeWorkspace = useActiveWorkspace()
   const { labels, isLoading } = useLabels(activeWorkspaceId)
+  const [createLabelOpen, setCreateLabelOpen] = React.useState(false)
 
   // Resolve edit configs using the workspace root path
   const rootPath = activeWorkspace?.rootPath || ''
@@ -98,15 +101,21 @@ export default function LabelsSettingsPage() {
                     title={t("settings.labels.labelHierarchy")}
                     description={t("settings.labels.labelHierarchyDesc")}
                     action={
-                      <EditPopover
-                        trigger={<EditButton />}
-                        context={labelsEditConfig.context}
-                        example={labelsEditConfig.example}
-                        displayLabel={labelsEditConfig.displayLabel}
-                        model={labelsEditConfig.model}
-                        systemPromptPreset={labelsEditConfig.systemPromptPreset}
-                        secondaryAction={editFileAction}
-                      />
+                      <div className="flex items-center gap-2">
+                        <Button size="sm" variant="outline" onClick={() => setCreateLabelOpen(true)}>
+                          <Plus className="mr-1.5 h-3.5 w-3.5" />
+                          {t('labels.createDialog.create')}
+                        </Button>
+                        <EditPopover
+                          trigger={<EditButton />}
+                          context={labelsEditConfig.context}
+                          example={labelsEditConfig.example}
+                          displayLabel={labelsEditConfig.displayLabel}
+                          model={labelsEditConfig.model}
+                          systemPromptPreset={labelsEditConfig.systemPromptPreset}
+                          secondaryAction={editFileAction}
+                        />
+                      </div>
                     }
                   >
                     <SettingsCard className="p-0">
@@ -161,6 +170,12 @@ export default function LabelsSettingsPage() {
           </div>
         </ScrollArea>
       </div>
+      <CreateLabelDialog
+        open={createLabelOpen}
+        workspaceId={activeWorkspaceId ?? undefined}
+        labels={labels}
+        onOpenChange={setCreateLabelOpen}
+      />
     </div>
   )
 }

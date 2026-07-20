@@ -5,6 +5,7 @@ import { turnCardComponents, fullscreenOverlayComponents } from './turn-card'
 import { turnCardModesComponents } from './turn-card-modes'
 import { messagesComponents } from './messages'
 import { inputComponents } from './input'
+import { labelBadgeComponents } from './label-badges'
 import { slashCommandComponents } from './slash-command'
 import { markdownComponents } from './markdown'
 import { iconComponents } from './icons'
@@ -40,6 +41,7 @@ export const componentRegistry: ComponentEntry[] = [
   ...fullscreenOverlayComponents,
   ...messagesComponents,
   ...inputComponents,
+  ...labelBadgeComponents,
   ...toastsComponents,
   ...slashCommandComponents,
   ...markdownComponents,

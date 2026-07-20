@@ -4,6 +4,8 @@ This file accumulates release notes for the next unreleased version. PRs that ad
 
 ## Features
 
+- Added deterministic manual label creation across the sidebar, composer, and Labels settings, including nested parent selection, colors, and typed values without requiring an AI model.
+
 ## Improvements
 
 ## Bug Fixes

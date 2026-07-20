@@ -61,7 +61,7 @@ import {
   modelSupportsImages,
 } from '@config/llm-connections'
 import { useOptionalAppShellContext } from '@/context/AppShellContext'
-import { EditPopover, getEditConfig } from '@/components/ui/EditPopover'
+import { CreateLabelDialog } from '@/components/labels/CreateLabelDialog'
 import { SourceAvatar } from '@/components/ui/source-avatar'
 import { SourceSelectorPopover } from '@/components/ui/SourceSelectorPopover'
 import { CompactSourceSelector } from '@/components/ui/CompactSourceSelector'
@@ -420,12 +420,6 @@ export function FreeFormInput({
   // Access sessionStatuses and onSessionStatusChange from context for the # menu state picker
   const sessionStatuses = appShellCtx?.sessionStatuses ?? []
   const onSessionStatusChange = appShellCtx?.onSessionStatusChange
-  // Resolve workspace rootPath for "Add New Label" deep link
-  const workspaceRootPath = React.useMemo(() => {
-    if (!appShellCtx || !workspaceId) return null
-    return appShellCtx.workspaces.find(w => w.id === workspaceId)?.rootPath ?? null
-  }, [appShellCtx, workspaceId])
-
   // Workspace slug for SDK skill qualification (server-computed)
   // SDK expects "workspaceSlug:skillSlug" format, NOT UUID
   const workspaceSlug = React.useMemo(() => {
@@ -1005,32 +999,19 @@ export function FreeFormInput({
     activeStateId: currentSessionStatus,
   })
 
-  // "Add New Label" handler: cleans up the #trigger text and opens a controlled
-  // EditPopover so the user can describe the label before the agent creates it.
-  const [addLabelPopoverOpen, setAddLabelPopoverOpen] = React.useState(false)
+  // Deterministic no-match creation from the # menu. The typed filter becomes
+  // the label name, and the returned label is immediately applied.
+  const [addLabelDialogOpen, setAddLabelDialogOpen] = React.useState(false)
   const [addLabelPrefill, setAddLabelPrefill] = React.useState('')
   const handleAddLabel = React.useCallback((prefill: string) => {
-    if (!workspaceRootPath) return
-
-    // Remove the #trigger text from input
+    if (!workspaceId) return
     const cleaned = inlineLabel.handleSelect('')
     setInput(cleaned)
     syncToParent(cleaned)
     inlineLabel.close()
-
-    // Store the prefill text (e.g., "Test" from "#Test") to pre-fill the popover
-    // Format: "Add new label {prefill}" so user can just press enter or modify
-    setAddLabelPrefill(prefill ? t('labels.addNewLabel', { prefill }) : '')
-
-    // Open the EditPopover for label creation
-    setAddLabelPopoverOpen(true)
-  }, [workspaceRootPath, inlineLabel, syncToParent, t])
-
-  // Memoize the add-label config so the EditPopover doesn't recreate on every render
-  const addLabelEditConfig = React.useMemo(() => {
-    if (!workspaceRootPath) return null
-    return getEditConfig('add-label', workspaceRootPath)
-  }, [workspaceRootPath])
+    setAddLabelPrefill(prefill)
+    setAddLabelDialogOpen(true)
+  }, [workspaceId, inlineLabel, syncToParent])
 
   // Report height changes to parent (for external animation sync)
   React.useLayoutEffect(() => {
@@ -1599,29 +1580,14 @@ export function FreeFormInput({
           onSelectState={handleInlineStateSelect}
         />
 
-        {/* Controlled EditPopover for "Add New Label" — opens when user selects
-            the option from the # menu with no matches.
-            Spread the full config so optional fields like `inlineExecution`,
-            `displayLabel`, and `displayLabelKey` reach the popover. The previous
-            cherry-pick dropped `inlineExecution: true`, which made the popover
-            fall back to the same-window deep-link path; that worked inside
-            Electron but launched the desktop app from the WebUI via `craftagents://`.
-            Match the AppShell pattern (which already uses spread). */}
-        {addLabelEditConfig && (
-          <EditPopover
-            trigger={<span className="absolute top-0 left-0 w-0 h-0 overflow-hidden" />}
-            open={addLabelPopoverOpen}
-            onOpenChange={setAddLabelPopoverOpen}
-            {...addLabelEditConfig}
-            defaultValue={addLabelPrefill}
-            secondaryAction={workspaceRootPath ? {
-              label: 'Edit File',
-              filePath: `${workspaceRootPath}/labels/config.json`,
-            } : undefined}
-            side="top"
-            align="start"
-          />
-        )}
+        <CreateLabelDialog
+          open={addLabelDialogOpen}
+          workspaceId={workspaceId}
+          labels={labels}
+          initialName={addLabelPrefill}
+          onOpenChange={setAddLabelDialogOpen}
+          onCreated={(created) => onLabelAdd?.(created.id)}
+        />
 
         {/* Pre-flight image-support warning — only for pi_compat connections
             where the renderer can both detect text-only models and offer to
