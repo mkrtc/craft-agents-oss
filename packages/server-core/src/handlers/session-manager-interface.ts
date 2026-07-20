@@ -15,6 +15,8 @@ import type {
   Session,
   SessionStatus,
   CreateSessionOptions,
+  ContinueSessionInput,
+  ContinueSessionResult,
   FileAttachment,
   SendMessageOptions,
   PermissionResponseOptions,
@@ -70,6 +72,11 @@ export interface ISessionManager {
     options?: CreateSessionOptions,
     internal?: { emitCreatedEvent?: boolean },
   ): Promise<Session>
+  continueSession(
+    sessionId: string,
+    workspaceId: string,
+    input: ContinueSessionInput,
+  ): Promise<ContinueSessionResult>
   /** Resolved working directory of a live session (Tasks Conductor uses it so children inherit
    *  the orchestrator's cwd). */
   getSessionWorkingDirectory(sessionId: string): string | undefined

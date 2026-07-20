@@ -27,6 +27,7 @@ import { mobileWebUIComponents } from './mobile-webui'
 import { kanbanComponents } from './kanban'
 import { taskEditorComponents } from './task-editor'
 import { chatStreamPerfComponents } from './chat-stream-perf'
+import { continueWithProviderComponents } from './continue-with-provider'
 
 export * from './types'
 
@@ -40,6 +41,7 @@ export const componentRegistry: ComponentEntry[] = [
   ...fullscreenOverlayComponents,
   ...messagesComponents,
   ...inputComponents,
+  ...continueWithProviderComponents,
   ...toastsComponents,
   ...slashCommandComponents,
   ...markdownComponents,

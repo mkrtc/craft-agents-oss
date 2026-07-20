@@ -47,6 +47,7 @@ import {
   formatSessionMemorySelectionDeniedReason,
   resolveSessionManagedMemorySelectionFromRepository,
 } from './session-memory-runtime'
+import { runContinuationTransaction } from './session-continuation'
 import {
   // Session persistence functions
   listSessions as listStoredSessions,
@@ -92,7 +93,7 @@ import { isParentTaskTool } from '@craft-agent/shared/utils/toolNames'
 import { restoreFiles } from '@craft-agent/shared/utils/bundle-files'
 import { getCredentialManager } from '@craft-agent/shared/credentials'
 import { CraftMcpClient, McpClientPool, McpPoolServer } from '@craft-agent/shared/mcp'
-import { type Session, type SessionEvent, type FileAttachment, type SendMessageOptions, type UnreadSummary, type RemoteSessionTransferPayload, type ImportRemoteSessionTransferResult, type WorkspaceRemovalResult, type WorkspaceRemovalCode, RPC_CHANNELS, generateMessageId } from '@craft-agent/shared/protocol'
+import { type Session, type SessionEvent, type FileAttachment, type SendMessageOptions, type UnreadSummary, type ContinueSessionInput, type ContinueSessionResult, type RemoteSessionTransferPayload, type ImportRemoteSessionTransferResult, type WorkspaceRemovalResult, type WorkspaceRemovalCode, RPC_CHANNELS, generateMessageId } from '@craft-agent/shared/protocol'
 import { messageToStored, storedToMessage, type Message, type StoredAttachment, type ToolDisplayMeta, type TokenUsage } from '@craft-agent/core/types'
 import { formatPathsToRelative, formatToolInputPaths, perf, encodeIconToDataUrlAsync, getEmojiIcon, resetSummarizationClient, resolveToolIcon, readFileAttachment, selectSpreadMessages, normalizePath } from '@craft-agent/shared/utils'
 import { loadAllSkills, loadSkillBySlug, invalidateSkillsCache, listSkillSummaries, resolveSkillFilePathBySlug, type LoadedSkill, type SkillSummary } from '@craft-agent/shared/skills'
@@ -3847,6 +3848,14 @@ export class SessionManager implements ISessionManager {
       // The workspace-default fallback stays dynamic — freezing it into the header would
       // pin every ordinary session to the defaults as of its creation time.
       enabledSourceSlugs: options?.enabledSourceSlugs,
+      // Persist only explicit routing overrides. Ordinary sessions must retain
+      // dynamic workspace/global fallbacks rather than freezing creation-time defaults.
+      model: options?.model ? targetBackendContext.resolvedModel : undefined,
+      thinkingLevel: options?.thinkingLevel ? defaultThinkingLevel : undefined,
+      llmConnection: options?.llmConnection,
+      enabledMemorySpaceRefs: options?.enabledMemorySpaceRefs,
+      memoryWriteTargetRef: options?.memoryWriteTargetRef,
+      memorySelectionMode: options?.memorySelectionMode,
       transferredSessionSummary: internal?.initialTransferredSessionSummary,
       transferredSessionSummaryApplied: internal?.initialTransferredSessionSummary ? false : undefined,
     })
@@ -10417,7 +10426,10 @@ export class SessionManager implements ISessionManager {
   // Export / Import / Dispatch
   // ============================================
 
-  private async generateRemoteTransferSummary(managed: ManagedSession): Promise<string | null> {
+  private async generateRemoteTransferSummary(
+    managed: ManagedSession,
+    routing?: { connectionSlug: string; model: string },
+  ): Promise<string | null> {
     if (this.closing || managed.deleting) return null
     await this.ensureMessagesLoaded(managed)
 
@@ -10435,9 +10447,9 @@ export class SessionManager implements ISessionManager {
     const wsConfig = loadWorkspaceConfig(workspaceRootPath)
     const defaultModel = wsConfig?.defaults?.model
     const backendContext = resolveBackendContext({
-      sessionConnectionSlug: managed.llmConnection,
-      workspaceDefaultConnectionSlug: wsConfig?.defaults?.defaultLlmConnection,
-      managedModel: managed.model || defaultModel,
+      sessionConnectionSlug: routing?.connectionSlug ?? managed.llmConnection,
+      workspaceDefaultConnectionSlug: routing ? undefined : wsConfig?.defaults?.defaultLlmConnection,
+      managedModel: routing?.model ?? managed.model ?? defaultModel,
     })
 
     const miniModel = backendContext.connection
@@ -10455,14 +10467,14 @@ export class SessionManager implements ISessionManager {
       coreConfig: {
         workspace: managed.workspace,
         session: {
-          id: `${managed.id}-remote-transfer-summary`,
+          id: `${managed.id}-${routing ? 'continuation' : 'remote-transfer'}-summary`,
           workspaceRootPath,
           createdAt: Date.now(),
           lastUsedAt: Date.now(),
           workingDirectory: managed.workingDirectory,
           sdkCwd: managed.sdkCwd,
-          model: managed.model,
-          llmConnection: managed.llmConnection,
+          model: routing?.model ?? managed.model,
+          llmConnection: routing?.connectionSlug ?? managed.llmConnection,
           permissionMode: managed.permissionMode,
           previousPermissionMode: managed.previousPermissionMode,
         },
@@ -10478,6 +10490,88 @@ export class SessionManager implements ISessionManager {
     } finally {
       await disposeBackendRuntime(agent, { reason: 'manual' })
     }
+  }
+
+  async continueSession(
+    sessionId: string,
+    workspaceId: string,
+    input: ContinueSessionInput,
+  ): Promise<ContinueSessionResult> {
+    const managed = this.sessions.get(sessionId)
+    if (!managed) throw new Error(`Session ${sessionId} not found`)
+    if (managed.workspace.id !== workspaceId) throw new Error('Session does not belong to this workspace')
+
+    const connectionSlug = input?.connectionSlug?.trim()
+    if (!connectionSlug) throw new Error('A destination connection is required')
+    const targetConnection = getLlmConnection(connectionSlug)
+    if (!targetConnection) throw new Error(`LLM connection "${connectionSlug}" was not found`)
+
+    const workspaceConfig = loadWorkspaceConfig(managed.workspace.rootPath)
+    const sourceContext = resolveBackendContext({
+      sessionConnectionSlug: managed.llmConnection,
+      workspaceDefaultConnectionSlug: workspaceConfig?.defaults?.defaultLlmConnection,
+      managedModel: managed.model ?? workspaceConfig?.defaults?.model,
+    })
+    const sourceProcessingGeneration = managed.processingGeneration
+
+    const destination = await runContinuationTransaction(
+      {
+        id: managed.id,
+        name: managed.name,
+        isProcessing: managed.isProcessing,
+        queuedMessageCount: managed.messageQueue.length,
+        currentConnectionSlug: managed.llmConnection
+          ? getLlmConnection(managed.llmConnection)?.slug
+          : sourceContext.connection?.slug,
+        permissionMode: managed.permissionMode,
+        thinkingLevel: managed.thinkingLevel,
+        workingDirectory: managed.workingDirectory,
+        labels: managed.labels,
+        enabledSourceSlugs: managed.enabledSourceSlugs,
+        enabledMemorySpaceRefs: managed.enabledMemorySpaceRefs,
+        memoryWriteTargetRef: managed.memoryWriteTargetRef,
+        memorySelectionMode: managed.memorySelectionMode,
+        projectId: managed.projectId,
+      },
+      {
+        slug: targetConnection.slug,
+        name: targetConnection.name,
+        configuredModelIds: (targetConnection.models ?? [])
+          .map(candidate => typeof candidate === 'string' ? candidate : candidate.id),
+        defaultModel: targetConnection.defaultModel,
+      },
+      input,
+      {
+        summarize: () => this.generateRemoteTransferSummary(managed, {
+          connectionSlug,
+          model: input.model.trim(),
+        }),
+        assertSourceUnchanged: () => {
+          if (
+            managed.isProcessing ||
+            managed.messageQueue.length > 0 ||
+            managed.processingGeneration !== sourceProcessingGeneration
+          ) {
+            throw new Error('The source conversation changed while preparing the handoff. Try again when it is idle.')
+          }
+        },
+        create: (options, summary) => this.createSession(
+          workspaceId,
+          options,
+          { emitCreatedEvent: false, initialTransferredSessionSummary: summary },
+        ),
+      },
+    )
+
+    sessionLog.info('Created cross-provider continuation', {
+      sourceSessionId: managed.id,
+      destinationSessionId: destination.id,
+      sourceConnection: sourceContext.connection?.slug,
+      destinationConnection: connectionSlug,
+      destinationModel: input.model,
+    })
+
+    return { session: destination }
   }
 
   async exportRemoteSessionTransfer(sessionId: string, workspaceId: string): Promise<RemoteSessionTransferPayload | null> {

@@ -1,6 +1,6 @@
 import { readFile, writeFile } from 'fs/promises'
 import { join } from 'path'
-import { RPC_CHANNELS, type FileAttachment, type SendMessageOptions, type SessionEvent } from '@craft-agent/shared/protocol'
+import { RPC_CHANNELS, type ContinueSessionInput, type FileAttachment, type SendMessageOptions, type SessionEvent } from '@craft-agent/shared/protocol'
 import type { StoredAttachment } from '@craft-agent/core/types'
 import { getWorkspaceByNameOrId } from '@craft-agent/shared/config'
 import { perf } from '@craft-agent/shared/utils'
@@ -70,6 +70,7 @@ export const HANDLED_CHANNELS = [
   RPC_CHANNELS.sessions.GET_UNREAD_SUMMARY,
   RPC_CHANNELS.sessions.MARK_ALL_READ,
   RPC_CHANNELS.sessions.CREATE,
+  RPC_CHANNELS.sessions.CONTINUE_WITH_CONNECTION,
   RPC_CHANNELS.sessions.DELETE,
   RPC_CHANNELS.sessions.GET_MESSAGES,
   RPC_CHANNELS.sessions.SEND_MESSAGE,
@@ -157,6 +158,15 @@ export function registerSessionsHandlers(server: RpcServer, deps: HandlerDeps): 
     end()
     return session
   })
+
+  server.handle(
+    RPC_CHANNELS.sessions.CONTINUE_WITH_CONNECTION,
+    async (ctx, sessionId: string, input: ContinueSessionInput) => {
+      const workspaceId = ctx.workspaceId ?? deps.windowManager?.getWorkspaceForWindow(ctx.webContentsId!)
+      if (!workspaceId) throw new Error('No workspace context')
+      return sessionManager.continueSession(sessionId, workspaceId, input)
+    },
+  )
 
   // Delete a session
   server.handle(RPC_CHANNELS.sessions.DELETE, async (_ctx, sessionId: string) => {

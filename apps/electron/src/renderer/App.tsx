@@ -1169,6 +1169,16 @@ export default function App() {
     return session
   }, [addSession, syncSessionOptionsFromSession])
 
+  const handleContinueSession = useCallback(async (
+    sessionId: string,
+    input: import('../shared/types').ContinueSessionInput,
+  ): Promise<Session> => {
+    const result = await window.electronAPI.continueSession(sessionId, input)
+    addSession(result.session)
+    syncSessionOptionsFromSession(result.session)
+    return result.session
+  }, [addSession, syncSessionOptionsFromSession])
+
   // Deep link navigation is initialized later after handleInputChange is defined
 
   const handleDeleteSession = useCallback(async (sessionId: string, skipConfirmation = false): Promise<boolean> => {
@@ -1868,6 +1878,7 @@ export default function App() {
     sessionOptions,
     // Session callbacks
     onCreateSession: handleCreateSession,
+    onContinueSession: handleContinueSession,
     onSendMessage: handleSendMessage,
     onRenameSession: handleRenameSession,
     onFlagSession: handleFlagSession,
@@ -1915,6 +1926,7 @@ export default function App() {
     hydrateDraftAttachments,
     sessionOptions,
     handleCreateSession,
+    handleContinueSession,
     handleSendMessage,
     handleRenameSession,
     handleFlagSession,

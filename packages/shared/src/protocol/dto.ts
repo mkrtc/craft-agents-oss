@@ -172,6 +172,12 @@ export interface CreateSessionOptions {
   isPinned?: boolean
   pinnedAt?: number
   enabledSourceSlugs?: string[]
+  /** Memory spaces explicitly selected for this session. */
+  enabledMemorySpaceRefs?: MemorySpaceRef[]
+  /** Memory space that receives new memories from this session. */
+  memoryWriteTargetRef?: MemorySpaceRef
+  /** How the memory-space selection was chosen. */
+  memorySelectionMode?: MemorySelectionMode
   /**
    * Message ID to branch from. This is a hard context cutoff:
    * the new session must not include model context from later parent messages.
@@ -197,6 +203,15 @@ export interface CreateSessionOptions {
    * number (labeling a plain-chat parent in the same pass). Task flows opt in; plain chats don't.
    */
   applyTaskLabel?: boolean
+}
+
+export interface ContinueSessionInput {
+  connectionSlug: string
+  model: string
+}
+
+export interface ContinueSessionResult {
+  session: Session
 }
 
 export interface RemoteSessionTransferPayload {

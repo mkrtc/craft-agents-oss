@@ -4,6 +4,8 @@ This file accumulates release notes for the next unreleased version. PRs that ad
 
 ## Features
 
+- **Continue with another provider** — Started chats can now hand off summarized context to a new chat on another authenticated connection or model while preserving the original conversation and workspace context.
+
 ## Improvements
 
 ## Bug Fixes

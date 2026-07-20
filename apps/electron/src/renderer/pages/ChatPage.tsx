@@ -10,6 +10,7 @@ import { useTranslation } from 'react-i18next'
 import { useAtomValue, useSetAtom } from 'jotai'
 import { AlertCircle, Globe, Copy, RefreshCw, Link2Off, Info, Pencil } from 'lucide-react'
 import { ChatDisplay, type ChatDisplayHandle } from '@/components/app-shell/ChatDisplay'
+import { ContinueWithDialog } from '@/components/app-shell/input/ContinueWithDialog'
 import { PanelHeader } from '@/components/app-shell/PanelHeader'
 import { SessionMenu } from '@/components/app-shell/SessionMenu'
 import { CompactSessionMenu } from '@/components/app-shell/CompactSessionMenu'
@@ -30,6 +31,7 @@ import { kanbanEditorTargetAtom } from '@/atoms/kanban'
 import { getSessionTitle } from '@/utils/session'
 // Model resolution: connection.defaultModel (no hardcoded defaults)
 import { resolveEffectiveConnectionSlug, isSessionConnectionUnavailable } from '@config/llm-connections'
+import { RPC_CHANNELS } from '@craft-agent/shared/protocol'
 
 export interface ChatPageProps {
   sessionId: string
@@ -46,6 +48,7 @@ const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
     activeWorkspaceId,
     llmConnections,
     workspaceDefaultLlmConnection,
+    onContinueSession,
     onSendMessage,
     onOpenFile,
     onOpenUrl,
@@ -284,6 +287,11 @@ const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
     onAttachmentsChange(sessionId, attachments)
   }, [sessionId, onAttachmentsChange])
 
+  const [continueWithOpen, setContinueWithOpen] = React.useState(false)
+  const continuationChannelAvailable = window.electronAPI.isChannelAvailable(
+    RPC_CHANNELS.sessions.CONTINUE_WITH_CONNECTION,
+  )
+
   // Session model change handler - persists per-session model and connection
   const handleModelChange = React.useCallback((model: string, connection?: string) => {
     if (activeWorkspaceId) {
@@ -307,6 +315,12 @@ const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
     [session?.llmConnection, llmConnections]
   )
 
+  const effectiveConnectionSlug = React.useMemo(() => resolveEffectiveConnectionSlug(
+    session?.llmConnection,
+    workspaceDefaultLlmConnection,
+    llmConnections,
+  ), [session?.llmConnection, workspaceDefaultLlmConnection, llmConnections])
+
   // Effective model for this session (session-specific or global fallback)
   const effectiveModel = React.useMemo(() => {
     if (session?.model) return session.model
@@ -314,13 +328,17 @@ const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
     // When connection is unavailable, don't resolve through a different connection
     if (connectionUnavailable) return session?.model ?? ''
 
-    const connectionSlug = resolveEffectiveConnectionSlug(
-      session?.llmConnection, workspaceDefaultLlmConnection, llmConnections
-    )
-    const connection = connectionSlug ? llmConnections.find(c => c.slug === connectionSlug) : null
+    const connection = effectiveConnectionSlug
+      ? llmConnections.find(candidate => candidate.slug === effectiveConnectionSlug)
+      : null
 
     return connection?.defaultModel ?? ''
-  }, [session?.id, session?.model, session?.llmConnection, workspaceDefaultLlmConnection, llmConnections, connectionUnavailable])
+  }, [session?.model, effectiveConnectionSlug, llmConnections, connectionUnavailable])
+
+  const handleContinueWith = React.useCallback(async (connectionSlug: string, model: string) => {
+    const destination = await onContinueSession(sessionId, { connectionSlug, model })
+    navigate(routes.view.allSessions(destination.id))
+  }, [onContinueSession, sessionId])
 
   // Working directory for this session
   const workingDirectory = session?.workingDirectory
@@ -844,6 +862,7 @@ const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
             currentModel={effectiveModel}
             onModelChange={handleModelChange}
             onConnectionChange={handleConnectionChange}
+            onRequestContinue={continuationChannelAvailable ? () => setContinueWithOpen(true) : undefined}
             pendingPermission={pendingPermission}
             onRespondToPermission={onRespondToPermission}
             pendingCredential={pendingCredential}
@@ -881,6 +900,14 @@ const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
           />
         </div>
       </div>
+      <ContinueWithDialog
+        open={continueWithOpen}
+        connections={llmConnections}
+        currentConnectionSlug={effectiveConnectionSlug}
+        sourceIsProcessing={session.isProcessing}
+        onOpenChange={setContinueWithOpen}
+        onContinue={handleContinueWith}
+      />
       <RenameDialog
         open={renameDialogOpen}
         onOpenChange={setRenameDialogOpen}

@@ -209,7 +209,11 @@ export async function createSession(
     workingDirectory?: string;
     permissionMode?: SessionConfig['permissionMode'];
     enabledSourceSlugs?: string[];
+    enabledMemorySpaceRefs?: SessionConfig['enabledMemorySpaceRefs'];
+    memoryWriteTargetRef?: SessionConfig['memoryWriteTargetRef'];
+    memorySelectionMode?: SessionConfig['memorySelectionMode'];
     model?: string;
+    thinkingLevel?: SessionConfig['thinkingLevel'];
     llmConnection?: string;
     hidden?: boolean;
     sessionStatus?: SessionConfig['sessionStatus'];
@@ -246,7 +250,11 @@ export async function createSession(
     sdkCwd,
     permissionMode: options?.permissionMode,
     enabledSourceSlugs: options?.enabledSourceSlugs,
+    enabledMemorySpaceRefs: options?.enabledMemorySpaceRefs?.map(ref => ({ ...ref })),
+    memoryWriteTargetRef: options?.memoryWriteTargetRef ? { ...options.memoryWriteTargetRef } : undefined,
+    memorySelectionMode: options?.memorySelectionMode,
     model: options?.model,
+    thinkingLevel: options?.thinkingLevel,
     llmConnection: options?.llmConnection,
     hidden: options?.hidden,
     sessionStatus: options?.sessionStatus,
