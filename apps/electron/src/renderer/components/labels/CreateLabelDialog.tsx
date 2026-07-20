@@ -133,7 +133,7 @@ export function CreateLabelDialog({
               <SelectTrigger id="create-label-parent">
                 <SelectValue />
               </SelectTrigger>
-              <SelectContent>
+              <SelectContent layer="modal">
                 <SelectItem value={ROOT_PARENT}>{t('labels.createDialog.noParent')}</SelectItem>
                 {parentOptions.map(option => (
                   <SelectItem key={option.id} value={option.id} disabled={option.disabled}>
@@ -190,7 +190,7 @@ export function CreateLabelDialog({
               <SelectTrigger id="create-label-value-type">
                 <SelectValue />
               </SelectTrigger>
-              <SelectContent>
+              <SelectContent layer="modal">
                 <SelectItem value="boolean">{t('labels.createDialog.valueTypeBoolean')}</SelectItem>
                 <SelectItem value="string">{t('labels.createDialog.valueTypeString')}</SelectItem>
                 <SelectItem value="number">{t('labels.createDialog.valueTypeNumber')}</SelectItem>

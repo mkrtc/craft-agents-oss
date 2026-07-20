@@ -8,4 +8,6 @@ This file accumulates release notes for the next unreleased version. PRs that ad
 
 ## Bug Fixes
 
+- **Modal dropdown visibility** — Label creation and cross-provider continuation menus now render above their dialogs instead of being hidden behind the modal surface.
+
 ## Breaking Changes

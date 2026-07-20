@@ -67,19 +67,31 @@ function SelectScrollDownButton({
   )
 }
 
+type SelectContentLayer = "default" | "modal"
+
+function getSelectContentLayerClass(layer: SelectContentLayer): "z-dropdown" | "z-floating-menu" {
+  return layer === "modal" ? "z-floating-menu" : "z-dropdown"
+}
+
 function SelectContent({
   className,
   children,
   position = "popper",
   container,
+  layer = "default",
   ...props
-}: React.ComponentProps<typeof SelectPrimitive.Content> & { container?: HTMLElement | null }) {
+}: React.ComponentProps<typeof SelectPrimitive.Content> & {
+  container?: HTMLElement | null
+  /** Use the modal layer when this body-ported menu is opened from a dialog. */
+  layer?: SelectContentLayer
+}) {
   return (
     <SelectPrimitive.Portal container={container}>
       <SelectPrimitive.Content
         data-slot="select-content"
         className={cn(
-          "popover-styled relative z-dropdown max-h-96 min-w-[8rem] overflow-hidden data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 data-[side=bottom]:slide-in-from-top-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2",
+          "popover-styled relative max-h-96 min-w-[8rem] overflow-hidden data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 data-[side=bottom]:slide-in-from-top-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2",
+          getSelectContentLayerClass(layer),
           position === "popper" &&
             "data-[side=bottom]:translate-y-1 data-[side=left]:-translate-x-1 data-[side=right]:translate-x-1 data-[side=top]:-translate-y-1",
           className
@@ -163,5 +175,6 @@ export {
   SelectItem,
   SelectSeparator,
   SelectScrollUpButton,
+  getSelectContentLayerClass,
   SelectScrollDownButton,
 }

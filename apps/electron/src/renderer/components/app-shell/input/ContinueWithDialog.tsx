@@ -109,7 +109,7 @@ export function ContinueWithDialog({
               <SelectTrigger id="continue-with-connection">
                 <SelectValue placeholder={t('chat.continueWith.selectConnection')} />
               </SelectTrigger>
-              <SelectContent>
+              <SelectContent layer="modal">
                 {targets.map(target => (
                   <SelectItem key={target.connection.slug} value={target.connection.slug}>
                     <span className="flex items-center gap-2">
@@ -128,7 +128,7 @@ export function ContinueWithDialog({
               <SelectTrigger id="continue-with-model">
                 <SelectValue placeholder={t('chat.continueWith.selectModel')} />
               </SelectTrigger>
-              <SelectContent>
+              <SelectContent layer="modal">
                 {selectedTarget?.models.map(candidate => {
                   const id = getModelId(candidate)
                   return <SelectItem key={id} value={id}>{getModelName(candidate)}</SelectItem>
