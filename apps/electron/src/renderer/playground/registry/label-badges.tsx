@@ -11,8 +11,12 @@
 
 import * as React from 'react'
 import type { ComponentEntry } from './types'
-import type { LabelConfig } from '@craft-agent/shared/labels'
+import type { CreateLabelInput, LabelConfig } from '@craft-agent/shared/labels'
 import { LabelBadgeRow } from '@/components/ui/label-badge-row'
+import { CreateLabelDialog } from '@/components/labels/CreateLabelDialog'
+import { Button } from '@/components/ui/button'
+import { LabelIcon } from '@/components/ui/label-icon'
+import { ModalProvider } from '@/context/ModalContext'
 
 // ============================================================================
 // Mock label configurations matching the workspace format
@@ -97,6 +101,86 @@ function LabelBadgeRowPlayground({ showValues, labelCount }: LabelBadgeRowPlaygr
   )
 }
 
+function insertPlaygroundLabel(labels: LabelConfig[], parentId: string | undefined, created: LabelConfig): LabelConfig[] {
+  if (!parentId) return [...labels, created]
+  return labels.map(label => label.id === parentId
+    ? { ...label, children: [...(label.children ?? []), created] }
+    : { ...label, children: label.children ? insertPlaygroundLabel(label.children, parentId, created) : undefined })
+}
+
+function flattenPlaygroundLabels(labels: LabelConfig[], ancestors: string[] = []): Array<{ label: LabelConfig; path: string }> {
+  return labels.flatMap(label => {
+    const path = [...ancestors, label.name]
+    return [{ label, path: path.join(' → ') }, ...flattenPlaygroundLabels(label.children ?? [], path)]
+  })
+}
+
+function CreateLabelDialogPlaygroundContent() {
+  const [labels, setLabels] = React.useState<LabelConfig[]>([
+    { id: 'workflow', name: 'Workflow', color: 'accent', children: [{ id: 'auditor', name: 'Auditor', color: 'info' }] },
+    { id: 'priority', name: 'Priority', color: 'destructive', valueType: 'number' },
+  ])
+  const [open, setOpen] = React.useState(false)
+  const [parentId, setParentId] = React.useState<string | undefined>()
+
+  const openDialog = (parent?: string) => {
+    setParentId(parent)
+    setOpen(true)
+  }
+
+  const createLabel = async (_workspaceId: string, input: CreateLabelInput): Promise<LabelConfig> => {
+    await new Promise(resolve => setTimeout(resolve, 250))
+    const baseId = input.name.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'label'
+    const existing = new Set(flattenPlaygroundLabels(labels).map(item => item.label.id))
+    let id = baseId
+    let suffix = 2
+    while (existing.has(id)) id = `${baseId}-${suffix++}`
+    const created: LabelConfig = { id, name: input.name, color: input.color, valueType: input.valueType }
+    setLabels(current => insertPlaygroundLabel(current, input.parentId, created))
+    return created
+  }
+
+  return (
+    <div className="w-[520px] rounded-xl border border-border bg-background p-5 shadow-sm">
+      <div className="mb-4 flex items-center justify-between">
+        <div>
+          <h3 className="text-sm font-semibold">Manual label creation</h3>
+          <p className="text-xs text-muted-foreground">No model call; child context preselects its parent.</p>
+        </div>
+        <div className="flex gap-2">
+          <Button size="sm" variant="outline" onClick={() => openDialog()}>Create root</Button>
+          <Button size="sm" onClick={() => openDialog('workflow')}>Add under Workflow</Button>
+        </div>
+      </div>
+      <div className="space-y-1.5 rounded-lg bg-muted/40 p-3">
+        {flattenPlaygroundLabels(labels).map(({ label, path }) => (
+          <div key={label.id} className="flex items-center gap-2 text-sm">
+            <LabelIcon label={label} size="sm" />
+            <span>{path}</span>
+            {label.valueType && <span className="text-xs text-muted-foreground">({label.valueType})</span>}
+          </div>
+        ))}
+      </div>
+      <CreateLabelDialog
+        open={open}
+        workspaceId="playground"
+        labels={labels}
+        defaultParentId={parentId}
+        onOpenChange={setOpen}
+        createLabel={createLabel}
+      />
+    </div>
+  )
+}
+
+function CreateLabelDialogPlayground() {
+  return (
+    <ModalProvider>
+      <CreateLabelDialogPlaygroundContent />
+    </ModalProvider>
+  )
+}
+
 // ============================================================================
 // Registry Entry
 // ============================================================================
@@ -144,5 +228,13 @@ export const labelBadgeComponents: ComponentEntry[] = [
         props: { showValues: false, labelCount: 4 },
       },
     ],
+  },
+  {
+    id: 'manual-label-creation',
+    name: 'Manual Label Creation',
+    category: 'Chat Inputs',
+    description: 'Deterministic label creation with hierarchical parent selection, color, and value type.',
+    component: CreateLabelDialogPlayground,
+    props: [],
   },
 ]

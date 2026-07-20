@@ -83,7 +83,6 @@ export type EditContextKey =
   | 'edit-statuses'
   | 'edit-labels'
   | 'edit-auto-rules'
-  | 'add-label'
   | 'edit-views'
   | 'edit-tool-icons'
   | 'automation-config'
@@ -462,30 +461,6 @@ const EDIT_CONFIGS: Record<EditContextKey, (location: string) => EditConfig> = {
     example: 'Add a rule to detect GitHub issue URLs',
     displayLabelKey: 'editPopover.label.autoApplyRules',
     exampleKey: 'editPopover.example.editAutoRules',
-    model: 'fast',               // Use fast model for quick config edits
-    systemPromptPreset: 'mini',   // Use focused mini prompt
-    inlineExecution: true,        // Execute inline in popover
-  }),
-
-  // Add new label context (triggered from the # menu when no labels match)
-  'add-label': (location) => ({
-    context: {
-      label: 'Add Label',
-      filePath: `${location}/labels/config.json`,
-      context:
-        'The user wants to create a new label from the # inline menu. ' +
-        'Labels are stored in labels/config.json as a hierarchical tree. ' +
-        'Each label has: id (slug, globally unique), name (display), color (optional EntityColor), children (sub-labels array). ' +
-        'Colors use EntityColor format: string shorthand (e.g. "blue") or { light, dark } object for theme-aware colors. ' +
-        'Labels are color-only (no icons) — rendered as colored circles in the UI. ' +
-        'Read ~/.craft-agent/docs/labels.md for full format reference. ' +
-        'Confirm clearly when done.',
-    },
-    example: 'A red "Bug" label',
-    overridePlaceholder: 'What label would you like to create?',
-    displayLabelKey: 'editPopover.label.addLabel',
-    exampleKey: 'editPopover.example.addLabel',
-    overridePlaceholderKey: 'editPopover.placeholder.addLabel',
     model: 'fast',               // Use fast model for quick config edits
     systemPromptPreset: 'mini',   // Use focused mini prompt
     inlineExecution: true,        // Execute inline in popover
