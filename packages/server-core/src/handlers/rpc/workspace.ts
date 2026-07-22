@@ -30,6 +30,8 @@ export const CORE_HANDLED_CHANNELS = [
   RPC_CHANNELS.theme.BROADCAST_WORKSPACE_THEME,
   RPC_CHANNELS.views.LIST,
   RPC_CHANNELS.views.SAVE,
+  RPC_CHANNELS.sessionGroups.LIST,
+  RPC_CHANNELS.sessionGroups.SAVE,
   RPC_CHANNELS.toolIcons.GET_MAPPINGS,
   RPC_CHANNELS.logo.GET_URL,
 ] as const
@@ -365,6 +367,26 @@ export function registerWorkspaceCoreHandlers(server: RpcServer, deps: HandlerDe
     saveViews(workspace.rootPath, views)
     // Broadcast labels changed since views are used alongside labels in sidebar
     pushTyped(server, RPC_CHANNELS.labels.CHANGED, { to: 'workspace', workspaceId }, workspaceId)
+  })
+
+  // ============================================================
+  // Session Groups
+  // ============================================================
+
+  server.handle(RPC_CHANNELS.sessionGroups.LIST, async (_ctx, workspaceId: string) => {
+    const workspace = getWorkspaceByNameOrId(workspaceId)
+    if (!workspace) throw new Error('Workspace not found')
+
+    const { listSessionGroups } = await import('@craft-agent/shared/session-groups/storage')
+    return listSessionGroups(workspace.rootPath)
+  })
+
+  server.handle(RPC_CHANNELS.sessionGroups.SAVE, async (_ctx, workspaceId: string, groups: import('@craft-agent/shared/session-groups').SessionGroupConfig[]) => {
+    const workspace = getWorkspaceByNameOrId(workspaceId)
+    if (!workspace) throw new Error('Workspace not found')
+
+    const { saveSessionGroups } = await import('@craft-agent/shared/session-groups/storage')
+    saveSessionGroups(workspace.rootPath, groups)
   })
 
   // ============================================================

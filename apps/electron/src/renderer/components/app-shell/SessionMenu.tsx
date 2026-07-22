@@ -34,6 +34,7 @@ import {
   Send,
   FolderKanban,
   Check,
+  Plus,
 } from 'lucide-react'
 import { useMenuComponents } from '@/components/ui/menu-context'
 import { getStateColor, getStateIcon, type SessionStatusId } from '@/config/session-status-config'
@@ -42,6 +43,7 @@ import type { LabelConfig } from '@craft-agent/shared/labels'
 import { LabelMenuItems, StatusMenuItems, ShareMenuItems } from './SessionMenuParts'
 import { getFileManagerName } from '@/lib/platform'
 import type { SessionMeta } from '@/atoms/sessions'
+import type { SessionGroupConfig } from '@craft-agent/shared/session-groups'
 import { getSessionStatus, hasUnreadMeta, hasMessagesMeta } from '@/utils/session'
 import { MessagingSessionMenuItem } from '@/components/messaging/MessagingSessionMenuItem'
 import { useSessionMenuActions } from '@/hooks/useSessionMenuActions'
@@ -67,6 +69,12 @@ export interface SessionMenuProps {
   projects?: SessionMenuProjectOption[]
   /** Callback for binding/unbinding the session to a project. `null` = unbind. */
   onSetProjectId?: (projectId: string | null) => void
+  /** Workspace custom chat groups (omit to hide the submenu). */
+  sessionGroups?: SessionGroupConfig[]
+  /** Callback for binding/unbinding the session to a custom group. `null` = ungrouped. */
+  onSetCustomGroupId?: (customGroupId: string | null) => void
+  /** Open group creation flow and assign this session after creation. */
+  onCreateSessionGroup?: () => void
   /** Callbacks */
   onRename: () => void
   onFlag: () => void
@@ -106,6 +114,9 @@ export function SessionMenu({
   hasRemoteWorkspaces,
   projects = [],
   onSetProjectId,
+  sessionGroups = [],
+  onSetCustomGroupId,
+  onCreateSessionGroup,
 }: SessionMenuProps) {
   const { t } = useTranslation()
 
@@ -233,6 +244,46 @@ export function SessionMenu({
                 </MenuItem>
               )
             })}
+          </SubContent>
+        </Sub>
+      )}
+
+      {/* Custom groups submenu - one group per chat + "Ungrouped" to clear binding */}
+      {(onSetCustomGroupId || onCreateSessionGroup) && (
+        <Sub>
+          <SubTrigger className="pr-2">
+            <FolderKanban className="h-3.5 w-3.5" />
+            <span className="flex-1">{t("sessionMenu.customGroup")}</span>
+          </SubTrigger>
+          <SubContent>
+            {onSetCustomGroupId && (
+              <MenuItem onClick={() => onSetCustomGroupId(null)}>
+                {!item.customGroupId && <Check className="h-3.5 w-3.5" />}
+                <span className={item.customGroupId ? 'flex-1 ml-[18px]' : 'flex-1'}>
+                  {t("sessionMenu.ungrouped")}
+                </span>
+              </MenuItem>
+            )}
+            {sessionGroups.length > 0 && <Separator />}
+            {sessionGroups.map((group) => {
+              const isBound = item.customGroupId === group.id
+              return (
+                <MenuItem key={group.id} onClick={() => onSetCustomGroupId?.(group.id)}>
+                  {isBound && <Check className="h-3.5 w-3.5" />}
+                  {!isBound && group.color && <span className="h-2 w-2 rounded-full ml-[5px] mr-[5px]" style={{ backgroundColor: group.color }} />}
+                  <span className={isBound ? 'flex-1' : group.color ? 'flex-1' : 'flex-1 ml-[18px]'}>{group.icon ? `${group.icon} ` : ''}{group.name}</span>
+                </MenuItem>
+              )
+            })}
+            {onCreateSessionGroup && (
+              <>
+                <Separator />
+                <MenuItem onClick={onCreateSessionGroup}>
+                  <Plus className="h-3.5 w-3.5" />
+                  <span className="flex-1">{t("sessionMenu.newCustomGroup")}</span>
+                </MenuItem>
+              </>
+            )}
           </SubContent>
         </Sub>
       )}

@@ -560,6 +560,10 @@ export interface ElectronAPI {
   listViews(workspaceId: string): Promise<import('@craft-agent/shared/views').ViewConfig[]>
   saveViews(workspaceId: string, views: import('@craft-agent/shared/views').ViewConfig[]): Promise<void>
 
+  // Session Groups (workspace-scoped, stored in session-groups.json)
+  listSessionGroups(workspaceId: string): Promise<import('@craft-agent/shared/session-groups').SessionGroupConfig[]>
+  saveSessionGroups(workspaceId: string, groups: import('@craft-agent/shared/session-groups').SessionGroupConfig[]): Promise<void>
+
   // Generic workspace image loading/saving
   readWorkspaceImage(workspaceId: string, relativePath: string): Promise<string>
   writeWorkspaceImage(workspaceId: string, relativePath: string, base64: string, mimeType: string): Promise<void>

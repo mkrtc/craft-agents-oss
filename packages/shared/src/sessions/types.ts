@@ -59,6 +59,8 @@ export const SESSION_PERSISTENT_FIELDS = [
   'labelSkillAnchorState',
   // Project binding (workspace-scoped grouping)
   'projectId',
+  // User-defined chat group binding (workspace-scoped)
+  'customGroupId',
   // Kanban: task/subtask hierarchy + board column
   'parentSessionId',
   'kanbanColumn',
@@ -224,6 +226,8 @@ export interface SessionConfig {
   labelSkillAnchorState?: LabelSkillAnchorState;
   /** Workspace-scoped project id this session belongs to (undefined = unbound). */
   projectId?: string;
+  /** Workspace-scoped custom chat group id (undefined = ungrouped). */
+  customGroupId?: string;
   /** Parent session id — when set, this session is a subtask of the parent (undefined = top-level task). */
   parentSessionId?: string;
   /** Kanban board column id ('todo' | 'in-progress' | 'done'). Drag-to-move target; independent of sessionStatus. */
@@ -346,6 +350,8 @@ export interface SessionHeader {
   labelSkillAnchorState?: LabelSkillAnchorState;
   /** Workspace-scoped project id this session belongs to (undefined = unbound). */
   projectId?: string;
+  /** Workspace-scoped custom chat group id (undefined = ungrouped). */
+  customGroupId?: string;
   /** Parent session id — when set, this session is a subtask of the parent (undefined = top-level task). */
   parentSessionId?: string;
   /** Kanban board column id ('todo' | 'in-progress' | 'done'). Drag-to-move target; independent of sessionStatus. */
@@ -452,6 +458,8 @@ export interface SessionMetadata {
   branchFromMessageId?: string;
   /** Workspace-scoped project id this session belongs to (undefined = unbound). */
   projectId?: string;
+  /** Workspace-scoped custom chat group id (undefined = ungrouped). */
+  customGroupId?: string;
   /** Parent session id — when set, this session is a subtask of the parent (undefined = top-level task). */
   parentSessionId?: string;
   /** Kanban board column id ('todo' | 'in-progress' | 'done'). Drag-to-move target; independent of sessionStatus. */

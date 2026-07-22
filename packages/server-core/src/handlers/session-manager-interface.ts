@@ -128,6 +128,7 @@ export interface ISessionManager {
     opts?: { parentSessionId?: string },
   ): Promise<{ labelId: string } | undefined>
   setSessionProjectId(sessionId: string, projectId: string | null): Promise<void>
+  setSessionCustomGroupId(sessionId: string, customGroupId: string | null): Promise<void>
   setSessionMemorySelection(sessionId: string, selection: {
     enabledMemorySpaceRefs?: SessionHeader['enabledMemorySpaceRefs']
     memoryWriteTargetRef?: SessionHeader['memoryWriteTargetRef']

@@ -157,6 +157,9 @@ export function SessionItem({
           onDelete={() => ctx.onDelete(item.id)}
           projects={ctx.projects}
           onSetProjectId={ctx.onSetProjectId ? (pid) => ctx.onSetProjectId!(item.id, pid) : undefined}
+          sessionGroups={ctx.sessionGroups}
+          onSetCustomGroupId={ctx.onSetCustomGroupId ? (gid) => ctx.onSetCustomGroupId!(item.id, gid) : undefined}
+          onCreateSessionGroup={ctx.onCreateSessionGroup ? () => ctx.onCreateSessionGroup!(item.id) : undefined}
         />
       }
       contextMenuContent={ctx.isMultiSelectActive && isInMultiSelect ? <BatchSessionMenu /> : undefined}

@@ -4,6 +4,8 @@ This file accumulates release notes for the next unreleased version. PRs that ad
 
 ## Features
 
+- Added custom chat groups: create lightweight workspace groups, assign chats from the session menu, and group the sidebar by those custom groups.
+
 ## Improvements
 
 ## Bug Fixes

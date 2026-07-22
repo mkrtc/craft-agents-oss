@@ -42,6 +42,7 @@ import { McpIcon } from "../icons/McpIcon"
 import { cn } from "@/lib/utils"
 import { isMac } from "@/lib/platform"
 import { Button } from "@/components/ui/button"
+import { Input } from "@/components/ui/input"
 import { HeaderIconButton } from "@/components/ui/HeaderIconButton"
 import { Separator } from "@/components/ui/separator"
 import { Tooltip, TooltipTrigger, TooltipContent, DocumentFormattedMarkdownOverlay } from "@craft-agent/ui"
@@ -119,6 +120,7 @@ import {
   type NavigationState,
 } from "@/contexts/NavigationContext"
 import type { SettingsSubpage } from "../../../shared/types"
+import type { SessionGroupConfig } from '@craft-agent/shared/session-groups'
 import { SourcesListPanel } from "./SourcesListPanel"
 import { SkillsListPanel } from "./SkillsListPanel"
 import { AutomationsListPanel } from "../automations/AutomationsListPanel"
@@ -949,6 +951,91 @@ function AppShellContent({
       toast.error(t('toast.failedToUpdateProject'))
     }
   }, [t])
+
+  const [sessionGroups, setSessionGroups] = React.useState<SessionGroupConfig[]>([])
+
+  const reloadSessionGroups = useCallback(async () => {
+    if (!activeWorkspaceId) {
+      setSessionGroups([])
+      return
+    }
+    try {
+      setSessionGroups(await window.electronAPI.listSessionGroups(activeWorkspaceId))
+    } catch (err) {
+      console.error('[AppShell] Failed to load session groups:', err)
+      setSessionGroups([])
+    }
+  }, [activeWorkspaceId])
+
+  React.useEffect(() => {
+    void reloadSessionGroups()
+  }, [reloadSessionGroups])
+
+  const saveSessionGroups = useCallback(async (groups: SessionGroupConfig[]) => {
+    if (!activeWorkspaceId) return
+    const ordered = groups.map((group, index) => ({ ...group, order: index }))
+    setSessionGroups(ordered)
+    await window.electronAPI.saveSessionGroups(activeWorkspaceId, ordered)
+  }, [activeWorkspaceId])
+
+  const [createGroupDialog, setCreateGroupDialog] = React.useState<{ open: boolean; sessionId: string | null; name: string; icon: string; color: string }>({ open: false, sessionId: null, name: '', icon: '', color: '#8b5cf6' })
+
+  const createSessionGroup = useCallback(async (input: { name: string; icon?: string; color?: string }): Promise<SessionGroupConfig | null> => {
+    const trimmed = input.name.trim()
+    if (!trimmed || !activeWorkspaceId) return null
+    const slugBase = trimmed.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'group'
+    const existing = new Set(sessionGroups.map(group => group.id))
+    let id = slugBase
+    let i = 2
+    while (existing.has(id)) {
+      id = `${slugBase}-${i}`
+      i += 1
+    }
+    const group: SessionGroupConfig = {
+      id,
+      name: trimmed,
+      icon: input.icon?.trim() || undefined,
+      color: input.color,
+      createdAt: Date.now(),
+      order: sessionGroups.length,
+    }
+    await saveSessionGroups([...sessionGroups, group])
+    return group
+  }, [activeWorkspaceId, saveSessionGroups, sessionGroups])
+
+  const handleCreateSessionGroup = useCallback((sessionId: string) => {
+    setCreateGroupDialog({ open: true, sessionId, name: '', icon: '', color: '#8b5cf6' })
+  }, [])
+
+  const handleSessionCustomGroupChange = useCallback(async (sessionId: string, customGroupId: string | null) => {
+    try {
+      await window.electronAPI.sessionCommand(sessionId, { type: 'setCustomGroupId', customGroupId })
+    } catch (err) {
+      console.error('[AppShell] Failed to update session custom group:', err)
+      toast.error(t('toast.failedToUpdateSessionGroup'))
+    }
+  }, [t])
+
+  const confirmCreateSessionGroup = useCallback(async () => {
+    const sessionId = createGroupDialog.sessionId
+    const name = createGroupDialog.name.trim()
+    if (!sessionId || !name) return
+
+    try {
+      const group = await createSessionGroup({
+        name,
+        icon: createGroupDialog.icon,
+        color: createGroupDialog.color,
+      })
+      if (group) {
+        await window.electronAPI.sessionCommand(sessionId, { type: 'setCustomGroupId', customGroupId: group.id })
+        setCreateGroupDialog({ open: false, sessionId: null, name: '', icon: '', color: '#8b5cf6' })
+      }
+    } catch (err) {
+      console.error('[AppShell] Failed to create session group:', err)
+      toast.error(t('toast.failedToUpdateSessionGroup'))
+    }
+  }, [createGroupDialog.color, createGroupDialog.icon, createGroupDialog.name, createGroupDialog.sessionId, createSessionGroup, t])
 
   // Whether local MCP servers are enabled (affects stdio source status)
   const [localMcpEnabled, setLocalMcpEnabled] = React.useState(true)
@@ -3222,6 +3309,11 @@ function AppShellContent({
                                         {chatGroupingMode === 'project' && <Check className="h-3 w-3 text-muted-foreground" />}
                                       </StyledDropdownMenuItem>
                                     )}
+                                    <StyledDropdownMenuItem onClick={() => setChatGroupingMode('custom')}>
+                                      <FolderKanban className="h-3.5 w-3.5" />
+                                      <span className="flex-1">{t("sidebar.groupByCustomGroups")}</span>
+                                      {chatGroupingMode === 'custom' && <Check className="h-3 w-3 text-muted-foreground" />}
+                                    </StyledDropdownMenuItem>
                                   </StyledDropdownMenuSubContent>
                                 </DropdownMenuSub>
                               </>
@@ -3587,6 +3679,9 @@ function AppShellContent({
                   onLabelsChange={handleSessionLabelsChange}
                   projects={projectMenuOptions}
                   onSetProjectId={handleSessionProjectChange}
+                  sessionGroups={sessionGroups}
+                  onSetCustomGroupId={handleSessionCustomGroupChange}
+                  onCreateSessionGroup={handleCreateSessionGroup}
                   groupingMode={chatGroupingMode}
                   workspaceId={activeWorkspaceId ?? undefined}
                   statusFilter={listFilter}
@@ -3862,6 +3957,55 @@ function AppShellContent({
       </Dialog>
 
       {/* Send to Workspace dialog (driven by sendToWorkspaceAtom) */}
+      <Dialog open={createGroupDialog.open} onOpenChange={(open) => setCreateGroupDialog(prev => ({ ...prev, open }))}>
+        <DialogContent className="sm:max-w-[420px]">
+          <DialogHeader>
+            <DialogTitle>{t('sessionGroup.createTitle')}</DialogTitle>
+            <DialogDescription>{t('sessionGroup.createDescription')}</DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3">
+            <Input
+              autoFocus
+              value={createGroupDialog.name}
+              placeholder={t('sessionGroup.namePlaceholder')}
+              onChange={(event) => setCreateGroupDialog(prev => ({ ...prev, name: event.target.value }))}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') {
+                  event.preventDefault()
+                  void confirmCreateSessionGroup()
+                }
+              }}
+            />
+            <div className="grid grid-cols-[88px_1fr] gap-3">
+              <Input
+                value={createGroupDialog.icon}
+                placeholder={t('sessionGroup.iconPlaceholder')}
+                maxLength={4}
+                onChange={(event) => setCreateGroupDialog(prev => ({ ...prev, icon: event.target.value }))}
+              />
+              <div className="flex items-center gap-2 rounded-md border border-foreground/15 px-3 py-1">
+                <input
+                  type="color"
+                  value={createGroupDialog.color}
+                  aria-label={t('sessionGroup.colorLabel')}
+                  className="h-7 w-8 cursor-pointer rounded border-0 bg-transparent p-0"
+                  onChange={(event) => setCreateGroupDialog(prev => ({ ...prev, color: event.target.value }))}
+                />
+                <span className="text-sm text-muted-foreground">{t('sessionGroup.colorLabel')}</span>
+              </div>
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="ghost" onClick={() => setCreateGroupDialog({ open: false, sessionId: null, name: '', icon: '', color: '#8b5cf6' })}>
+              {t('common.cancel')}
+            </Button>
+            <Button onClick={() => void confirmCreateSessionGroup()} disabled={!createGroupDialog.name.trim()}>
+              {t('common.create')}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       <SendToWorkspaceDialog
         open={sendToWorkspaceIds.length > 0}
         onOpenChange={(open) => { if (!open) setSendToWorkspaceIds([]) }}

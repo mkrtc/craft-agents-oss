@@ -29,6 +29,7 @@ import { useNavigation, useNavigationState, routes, isSessionsNavigation } from 
 import { useFocusContext } from "@/context/FocusContext"
 import { sendToWorkspaceAtom, type SessionMeta } from "@/atoms/sessions"
 import type { ViewConfig } from "@craft-agent/shared/views"
+import type { SessionGroupConfig } from '@craft-agent/shared/session-groups'
 import type { SessionStatusId, SessionStatus } from "@/config/session-status-config"
 import { buildCollapsedGroupsScopeSuffix } from "@/utils/session-list-collapse"
 
@@ -37,7 +38,7 @@ export interface SessionListRow {
 }
 
 /** Grouping mode for chat list */
-export type ChatGroupingMode = 'date' | 'status' | 'unread' | 'project'
+export type ChatGroupingMode = 'date' | 'status' | 'unread' | 'project' | 'custom'
 
 interface SessionListProps {
   items: SessionMeta[]
@@ -81,6 +82,12 @@ interface SessionListProps {
   projects?: Array<{ id: string; slug: string; name: string; color?: string }>
   /** Callback to bind/unbind a session to a project (null = unbind) */
   onSetProjectId?: (sessionId: string, projectId: string | null) => void
+  /** Workspace custom chat groups */
+  sessionGroups?: SessionGroupConfig[]
+  /** Callback to bind/unbind a session to a custom group (null = ungrouped) */
+  onSetCustomGroupId?: (sessionId: string, customGroupId: string | null) => void
+  /** Open group creation flow for a session and assign it after creation */
+  onCreateSessionGroup?: (sessionId: string) => void
   /** How to group sessions: 'date' (default) or 'status' */
   groupingMode?: ChatGroupingMode
   /** Workspace ID for content search (optional - if not provided, content search is disabled) */
@@ -143,6 +150,9 @@ export function SessionList({
   onLabelsChange,
   projects,
   onSetProjectId,
+  sessionGroups = [],
+  onSetCustomGroupId,
+  onCreateSessionGroup,
   groupingMode = 'date',
   workspaceId,
   statusFilter,
@@ -316,6 +326,68 @@ export function SessionList({
       }
     }
 
+
+    const groupById = new Map(sessionGroups.map(group => [group.id, group]))
+    const customGroupOrder = new Map(sessionGroups.map((group, index) => [group.id, index]))
+    const customGroupSortTime = new Map<string, number>()
+    for (const item of items) {
+      if (item.isPinned === true || !item.customGroupId || !groupById.has(item.customGroupId)) continue
+      customGroupSortTime.set(
+        item.customGroupId,
+        Math.max(customGroupSortTime.get(item.customGroupId) ?? 0, item.lastMessageAt ?? 0),
+      )
+    }
+
+    const splitCustomRows = (sourceRows: SessionListRow[]) => {
+      const customRowsByKey = new Map<string, { rows: SessionListRow[]; group: SessionGroupConfig }>()
+      const regularRows: SessionListRow[] = []
+
+      for (const row of sourceRows) {
+        const group = row.item.customGroupId ? groupById.get(row.item.customGroupId) : undefined
+        if (!group) {
+          regularRows.push(row)
+          continue
+        }
+        const key = `custom-${group.id}`
+        if (!customRowsByKey.has(key)) customRowsByKey.set(key, { rows: [], group })
+        customRowsByKey.get(key)!.rows.push(row)
+      }
+
+      return { customRowsByKey, regularRows }
+    }
+
+    const buildCustomSectionGroups = (customRowsByKey: Map<string, { rows: SessionListRow[]; group: SessionGroupConfig }>) => {
+      const groups: Array<EntityListGroup<SessionListRow> & { sortTime: number; sortOrder: number }> = []
+      for (const meta of collapsedGroupsMeta) {
+        if (!meta.key.startsWith('custom-') || customRowsByKey.has(meta.key)) continue
+        const groupId = meta.key.replace('custom-', '')
+        const group = groupById.get(groupId)
+        if (group) customRowsByKey.set(meta.key, { rows: [], group })
+      }
+
+      for (const [key, entry] of customRowsByKey) {
+        entry.rows.sort((a, b) => (b.item.lastMessageAt || 0) - (a.item.lastMessageAt || 0))
+        const collapsedMeta = collapsedGroupsMeta.find(m => m.key === key)
+        const count = collapsedMeta?.count ?? entry.rows.length
+        groups.push({
+          key,
+          label: `${entry.group.icon ? `${entry.group.icon} ` : ''}${entry.group.name} (${count})`,
+          accentColor: entry.group.color,
+          items: entry.rows,
+          collapsible: entry.rows.length > 0 || !!collapsedMeta,
+          // Keep custom group order stable across collapse/expand. Collapsed
+          // groups have no visible rows in flatItems, so derive recency from the
+          // full current item set instead of using a placeholder timestamp.
+          sortTime: customGroupSortTime.get(entry.group.id) ?? entry.rows[0]?.item.lastMessageAt ?? 0,
+          sortOrder: customGroupOrder.get(entry.group.id) ?? 999,
+          ...(collapsedMeta ? { collapsedCount: collapsedMeta.count } : {}),
+        })
+      }
+
+      groups.sort((a, b) => b.sortTime - a.sortTime || a.sortOrder - b.sortOrder || a.label.localeCompare(b.label))
+      return groups
+    }
+
     if (groupingMode === 'unread') {
       // Two fixed buckets: unread on top, read below. Within each, items keep
       // the same `lastMessageAt`-descending order they already arrive in.
@@ -364,9 +436,13 @@ export function SessionList({
       const statusOrder = new Map<string, number>()
       sessionStatuses.forEach((state, index) => statusOrder.set(state.id, index))
 
-      // Build groups from visible items
+      // Custom-grouped sessions render under their custom group section instead of status.
+      const { customRowsByKey, regularRows } = splitCustomRows(rows)
+      const customGroups = buildCustomSectionGroups(customRowsByKey)
+
+      // Build groups from visible ungrouped items
       const groupsByKey = new Map<string, { rows: SessionListRow[], statusId: string }>()
-      for (const row of rows) {
+      for (const row of regularRows) {
         const statusId = getSessionStatus(row.item)
         const key = `status-${statusId}`
         if (!groupsByKey.has(key)) groupsByKey.set(key, { rows: [], statusId })
@@ -375,6 +451,7 @@ export function SessionList({
 
       // Insert collapsed placeholder groups
       for (const meta of collapsedGroupsMeta) {
+        if (!meta.key.startsWith('status-')) continue
         if (!groupsByKey.has(meta.key)) {
           const statusId = meta.key.replace('status-', '')
           groupsByKey.set(meta.key, { rows: [], statusId })
@@ -404,6 +481,60 @@ export function SessionList({
       // If only one group exists, disable collapsing — there's nothing to collapse into
       if (orderedGroups.length === 1) {
         orderedGroups[0].collapsible = false
+      }
+
+      return withPinnedGroup([...customGroups, ...orderedGroups])
+    }
+
+
+    if (groupingMode === 'custom') {
+      const groupsByKey = new Map<string, { rows: SessionListRow[]; group?: SessionGroupConfig }>()
+      const noneKey = 'custom-__none__'
+
+      for (const row of rows) {
+        const group = row.item.customGroupId ? groupById.get(row.item.customGroupId) : undefined
+        const key = group ? `custom-${group.id}` : noneKey
+        if (!groupsByKey.has(key)) groupsByKey.set(key, { rows: [], group })
+        groupsByKey.get(key)!.rows.push(row)
+      }
+
+      for (const meta of collapsedGroupsMeta) {
+        if (!groupsByKey.has(meta.key)) {
+          const groupId = meta.key.replace('custom-', '')
+          const group = groupId === '__none__' ? undefined : groupById.get(groupId)
+          groupsByKey.set(meta.key, { rows: [], group })
+        }
+      }
+
+      const orderedGroups: EntityListGroup<SessionListRow>[] = []
+      for (const group of [...sessionGroups].sort((a, b) => a.order - b.order || a.name.localeCompare(b.name))) {
+        const key = `custom-${group.id}`
+        const entry = groupsByKey.get(key)
+        if (!entry) continue
+        entry.rows.sort((a, b) => (b.item.lastMessageAt || 0) - (a.item.lastMessageAt || 0))
+        const collapsedMeta = collapsedGroupsMeta.find(m => m.key === key)
+        orderedGroups.push({
+          key,
+          label: `${group.icon ? `${group.icon} ` : ''}${group.name} (${collapsedMeta?.count ?? entry.rows.length})`,
+          accentColor: group.color,
+          items: entry.rows,
+          collapsible: entry.rows.length > 0 || !!collapsedMeta,
+          ...(collapsedMeta ? { collapsedCount: collapsedMeta.count } : {}),
+        })
+      }
+
+      const ungrouped = groupsByKey.get(noneKey)
+      const ungroupedCollapsed = collapsedGroupsMeta.find(m => m.key === noneKey)
+      if (ungrouped || ungroupedCollapsed) {
+        const ungroupedRows = ungrouped?.rows ?? []
+        ungroupedRows.sort((a, b) => (b.item.lastMessageAt || 0) - (a.item.lastMessageAt || 0))
+        orderedGroups.push({
+          key: noneKey,
+          label: t('session.ungroupedGroup', { count: ungroupedCollapsed?.count ?? ungroupedRows.length }),
+          items: ungroupedRows,
+          collapsible: ungroupedRows.length > 0 || !!ungroupedCollapsed,
+          ...(ungroupedCollapsed ? { collapsedCount: ungroupedCollapsed.count } : {}),
+        })
       }
 
       return withPinnedGroup(orderedGroups)
@@ -467,11 +598,15 @@ export function SessionList({
       return withPinnedGroup(orderedGroups)
     }
 
-    // Default: group by date
+    // Default: custom-grouped sessions render under their custom group section instead of date.
+    const { customRowsByKey, regularRows } = splitCustomRows(rows)
+    const customGroups = buildCustomSectionGroups(customRowsByKey)
+
+    // Default: group remaining ungrouped sessions by date
     const groupsByKey = new Map<string, EntityListGroup<SessionListRow>>()
     const groupDates = new Map<string, Date>()
 
-    for (const row of rows) {
+    for (const row of regularRows) {
       const day = startOfDay(new Date(row.item.lastMessageAt || 0))
       const groupKey = day.toISOString()
 
@@ -489,6 +624,7 @@ export function SessionList({
 
     // Insert collapsed placeholder groups (header-only, items: [])
     for (const meta of collapsedGroupsMeta) {
+      if (meta.key.startsWith('custom-')) continue
       if (!groupsByKey.has(meta.key)) {
         const date = new Date(meta.key)
         groupsByKey.set(meta.key, {
@@ -507,7 +643,17 @@ export function SessionList({
       .sort(([, a], [, b]) => b.getTime() - a.getTime())
       .map(([key]) => key)
 
-    const orderedGroups = orderedKeys.map(key => groupsByKey.get(key)!)
+    const dateGroups = orderedKeys.map(key => ({
+      ...groupsByKey.get(key)!,
+      sortTime: groupDates.get(key)?.getTime() ?? 0,
+    }))
+
+    const orderedGroups = [...customGroups, ...dateGroups]
+      .sort((a, b) => (b.sortTime ?? 0) - (a.sortTime ?? 0))
+      .map(({ sortTime: _sortTime, ...group }) => {
+        const { sortOrder: _sortOrder, ...cleanGroup } = group as EntityListGroup<SessionListRow> & { sortOrder?: number }
+        return cleanGroup
+      })
 
     // If only one group exists, disable collapsing — there's nothing to collapse into
     if (orderedGroups.length === 1) {
@@ -515,14 +661,24 @@ export function SessionList({
     }
 
     return withPinnedGroup(orderedGroups)
-  }, [isSearchMode, matchingFilterItems, otherResultItems, pinnedItems, flatItems, groupingMode, sessionStatuses, projects, collapsedGroupsMeta, t, i18n.resolvedLanguage])
+  }, [isSearchMode, matchingFilterItems, otherResultItems, pinnedItems, flatItems, items, groupingMode, sessionStatuses, projects, sessionGroups, collapsedGroupsMeta, t, i18n.resolvedLanguage])
 
   const flatRows = rowData.rows
 
   const collapseAllGroups = useCallback(() => {
     const ordinaryItems = items.filter(item => item.isPinned !== true)
+    const knownGroupIds = new Set((sessionGroups ?? []).map(group => group.id))
+    const customOr = (item: SessionMeta, fallback: () => string) => {
+      return item.customGroupId && knownGroupIds.has(item.customGroupId)
+        ? `custom-${item.customGroupId}`
+        : fallback()
+    }
+
     if (groupingMode === 'status') {
-      const allKeys = new Set(ordinaryItems.map(item => `status-${getSessionStatus(item)}`))
+      const allKeys = new Set(ordinaryItems.map(item => customOr(item, () => `status-${getSessionStatus(item)}`)))
+      setCollapsedGroups(allKeys)
+    } else if (groupingMode === 'custom') {
+      const allKeys = new Set(ordinaryItems.map(item => item.customGroupId && knownGroupIds.has(item.customGroupId) ? `custom-${item.customGroupId}` : 'custom-__none__'))
       setCollapsedGroups(allKeys)
     } else if (groupingMode === 'unread') {
       const allKeys = new Set(ordinaryItems.map(item => item.hasUnread ? 'unread-yes' : 'unread-no'))
@@ -535,12 +691,12 @@ export function SessionList({
       }))
       setCollapsedGroups(allKeys)
     } else {
-      const allKeys = new Set(ordinaryItems.map(item =>
+      const allKeys = new Set(ordinaryItems.map(item => customOr(item, () =>
         startOfDay(new Date(item.lastMessageAt || 0)).toISOString()
-      ))
+      )))
       setCollapsedGroups(allKeys)
     }
-  }, [items, groupingMode, projects])
+  }, [items, groupingMode, projects, sessionGroups])
   const expandAllGroups = useCallback(() => {
     setCollapsedGroups(new Set())
   }, [])
@@ -720,6 +876,9 @@ export function SessionList({
     onLabelsChange,
     projects,
     onSetProjectId,
+    sessionGroups,
+    onSetCustomGroupId,
+    onCreateSessionGroup,
     onSelectSessionById: handleSelectSessionById,
     onOpenInNewWindow: handleOpenInNewWindow,
     onSendToWorkspace: (ids: string[]) => setSendToWorkspace(ids),
@@ -741,7 +900,7 @@ export function SessionList({
     onArchive, handleArchiveWithToast, onUnarchive, handleUnarchiveWithToast,
     onPin, handlePinWithToast, onUnpin, handleUnpinWithToast,
     onMarkUnread, handleDeleteWithToast, onLabelsChange,
-    projects, onSetProjectId,
+    projects, onSetProjectId, sessionGroups, onSetCustomGroupId, onCreateSessionGroup,
     handleSelectSessionById, handleOpenInNewWindow, setSendToWorkspace, handleFocusZone, handleKeyDown,
     sessionStatuses, flatLabels, labels, resolvedSearchQuery,
     focusedSessionId, selectionStore.state.selected, isMultiSelectActive,

@@ -56,7 +56,7 @@ export interface UseSessionSearchOptions {
   /** Collapsed group keys — collapsed items are excluded from pagination and flatItems */
   collapsedGroups?: Set<string>
   /** Grouping mode — needed to compute group keys for collapse-aware pagination */
-  groupingMode?: 'date' | 'status' | 'unread' | 'project'
+  groupingMode?: 'date' | 'status' | 'unread' | 'project' | 'custom'
   /** Ref to the ScrollArea viewport element — used for scroll-based pagination */
   scrollViewportRef?: React.RefObject<HTMLDivElement>
 }
@@ -126,7 +126,9 @@ function groupSessionsByDate(sessions: SessionMeta[]): DateGroup[] {
     }))
 }
 
-function getCollapseGroupKey(item: SessionMeta, groupingMode?: 'date' | 'status' | 'unread' | 'project'): string {
+function getCollapseGroupKey(item: SessionMeta, groupingMode?: 'date' | 'status' | 'unread' | 'project' | 'custom'): string {
+  if (groupingMode === 'custom') return `custom-${item.customGroupId ?? '__none__'}`
+  if ((groupingMode === 'date' || groupingMode === 'status' || !groupingMode) && item.customGroupId) return `custom-${item.customGroupId}`
   if (groupingMode === 'status') return `status-${getSessionStatus(item)}`
   if (groupingMode === 'unread') return item.hasUnread ? 'unread-yes' : 'unread-no'
   if (groupingMode === 'project') return `project-${(item as { projectId?: string }).projectId ?? '__none__'}`
@@ -143,7 +145,7 @@ export function computeCollapsedPagination(
   items: SessionMeta[],
   displayLimit: number,
   collapsedGroups?: Set<string>,
-  groupingMode?: 'date' | 'status' | 'unread' | 'project',
+  groupingMode?: 'date' | 'status' | 'unread' | 'project' | 'custom',
 ): CollapsedPaginationResult {
   // Fast path: no collapse state → original slice
   if (!collapsedGroups || collapsedGroups.size === 0) {

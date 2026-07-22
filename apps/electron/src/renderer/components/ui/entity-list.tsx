@@ -38,6 +38,8 @@ export interface EntityListGroup<T> {
   collapsible?: boolean
   /** Number of hidden items when collapsed. Present on collapsed placeholder groups (items will be []). */
   collapsedCount?: number
+  /** Optional accent color used by rich group headers (e.g. custom chat groups). */
+  accentColor?: string
 }
 
 export interface EntityListProps<T> {
@@ -78,10 +80,14 @@ export interface EntityListProps<T> {
 // Section Header
 // ============================================================================
 
-function SectionHeader({ label }: { label: string }) {
+function SectionHeader({ label, accentColor }: { label: string; accentColor?: string }) {
   return (
     <div className="px-4 py-2">
-      <span className="text-[11px] font-medium text-muted-foreground uppercase tracking-wider">
+      <span
+        className="text-[11px] font-medium text-muted-foreground uppercase tracking-wider inline-flex items-center gap-1.5"
+        style={accentColor ? { color: `color-mix(in srgb, ${accentColor} 72%, var(--muted-foreground))` } : undefined}
+      >
+        {accentColor && <span className="h-1.5 w-1.5 rounded-full" style={{ backgroundColor: accentColor }} />}
         {label}
       </span>
     </div>
@@ -96,6 +102,7 @@ function CollapsibleGroupHeader({
   onToggle,
   onCollapseAll,
   onExpandAll,
+  accentColor,
 }: {
   label: string
   isCollapsed: boolean
@@ -103,6 +110,7 @@ function CollapsibleGroupHeader({
   onToggle: () => void
   onCollapseAll?: () => void
   onExpandAll?: () => void
+  accentColor?: string
 }) {
   return (
     <ContextMenu modal>
@@ -118,8 +126,12 @@ function CollapsibleGroupHeader({
               !isCollapsed && "rotate-90"
             )}
           />
-          <span className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground relative">
-            {label}{isCollapsed && <> · <span className="text-muted-foreground/50">{itemCount}</span></>}
+          <span
+            className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground relative inline-flex items-center gap-1.5"
+            style={accentColor ? { color: `color-mix(in srgb, ${accentColor} 72%, var(--muted-foreground))` } : undefined}
+          >
+            {accentColor && <span className="h-1.5 w-1.5 rounded-full" style={{ backgroundColor: accentColor }} />}
+            <span>{label}{isCollapsed && <> · <span className="text-muted-foreground/50">{itemCount}</span></>}</span>
           </span>
         </button>
       </ContextMenuTrigger>
@@ -197,12 +209,13 @@ export function EntityList<T>({
                           label={group.label}
                           isCollapsed={!!isCollapsed}
                           itemCount={isCollapsed ? (group.collapsedCount ?? 0) : group.items.length}
+                          accentColor={group.accentColor}
                           onToggle={() => onToggleCollapse(group.key)}
                           onCollapseAll={onCollapseAll}
                           onExpandAll={onExpandAll}
                         />
                       ) : (
-                        <SectionHeader label={group.label} />
+                        <SectionHeader label={group.label} accentColor={group.accentColor} />
                       )}
                       {group.items.map((item, indexInGroup) =>
                         <React.Fragment key={getKey(item)}>

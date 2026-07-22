@@ -303,6 +303,10 @@ export const RPC_CHANNELS = {
     LIST: 'views:list',
     SAVE: 'views:save',
   },
+  sessionGroups: {
+    LIST: 'sessionGroups:list',
+    SAVE: 'sessionGroups:save',
+  },
   toolIcons: {
     GET_MAPPINGS: 'toolIcons:getMappings',
   },

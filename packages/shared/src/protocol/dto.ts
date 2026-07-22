@@ -123,6 +123,8 @@ export interface Session {
   supportsBranching?: boolean
   /** Workspace-scoped project id this session is bound to (undefined = unbound) */
   projectId?: string
+  /** Workspace-scoped custom chat group id (undefined = ungrouped) */
+  customGroupId?: string
   /** Parent session id — when set, this session is a subtask of the parent (undefined = top-level task) */
   parentSessionId?: string
   /** Kanban board column id ('todo' | 'in-progress' | 'done'); independent of sessionStatus */
@@ -187,6 +189,8 @@ export interface CreateSessionOptions {
   branchFromSessionId?: string
   /** Bind the new session to a workspace project (inherits project's workingDirectory). */
   projectId?: string
+  /** Bind the new session to a custom chat group. */
+  customGroupId?: string
   /** Mark the new session as a subtask of this parent session (undefined = top-level task). */
   parentSessionId?: string
   /** Tasks Conductor: slug of the task spec this session belongs to (orchestrator + child nodes). */
@@ -451,7 +455,7 @@ export type SessionEvent =
   | { type: 'name_changed'; sessionId: string; name?: string }
   | { type: 'session_model_changed'; sessionId: string; model: string | null }
   | { type: 'session_status_changed'; sessionId: string; sessionStatus: SessionStatus }
-  | { type: 'session_metadata_changed'; sessionId: string; changes: Partial<Pick<Session, 'taskNodeCount' | 'kanbanColumn' | 'taskDraft' | 'taskSlug' | 'projectId' | 'isPinned' | 'pinnedAt' | 'enabledMemorySpaceRefs' | 'memoryWriteTargetRef' | 'memorySelectionMode'>> }
+  | { type: 'session_metadata_changed'; sessionId: string; changes: Partial<Pick<Session, 'taskNodeCount' | 'kanbanColumn' | 'taskDraft' | 'taskSlug' | 'projectId' | 'customGroupId' | 'isPinned' | 'pinnedAt' | 'enabledMemorySpaceRefs' | 'memoryWriteTargetRef' | 'memorySelectionMode'>> }
   | { type: 'session_deleted'; sessionId: string }
   | { type: 'session_created'; sessionId: string }
   | { type: 'session_shared'; sessionId: string; sharedUrl: string }
@@ -520,6 +524,7 @@ export type SessionCommand =
   | { type: 'setSources'; sourceSlugs: string[] }
   | { type: 'setLabels'; labels: string[] }
   | { type: 'setProjectId'; projectId: string | null }
+  | { type: 'setCustomGroupId'; customGroupId: string | null }
   | { type: 'setMemorySelection'; enabledMemorySpaceRefs?: MemorySpaceRef[]; memoryWriteTargetRef?: MemorySpaceRef; memorySelectionMode?: MemorySelectionMode }
   | { type: 'setKanbanColumn'; column: string | null }
   | { type: 'showInFinder' }

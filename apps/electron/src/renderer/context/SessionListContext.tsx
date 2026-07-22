@@ -4,6 +4,7 @@ import type { SessionStatusId, SessionStatus } from "@/config/session-status-con
 import type { SessionMeta } from "@/atoms/sessions"
 import type { SessionOptions } from "@/hooks/useSessionOptions"
 import type { ContentSearchResult } from "@/hooks/useSessionSearch"
+import type { SessionGroupConfig } from '@craft-agent/shared/session-groups'
 
 export interface SessionListContextValue {
   // Session action callbacks (shared across all items)
@@ -22,6 +23,12 @@ export interface SessionListContextValue {
   onSetProjectId?: (sessionId: string, projectId: string | null) => void
   /** Available workspace projects for the context-menu submenu */
   projects?: Array<{ id: string; slug: string; name: string; color?: string }>
+  /** Workspace custom chat groups for the context-menu submenu */
+  sessionGroups?: SessionGroupConfig[]
+  /** Set or clear the custom chat group binding for a session (null = ungrouped) */
+  onSetCustomGroupId?: (sessionId: string, customGroupId: string | null) => void
+  /** Open group creation flow for a session and assign it after creation. */
+  onCreateSessionGroup?: (sessionId: string) => void
   onSelectSessionById: (sessionId: string) => void
   onOpenInNewWindow: (item: SessionMeta) => void
   onSendToWorkspace?: (sessionIds: string[]) => void

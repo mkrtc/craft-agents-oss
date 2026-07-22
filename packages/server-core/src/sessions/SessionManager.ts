@@ -939,6 +939,8 @@ interface ManagedSession {
   labels?: string[]
   // Workspace-scoped project binding (undefined = unbound)
   projectId?: string
+  // Workspace-scoped custom chat group binding (undefined = ungrouped)
+  customGroupId?: string
   // Parent session id — when set, this session is a subtask of the parent (undefined = top-level task)
   parentSessionId?: string
   // Kanban board column id ('todo' | 'in-progress' | 'done'); independent of sessionStatus
@@ -2094,6 +2096,13 @@ export class SessionManager implements ISessionManager {
     // Project binding (no dedicated event today — handled via metaChanged broadcast)
     if (managed.projectId !== header.projectId) {
       managed.projectId = header.projectId
+      changed = true
+    }
+
+    // Custom chat group binding
+    if (managed.customGroupId !== header.customGroupId) {
+      managed.customGroupId = header.customGroupId
+      this.sendEvent({ type: 'session_metadata_changed', sessionId, changes: { customGroupId: managed.customGroupId } }, managed.workspace.id)
       changed = true
     }
 
@@ -3948,6 +3957,7 @@ export class SessionManager implements ISessionManager {
       isPinned: options?.isPinned,
       pinnedAt: options?.pinnedAt,
       projectId: resolvedProjectId,
+      customGroupId: options?.customGroupId,
       parentSessionId: options?.parentSessionId,
       taskSlug: options?.taskSlug,
       taskRunId: options?.taskRunId,
@@ -9083,6 +9093,21 @@ export class SessionManager implements ISessionManager {
 
       this.persistSession(managed)
       await this.flushSession(managed.id)
+      const watcher = this.configWatchers.get(managed.workspace.rootPath)
+      watcher?.notifyFileChange(`sessions/${sessionId}/session.jsonl`)
+    }
+  }
+
+  /** Bind or unbind a session to/from a workspace custom chat group. */
+  async setSessionCustomGroupId(sessionId: string, customGroupId: string | null): Promise<void> {
+    const managed = this.sessions.get(sessionId)
+    if (managed) {
+      managed.customGroupId = customGroupId ?? undefined
+      this.setMetadataWriteGuard(managed)
+
+      this.persistSession(managed)
+      await this.flushSession(managed.id)
+      this.sendEvent({ type: 'session_metadata_changed', sessionId, changes: { customGroupId: managed.customGroupId } }, managed.workspace.id)
       const watcher = this.configWatchers.get(managed.workspace.rootPath)
       watcher?.notifyFileChange(`sessions/${sessionId}/session.jsonl`)
     }

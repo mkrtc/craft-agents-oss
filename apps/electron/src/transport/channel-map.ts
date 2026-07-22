@@ -273,6 +273,10 @@ export const CHANNEL_MAP = {
   listViews: invoke(RPC_CHANNELS.views.LIST),
   saveViews: invoke(RPC_CHANNELS.views.SAVE),
 
+  // Session Groups
+  listSessionGroups: invoke(RPC_CHANNELS.sessionGroups.LIST),
+  saveSessionGroups: invoke(RPC_CHANNELS.sessionGroups.SAVE),
+
   // Tool icon mappings
   getToolIconMappings: invoke(RPC_CHANNELS.toolIcons.GET_MAPPINGS),
 

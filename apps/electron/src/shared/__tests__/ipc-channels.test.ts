@@ -238,13 +238,17 @@ const EXPECTED_CHANNELS: string[] = [
   'session:event',
   'session:getModel',
   'session:setModel',
+  'sessionGroups:list',
+  'sessionGroups:save',
   'sessions:cancel',
   'sessions:command',
+  'sessions:continueWithConnection',
   'sessions:create',
   'sessions:delete',
   'sessions:export',
   'sessions:exportRemoteTransfer',
   'sessions:filesChanged',
+  'sessions:filesWatchStatus',
   'sessions:get',
   'sessions:getFiles',
   'sessions:getMessages',
@@ -361,7 +365,6 @@ const EXPECTED_CHANNELS: string[] = [
   'workspaces:get',
   'workspaces:updateRemote',
 ]
-
 const EXPECTED_COUNT = EXPECTED_CHANNELS.length
 // End auto-generated
 

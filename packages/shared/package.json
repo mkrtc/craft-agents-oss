@@ -28,6 +28,8 @@
     "./mcp": "./src/mcp/index.ts",
     "./prompts": "./src/prompts/index.ts",
     "./sessions": "./src/sessions/index.ts",
+    "./session-groups": "./src/session-groups/index.ts",
+    "./session-groups/storage": "./src/session-groups/storage.ts",
     "./projects": "./src/projects/index.ts",
     "./projects/types": "./src/projects/types.ts",
     "./project-memory": "./src/project-memory/index.ts",
