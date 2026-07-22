@@ -121,6 +121,7 @@ export function registerSettingsHandlers(server: RpcServer, deps: HandlerDeps): 
       workingDirectory: config?.defaults?.workingDirectory,
       localMcpEnabled: config?.localMcpServers?.enabled ?? true,
       defaultLlmConnection: config?.defaults?.defaultLlmConnection,
+      enabledLlmConnectionSlugs: config?.defaults?.enabledLlmConnectionSlugs,
       enabledSourceSlugs: config?.defaults?.enabledSourceSlugs ?? [],
     }
   })
@@ -133,7 +134,7 @@ export function registerSettingsHandlers(server: RpcServer, deps: HandlerDeps): 
       : value
 
     // Validate key is a known workspace setting
-    const validKeys = ['name', 'model', 'enabledSourceSlugs', 'permissionMode', 'cyclablePermissionModes', 'thinkingLevel', 'workingDirectory', 'localMcpEnabled', 'defaultLlmConnection']
+    const validKeys = ['name', 'model', 'enabledSourceSlugs', 'enabledLlmConnectionSlugs', 'permissionMode', 'cyclablePermissionModes', 'thinkingLevel', 'workingDirectory', 'localMcpEnabled', 'defaultLlmConnection']
     if (!validKeys.includes(key)) {
       throw new Error(`Invalid workspace setting key: ${key}. Valid keys: ${validKeys.join(', ')}`)
     }
@@ -143,6 +144,18 @@ export function registerSettingsHandlers(server: RpcServer, deps: HandlerDeps): 
       const { getLlmConnection } = await import('@craft-agent/shared/config/storage')
       if (!getLlmConnection(normalizedValue as string)) {
         throw new Error(`LLM connection "${normalizedValue}" not found`)
+      }
+    }
+
+    // Validate workspace LLM allowlist slugs before saving. Undefined = all enabled.
+    if (key === 'enabledLlmConnectionSlugs' && normalizedValue !== undefined && normalizedValue !== null) {
+      if (!Array.isArray(normalizedValue) || !normalizedValue.every(slug => typeof slug === 'string')) {
+        throw new Error('enabledLlmConnectionSlugs must be an array of connection slugs')
+      }
+      const { getLlmConnection } = await import('@craft-agent/shared/config/storage')
+      const missing = normalizedValue.find(slug => !getLlmConnection(slug))
+      if (missing) {
+        throw new Error(`LLM connection "${missing}" not found`)
       }
     }
 
@@ -170,6 +183,12 @@ export function registerSettingsHandlers(server: RpcServer, deps: HandlerDeps): 
       // Update the setting in defaults
       config.defaults = config.defaults || {}
       ;(config.defaults as Record<string, unknown>)[key] = normalizedValue
+      if (key === 'enabledLlmConnectionSlugs' && Array.isArray(normalizedValue)) {
+        const enabled = new Set(normalizedValue as string[])
+        if (config.defaults.defaultLlmConnection && !enabled.has(config.defaults.defaultLlmConnection)) {
+          delete config.defaults.defaultLlmConnection
+        }
+      }
     }
 
     // Save the config

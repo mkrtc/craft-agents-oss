@@ -863,6 +863,8 @@ export interface WorkspaceSettings {
   workingDirectory?: string
   localMcpEnabled?: boolean
   defaultLlmConnection?: string
+  /** Workspace allowlist for LLM connections. Undefined means all configured connections are enabled. */
+  enabledLlmConnectionSlugs?: string[]
   enabledSourceSlugs?: string[]
 }
 

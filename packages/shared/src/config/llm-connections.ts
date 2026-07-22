@@ -686,8 +686,12 @@ export function resolveEffectiveConnectionSlug(
   workspaceDefault: string | undefined,
   connections: Pick<LlmConnectionWithStatus, 'slug' | 'isDefault'>[],
 ): string | undefined {
+  const availableWorkspaceDefault = workspaceDefault && connections.some(c => c.slug === workspaceDefault)
+    ? workspaceDefault
+    : undefined
+
   return sessionConnection
-    ?? workspaceDefault
+    ?? availableWorkspaceDefault
     ?? connections.find(c => c.isDefault)?.slug
     ?? connections[0]?.slug
 }

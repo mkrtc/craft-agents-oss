@@ -346,13 +346,24 @@ export default function App() {
   const [llmConnections, setLlmConnections] = useState<LlmConnectionWithStatus[]>([])
   // Workspace default LLM connection (for new sessions)
   const [workspaceDefaultLlmConnection, setWorkspaceDefaultLlmConnection] = useState<string | undefined>()
+  // Workspace LLM connection allowlist. Undefined means all configured connections are enabled.
+  const [workspaceEnabledLlmConnectionSlugs, setWorkspaceEnabledLlmConnectionSlugs] = useState<string[] | undefined>()
   // Global default LLM connection slug (from app config)
   const [defaultLlmConnectionSlug, setDefaultLlmConnectionSlug] = useState<string | undefined>()
 
   // Derive connection default model override from the default LLM connection
+  const workspaceEnabledLlmConnections = useMemo(() => {
+    if (!workspaceEnabledLlmConnectionSlugs) return llmConnections
+    const enabled = new Set(workspaceEnabledLlmConnectionSlugs)
+    return llmConnections.filter(connection => enabled.has(connection.slug))
+  }, [llmConnections, workspaceEnabledLlmConnectionSlugs])
+
   const defaultConnection = useMemo(() => {
-    return llmConnections.find(c => c.slug === defaultLlmConnectionSlug) ?? null
-  }, [llmConnections, defaultLlmConnectionSlug])
+    return workspaceEnabledLlmConnections.find(c => c.slug === workspaceDefaultLlmConnection)
+      ?? workspaceEnabledLlmConnections.find(c => c.slug === defaultLlmConnectionSlug)
+      ?? workspaceEnabledLlmConnections[0]
+      ?? null
+  }, [workspaceEnabledLlmConnections, workspaceDefaultLlmConnection, defaultLlmConnectionSlug])
 
   const [menuNewChatTrigger, setMenuNewChatTrigger] = useState(0)
   // Permission requests per session (queue to handle multiple concurrent requests)
@@ -657,6 +668,7 @@ export default function App() {
     if (windowWorkspaceId) {
       const settings = await window.electronAPI.getWorkspaceSettings(windowWorkspaceId)
       setWorkspaceDefaultLlmConnection(settings?.defaultLlmConnection)
+      setWorkspaceEnabledLlmConnectionSlugs(settings?.enabledLlmConnectionSlugs)
     }
   }, [resolveDefaultConnectionSlug, windowWorkspaceId])
 
@@ -1867,8 +1879,10 @@ export default function App() {
     workspaces,
     activeWorkspaceId: windowWorkspaceId,
     activeWorkspaceSlug: windowWorkspaceSlug,
-    llmConnections,
+    llmConnections: workspaceEnabledLlmConnections,
+    allLlmConnections: llmConnections,
     workspaceDefaultLlmConnection,
+    workspaceEnabledLlmConnectionSlugs,
     refreshLlmConnections,
     pendingPermissions,
     pendingCredentials,
@@ -1917,7 +1931,9 @@ export default function App() {
     windowWorkspaceId,
     windowWorkspaceSlug,
     llmConnections,
+    workspaceEnabledLlmConnections,
     workspaceDefaultLlmConnection,
+    workspaceEnabledLlmConnectionSlugs,
     refreshLlmConnections,
     pendingPermissions,
     pendingCredentials,

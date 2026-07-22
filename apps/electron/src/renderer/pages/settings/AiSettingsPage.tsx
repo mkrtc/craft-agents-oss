@@ -461,10 +461,28 @@ function WorkspaceOverrideCard({ workspace, llmConnections, onSettingsChange }: 
     }
   }, [workspace.id, onSettingsChange, settings])
 
+  const enabledLlmConnectionSlugs = settings?.enabledLlmConnectionSlugs
+  const enabledSlugSet = useMemo(
+    () => enabledLlmConnectionSlugs ? new Set(enabledLlmConnectionSlugs) : null,
+    [enabledLlmConnectionSlugs],
+  )
+  const workspaceEnabledConnections = useMemo(
+    () => enabledSlugSet ? llmConnections.filter(conn => enabledSlugSet.has(conn.slug)) : llmConnections,
+    [enabledSlugSet, llmConnections],
+  )
+
   const handleConnectionChange = useCallback((slug: string) => {
     // 'global' means use app default (clear workspace override)
     updateSetting('defaultLlmConnection', slug === 'global' ? undefined : slug)
   }, [updateSetting])
+
+  const handleConnectionEnabledChange = useCallback((slug: string, enabled: boolean) => {
+    const current = settings?.enabledLlmConnectionSlugs ?? llmConnections.map(conn => conn.slug)
+    const next = enabled
+      ? Array.from(new Set([...current, slug]))
+      : current.filter(existing => existing !== slug)
+    updateSetting('enabledLlmConnectionSlugs', next)
+  }, [llmConnections, settings?.enabledLlmConnectionSlugs, updateSetting])
 
   const handleModelChange = useCallback((model: string) => {
     // 'global' means use app default (clear workspace override)
@@ -480,7 +498,8 @@ function WorkspaceOverrideCard({ workspace, llmConnections, onSettingsChange }: 
   const hasOverrides = settings && (
     settings.defaultLlmConnection ||
     settings.model ||
-    settings.thinkingLevel
+    settings.thinkingLevel ||
+    settings.enabledLlmConnectionSlugs
   )
 
   // Get display values
@@ -491,8 +510,8 @@ function WorkspaceOverrideCard({ workspace, llmConnections, onSettingsChange }: 
   // Derive workspace's effective connection (override or default)
   const workspaceEffectiveConnection = useMemo(() => {
     const connSlug = settings?.defaultLlmConnection
-    return connSlug ? llmConnections.find(c => c.slug === connSlug) : llmConnections.find(c => c.isDefault)
-  }, [settings?.defaultLlmConnection, llmConnections])
+    return connSlug ? workspaceEnabledConnections.find(c => c.slug === connSlug) : workspaceEnabledConnections.find(c => c.isDefault) ?? workspaceEnabledConnections[0]
+  }, [settings?.defaultLlmConnection, workspaceEnabledConnections])
 
   // Get summary text for collapsed state
   const getSummary = () => {
@@ -508,6 +527,9 @@ function WorkspaceOverrideCard({ workspace, llmConnections, onSettingsChange }: 
     if (settings?.thinkingLevel) {
       const level = THINKING_LEVELS.find(l => l.id === settings.thinkingLevel)
       parts.push(level ? t(level.nameKey) : settings.thinkingLevel)
+    }
+    if (settings?.enabledLlmConnectionSlugs) {
+      parts.push(t('settings.ai.enabledAccountsSummary', { count: settings.enabledLlmConnectionSlugs.length, total: llmConnections.length }))
     }
     return parts.join(' · ')
   }
@@ -565,7 +587,7 @@ function WorkspaceOverrideCard({ workspace, llmConnections, onSettingsChange }: 
                 onValueChange={handleConnectionChange}
                 options={[
                   { value: 'global', label: t("settings.ai.useDefault"), description: t("settings.ai.inheritFromApp") },
-                  ...llmConnections.map((conn) => ({
+                  ...workspaceEnabledConnections.map((conn) => ({
                     value: conn.slug,
                     label: conn.name,
                     description: conn.providerType === 'anthropic' ? 'Anthropic' :
@@ -586,6 +608,21 @@ function WorkspaceOverrideCard({ workspace, llmConnections, onSettingsChange }: 
                   })),
                 ]}
               />
+              <div className="border-t border-border/50 mt-2 pt-2">
+                <div className="px-4 py-2">
+                  <div className="text-sm font-medium">{t('settings.ai.workspaceEnabledAccounts')}</div>
+                  <div className="text-xs text-muted-foreground mt-1">{t('settings.ai.workspaceEnabledAccountsDesc')}</div>
+                </div>
+                {llmConnections.map((conn) => (
+                  <SettingsToggle
+                    key={conn.slug}
+                    label={conn.name}
+                    description={conn.providerType === 'anthropic' ? 'Anthropic' : conn.providerType === 'pi' ? 'Craft Agents Backend' : conn.providerType || 'Unknown'}
+                    checked={!enabledSlugSet || enabledSlugSet.has(conn.slug)}
+                    onCheckedChange={(checked) => handleConnectionEnabledChange(conn.slug, checked)}
+                  />
+                ))}
+              </div>
               <SettingsMenuSelectRow
                 label={t("settings.ai.thinking")}
                 description={t("settings.ai.thinkingDesc")}
@@ -625,7 +662,8 @@ function getApiKeyMethodForConnection(conn: LlmConnectionWithStatus): ApiSetupMe
 
 export default function AiSettingsPage() {
   const { t } = useTranslation()
-  const { llmConnections, refreshLlmConnections, activeWorkspaceId } = useAppShellContext()
+  const { llmConnections: workspaceLlmConnections, allLlmConnections, refreshLlmConnections, activeWorkspaceId } = useAppShellContext()
+  const llmConnections = allLlmConnections ?? workspaceLlmConnections
 
   // API Setup overlay state
   const [showApiSetup, setShowApiSetup] = useState(false)

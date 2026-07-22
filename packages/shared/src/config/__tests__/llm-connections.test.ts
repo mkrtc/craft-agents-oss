@@ -10,6 +10,7 @@ import {
   fromBedrockNativeId,
   normalizeBedrockModelId,
   deriveBedrockRegionPrefix,
+  resolveEffectiveConnectionSlug,
 } from '../llm-connections'
 import { ANTHROPIC_MODELS, getModelDisplayName, getModelContextWindow, getModelShortName, isClaudeModel } from '../models'
 
@@ -44,6 +45,26 @@ describe('getDefaultModelsForConnection', () => {
     expect(models.length).toBeGreaterThan(0)
   })
 
+})
+
+// ============================================================
+// getDefaultModelForConnection
+// ============================================================
+
+describe('resolveEffectiveConnectionSlug', () => {
+  const connections = [
+    { slug: 'codex-1', isDefault: true },
+    { slug: 'codex-2', isDefault: false },
+  ]
+
+  it('uses workspace default only when it is in the available connection list', () => {
+    expect(resolveEffectiveConnectionSlug(undefined, 'codex-2', connections)).toBe('codex-2')
+    expect(resolveEffectiveConnectionSlug(undefined, 'disabled-codex', connections)).toBe('codex-1')
+  })
+
+  it('preserves explicit session connection even when unavailable so UI can surface it', () => {
+    expect(resolveEffectiveConnectionSlug('disabled-codex', undefined, connections)).toBe('disabled-codex')
+  })
 })
 
 // ============================================================

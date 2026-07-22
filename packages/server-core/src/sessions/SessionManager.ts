@@ -3686,11 +3686,17 @@ export class SessionManager implements ISessionManager {
     // Resolve model tier hints ('fast' / 'default') to actual model IDs.
     // EditPopover uses tier hints instead of hardcoded Anthropic model names
     // so the right model is selected regardless of the active LLM provider.
+    const workspaceResolvedConnectionSlug = this.resolveWorkspaceLlmConnectionSlug(
+      workspaceRootPath,
+      options?.llmConnection,
+      wsConfig?.defaults?.defaultLlmConnection,
+    )
+
     let resolvedModelOption = options?.model || defaultModel
     if (resolvedModelOption === 'fast' || resolvedModelOption === 'default') {
       const tierConnection = resolveSessionConnection(
-        options?.llmConnection,
-        wsConfig?.defaults?.defaultLlmConnection,
+        workspaceResolvedConnectionSlug,
+        undefined,
       )
       if (tierConnection) {
         resolvedModelOption = resolvedModelOption === 'fast'
@@ -3703,8 +3709,8 @@ export class SessionManager implements ISessionManager {
 
     // Resolve backend target early for branching policy checks.
     const targetBackendContext = resolveBackendContext({
-      sessionConnectionSlug: options?.llmConnection,
-      workspaceDefaultConnectionSlug: wsConfig?.defaults?.defaultLlmConnection,
+      sessionConnectionSlug: workspaceResolvedConnectionSlug,
+      workspaceDefaultConnectionSlug: undefined,
       managedModel: resolvedModelOption,
     })
     const targetProviderType = targetBackendContext.connection?.providerType
@@ -3807,9 +3813,14 @@ export class SessionManager implements ISessionManager {
         throw new Error(`Invalid branch request: source session ${options.branchFromSessionId} not found`)
       }
 
+      const sourceResolvedConnectionSlug = this.resolveWorkspaceLlmConnectionSlug(
+        workspaceRootPath,
+        sourceManaged?.llmConnection || sourceSession.llmConnection,
+        wsConfig?.defaults?.defaultLlmConnection,
+      )
       const sourceBackendContext = resolveBackendContext({
-        sessionConnectionSlug: sourceManaged?.llmConnection || sourceSession.llmConnection,
-        workspaceDefaultConnectionSlug: wsConfig?.defaults?.defaultLlmConnection,
+        sessionConnectionSlug: sourceResolvedConnectionSlug,
+        workspaceDefaultConnectionSlug: undefined,
         managedModel: sourceManaged?.model || sourceSession.model,
       })
       const sourceProviderType = sourceBackendContext.connection?.providerType
@@ -4704,9 +4715,14 @@ export class SessionManager implements ISessionManager {
     if (!managed.agent) return
 
     const workspaceConfig = loadWorkspaceConfig(managed.workspace.rootPath)
+    const resolvedConnectionSlug = this.resolveWorkspaceLlmConnectionSlug(
+      managed.workspace.rootPath,
+      managed.llmConnection,
+      workspaceConfig?.defaults?.defaultLlmConnection,
+    )
     const backendContext = resolveBackendContext({
-      sessionConnectionSlug: managed.llmConnection,
-      workspaceDefaultConnectionSlug: workspaceConfig?.defaults?.defaultLlmConnection,
+      sessionConnectionSlug: resolvedConnectionSlug,
+      workspaceDefaultConnectionSlug: undefined,
       managedModel: managed.model,
     })
     const connection = backendContext.connection
@@ -4853,9 +4869,14 @@ export class SessionManager implements ISessionManager {
     await this.tryRefreshAgentRuntime(managed, 'send-path refresh', true)
 
     const workspaceConfig = loadWorkspaceConfig(managed.workspace.rootPath)
+    const resolvedConnectionSlug = this.resolveWorkspaceLlmConnectionSlug(
+      managed.workspace.rootPath,
+      managed.llmConnection,
+      workspaceConfig?.defaults?.defaultLlmConnection,
+    )
     const backendContext = resolveBackendContext({
-      sessionConnectionSlug: managed.llmConnection,
-      workspaceDefaultConnectionSlug: workspaceConfig?.defaults?.defaultLlmConnection,
+      sessionConnectionSlug: resolvedConnectionSlug,
+      workspaceDefaultConnectionSlug: undefined,
       managedModel: managed.model,
     })
     const connection = backendContext.connection
@@ -6378,13 +6399,13 @@ export class SessionManager implements ISessionManager {
       throw new Error('Cannot change connection after session has started')
     }
 
-    // Validate connection exists
-    const { getLlmConnection } = await import('@craft-agent/shared/config/storage')
+    // Validate connection exists and is enabled for this workspace
     const connection = getLlmConnection(connectionSlug)
     if (!connection) {
       sessionLog.warn(`setSessionConnection: connection "${connectionSlug}" not found`)
       throw new Error(`LLM connection "${connectionSlug}" not found`)
     }
+    this.assertLlmConnectionEnabledForWorkspace(managed.workspace.rootPath, connectionSlug)
 
     managed.llmConnection = connectionSlug
     // Persist in-memory state directly to avoid race with pending queue writes
@@ -7087,6 +7108,7 @@ export class SessionManager implements ISessionManager {
       managed.model = model ?? undefined
       // Also update connection if provided and not already locked
       if (connection && !managed.connectionLocked) {
+        this.assertLlmConnectionEnabledForWorkspace(managed.workspace.rootPath, connection)
         managed.llmConnection = connection
       }
       // Persist to disk (include connection if it was updated)
@@ -7099,7 +7121,8 @@ export class SessionManager implements ISessionManager {
       if (managed.agent) {
         // Fallback chain: session model > workspace default > connection default
         const wsConfig = loadWorkspaceConfig(managed.workspace.rootPath)
-        const sessionConn = resolveSessionConnection(managed.llmConnection, wsConfig?.defaults?.defaultLlmConnection)
+        const resolvedConnectionSlug = this.resolveWorkspaceLlmConnectionSlug(managed.workspace.rootPath, managed.llmConnection, wsConfig?.defaults?.defaultLlmConnection)
+        const sessionConn = resolveSessionConnection(resolvedConnectionSlug, undefined)
         const effectiveModel = model ?? wsConfig?.defaults?.model ?? sessionConn?.defaultModel!
         sessionLog.info(`[updateSessionModel] Calling agent.setModel(${effectiveModel}) [agent exists=${!!managed.agent}, connectionLocked=${managed.connectionLocked}]`)
         managed.agent.setModel(effectiveModel)
@@ -7953,9 +7976,15 @@ export class SessionManager implements ISessionManager {
         managed.wasInterrupted = false
       }
 
+      const messageWorkspaceConfig = loadWorkspaceConfig(workspaceRootPath)
+      const messageConnectionSlug = this.resolveWorkspaceLlmConnectionSlug(
+        workspaceRootPath,
+        managed.llmConnection,
+        messageWorkspaceConfig?.defaults?.defaultLlmConnection,
+      )
       const messageBackendContext = resolveBackendContext({
-        sessionConnectionSlug: managed.llmConnection,
-        workspaceDefaultConnectionSlug: loadWorkspaceConfig(workspaceRootPath)?.defaults?.defaultLlmConnection,
+        sessionConnectionSlug: messageConnectionSlug,
+        workspaceDefaultConnectionSlug: undefined,
         managedModel: managed.model,
       })
       const modelInputAttachments = filterAttachmentsForModelInput(
@@ -9249,7 +9278,10 @@ export class SessionManager implements ISessionManager {
     managed.taskSlug = taskSlug
     managed.taskDraft = false
     if (reconcile?.projectId !== undefined) managed.projectId = reconcile.projectId
-    if (connectionChanged) managed.llmConnection = reconcile!.llmConnection
+    if (connectionChanged) {
+      this.assertLlmConnectionEnabledForWorkspace(managed.workspace.rootPath, reconcile!.llmConnection!)
+      managed.llmConnection = reconcile!.llmConnection
+    }
     const renamed = Boolean(reconcile?.name && reconcile.name !== managed.name)
     if (renamed) managed.name = reconcile!.name!
 
@@ -9336,7 +9368,10 @@ export class SessionManager implements ISessionManager {
     managed.taskSlug = taskSlug
     managed.taskDraft = false
     if (reconcile?.projectId !== undefined) managed.projectId = reconcile.projectId
-    if (connectionChanged) managed.llmConnection = reconcile!.llmConnection
+    if (connectionChanged) {
+      this.assertLlmConnectionEnabledForWorkspace(managed.workspace.rootPath, reconcile!.llmConnection!)
+      managed.llmConnection = reconcile!.llmConnection
+    }
     const renamed = Boolean(reconcile?.name && reconcile.name !== managed.name)
     if (renamed) managed.name = reconcile!.name!
 
@@ -10455,6 +10490,8 @@ export class SessionManager implements ISessionManager {
       const connection = resolveSessionConnection(llmConnection)
       if (!connection) {
         sessionLog.warn(`[Automations] llmConnection "${llmConnection}" not found, using default`)
+      } else {
+        this.assertLlmConnectionEnabledForWorkspace(workspaceRootPath, llmConnection)
       }
     }
 
@@ -10586,9 +10623,11 @@ export class SessionManager implements ISessionManager {
     const workspaceRootPath = managed.workspace.rootPath
     const wsConfig = loadWorkspaceConfig(workspaceRootPath)
     const defaultModel = wsConfig?.defaults?.model
+    const summaryConnectionSlug = routing?.connectionSlug
+      ?? this.resolveWorkspaceLlmConnectionSlug(workspaceRootPath, managed.llmConnection, wsConfig?.defaults?.defaultLlmConnection)
     const backendContext = resolveBackendContext({
-      sessionConnectionSlug: routing?.connectionSlug ?? managed.llmConnection,
-      workspaceDefaultConnectionSlug: routing ? undefined : wsConfig?.defaults?.defaultLlmConnection,
+      sessionConnectionSlug: summaryConnectionSlug,
+      workspaceDefaultConnectionSlug: undefined,
       managedModel: routing?.model ?? managed.model ?? defaultModel,
     })
 
@@ -10645,11 +10684,17 @@ export class SessionManager implements ISessionManager {
     if (!connectionSlug) throw new Error('A destination connection is required')
     const targetConnection = getLlmConnection(connectionSlug)
     if (!targetConnection) throw new Error(`LLM connection "${connectionSlug}" was not found`)
+    this.assertLlmConnectionEnabledForWorkspace(managed.workspace.rootPath, connectionSlug)
 
     const workspaceConfig = loadWorkspaceConfig(managed.workspace.rootPath)
+    const sourceConnectionSlug = this.resolveWorkspaceLlmConnectionSlug(
+      managed.workspace.rootPath,
+      managed.llmConnection,
+      workspaceConfig?.defaults?.defaultLlmConnection,
+    )
     const sourceContext = resolveBackendContext({
-      sessionConnectionSlug: managed.llmConnection,
-      workspaceDefaultConnectionSlug: workspaceConfig?.defaults?.defaultLlmConnection,
+      sessionConnectionSlug: sourceConnectionSlug,
+      workspaceDefaultConnectionSlug: undefined,
       managedModel: managed.model ?? workspaceConfig?.defaults?.model,
     })
     const sourceProcessingGeneration = managed.processingGeneration
@@ -11015,16 +11060,64 @@ export class SessionManager implements ISessionManager {
    * Find an LLM connection on this server that matches the given provider type.
    * Checks workspace default first, then falls back to any matching connection.
    */
+  private getWorkspaceEnabledLlmConnectionSet(workspaceRootPath: string): Set<string> | undefined {
+    const enabled = loadWorkspaceConfig(workspaceRootPath)?.defaults?.enabledLlmConnectionSlugs
+    return Array.isArray(enabled) ? new Set(enabled) : undefined
+  }
+
+  private assertLlmConnectionEnabledForWorkspace(workspaceRootPath: string, connectionSlug: string): void {
+    const enabled = this.getWorkspaceEnabledLlmConnectionSet(workspaceRootPath)
+    if (enabled && !enabled.has(connectionSlug)) {
+      throw new Error(`LLM connection "${connectionSlug}" is disabled for this workspace`)
+    }
+  }
+
+  private resolveWorkspaceLlmConnectionSlug(
+    workspaceRootPath: string,
+    requestedSlug?: string,
+    workspaceDefaultSlug?: string,
+  ): string | undefined {
+    const enabled = this.getWorkspaceEnabledLlmConnectionSet(workspaceRootPath)
+
+    if (!enabled) {
+      return resolveSessionConnection(requestedSlug, workspaceDefaultSlug)?.slug
+    }
+
+    if (requestedSlug) {
+      const connection = getLlmConnection(requestedSlug)
+      if (!connection) throw new Error(`LLM connection "${requestedSlug}" not found`)
+      if (!enabled.has(requestedSlug)) {
+        throw new Error(`LLM connection "${requestedSlug}" is disabled for this workspace`)
+      }
+      return requestedSlug
+    }
+
+    if (workspaceDefaultSlug && enabled.has(workspaceDefaultSlug) && getLlmConnection(workspaceDefaultSlug)) {
+      return workspaceDefaultSlug
+    }
+
+    const globalDefault = getDefaultLlmConnection()
+    if (globalDefault && enabled.has(globalDefault) && getLlmConnection(globalDefault)) {
+      return globalDefault
+    }
+
+    const firstEnabled = getLlmConnections().find(connection => enabled.has(connection.slug))
+    if (firstEnabled) return firstEnabled.slug
+
+    throw new Error('No LLM connections are enabled for this workspace')
+  }
+
   private findCompatibleLlmConnection(workspaceRootPath: string, providerType: string): string | null {
     const wsConfig = loadWorkspaceConfig(workspaceRootPath)
-    const defaultSlug = wsConfig?.defaults?.defaultLlmConnection
+    const defaultSlug = this.resolveWorkspaceLlmConnectionSlug(workspaceRootPath, undefined, wsConfig?.defaults?.defaultLlmConnection)
     if (defaultSlug) {
       const conn = getLlmConnection(defaultSlug)
       if (conn?.providerType === providerType) return defaultSlug
     }
-    // Fall back: any connection with matching provider type
+    // Fall back: any enabled connection with matching provider type
+    const enabled = this.getWorkspaceEnabledLlmConnectionSet(workspaceRootPath)
     const connections = getLlmConnections()
-    const match = connections.find(c => c.providerType === providerType)
+    const match = connections.find(c => c.providerType === providerType && (!enabled || enabled.has(c.slug)))
     return match?.slug ?? null
   }
 

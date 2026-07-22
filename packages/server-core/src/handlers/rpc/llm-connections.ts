@@ -573,6 +573,10 @@ export function registerLlmConnectionsHandlers(server: RpcServer, deps: HandlerD
         return { success: false, error: 'Failed to load workspace config' }
       }
 
+      if (slug && Array.isArray(config.defaults?.enabledLlmConnectionSlugs) && !config.defaults.enabledLlmConnectionSlugs.includes(slug)) {
+        return { success: false, error: 'Connection is disabled for this workspace' }
+      }
+
       // Update workspace defaults
       config.defaults = config.defaults || {}
       if (slug) {

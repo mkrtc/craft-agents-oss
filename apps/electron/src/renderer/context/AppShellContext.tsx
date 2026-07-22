@@ -39,10 +39,14 @@ export interface AppShellContextType {
   activeWorkspaceId: string | null
   /** Workspace slug for SDK skill qualification (derived from workspace path) */
   activeWorkspaceSlug: string | null
-  /** All LLM connections with authentication status */
+  /** Workspace-enabled LLM connections with authentication status (used by chat/model selectors). */
   llmConnections: LlmConnectionWithStatus[]
+  /** All configured LLM connections with authentication status (used by Settings to re-enable accounts). */
+  allLlmConnections?: LlmConnectionWithStatus[]
   /** Default LLM connection slug for the current workspace */
   workspaceDefaultLlmConnection?: string
+  /** Workspace allowlist for LLM connections. Undefined means all configured connections are enabled. */
+  workspaceEnabledLlmConnectionSlugs?: string[]
   /** Refresh LLM connections from config */
   refreshLlmConnections: () => Promise<void>
   pendingPermissions: Map<string, PermissionRequest[]>
