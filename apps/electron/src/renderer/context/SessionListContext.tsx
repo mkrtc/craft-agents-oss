@@ -29,6 +29,8 @@ export interface SessionListContextValue {
   onSetCustomGroupId?: (sessionId: string, customGroupId: string | null) => void
   /** Open group creation flow for a session and assign it after creation. */
   onCreateSessionGroup?: (sessionId: string) => void
+  /** Open group edit flow for an existing custom group. */
+  onEditSessionGroup?: (groupId: string) => void
   onSelectSessionById: (sessionId: string) => void
   onOpenInNewWindow: (item: SessionMeta) => void
   onSendToWorkspace?: (sessionIds: string[]) => void

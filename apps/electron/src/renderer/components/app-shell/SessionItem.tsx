@@ -160,6 +160,7 @@ export function SessionItem({
           sessionGroups={ctx.sessionGroups}
           onSetCustomGroupId={ctx.onSetCustomGroupId ? (gid) => ctx.onSetCustomGroupId!(item.id, gid) : undefined}
           onCreateSessionGroup={ctx.onCreateSessionGroup ? () => ctx.onCreateSessionGroup!(item.id) : undefined}
+          onEditSessionGroup={ctx.onEditSessionGroup}
         />
       }
       contextMenuContent={ctx.isMultiSelectActive && isInMultiSelect ? <BatchSessionMenu /> : undefined}

@@ -978,7 +978,19 @@ function AppShellContent({
     await window.electronAPI.saveSessionGroups(activeWorkspaceId, ordered)
   }, [activeWorkspaceId])
 
-  const [createGroupDialog, setCreateGroupDialog] = React.useState<{ open: boolean; sessionId: string | null; name: string; icon: string; color: string }>({ open: false, sessionId: null, name: '', icon: '', color: '#8b5cf6' })
+  type SessionGroupDialogState = {
+    open: boolean
+    mode: 'create' | 'edit'
+    sessionId: string | null
+    groupId: string | null
+    name: string
+    icon: string
+    color: string
+  }
+
+  const defaultSessionGroupDialog = React.useMemo<SessionGroupDialogState>(() => ({ open: false, mode: 'create', sessionId: null, groupId: null, name: '', icon: '', color: '#8b5cf6' }), [])
+  const [sessionGroupDialog, setSessionGroupDialog] = React.useState<SessionGroupDialogState>(defaultSessionGroupDialog)
+  const closeSessionGroupDialog = useCallback(() => setSessionGroupDialog(defaultSessionGroupDialog), [defaultSessionGroupDialog])
 
   const createSessionGroup = useCallback(async (input: { name: string; icon?: string; color?: string }): Promise<SessionGroupConfig | null> => {
     const trimmed = input.name.trim()
@@ -1003,9 +1015,41 @@ function AppShellContent({
     return group
   }, [activeWorkspaceId, saveSessionGroups, sessionGroups])
 
+  const updateSessionGroup = useCallback(async (groupId: string, input: { name: string; icon?: string; color?: string }) => {
+    const trimmed = input.name.trim()
+    if (!trimmed || !activeWorkspaceId) return false
+
+    const nextGroups = sessionGroups.map(group => group.id === groupId
+      ? {
+          ...group,
+          name: trimmed,
+          icon: input.icon?.trim() || undefined,
+          color: input.color,
+        }
+      : group,
+    )
+    if (nextGroups === sessionGroups || !sessionGroups.some(group => group.id === groupId)) return false
+    await saveSessionGroups(nextGroups)
+    return true
+  }, [activeWorkspaceId, saveSessionGroups, sessionGroups])
+
   const handleCreateSessionGroup = useCallback((sessionId: string) => {
-    setCreateGroupDialog({ open: true, sessionId, name: '', icon: '', color: '#8b5cf6' })
-  }, [])
+    setSessionGroupDialog({ ...defaultSessionGroupDialog, open: true, sessionId })
+  }, [defaultSessionGroupDialog])
+
+  const handleEditSessionGroup = useCallback((groupId: string) => {
+    const group = sessionGroups.find(item => item.id === groupId)
+    if (!group) return
+    setSessionGroupDialog({
+      open: true,
+      mode: 'edit',
+      sessionId: null,
+      groupId: group.id,
+      name: group.name,
+      icon: group.icon ?? '',
+      color: group.color ?? '#8b5cf6',
+    })
+  }, [sessionGroups])
 
   const handleSessionCustomGroupChange = useCallback(async (sessionId: string, customGroupId: string | null) => {
     try {
@@ -1016,26 +1060,38 @@ function AppShellContent({
     }
   }, [t])
 
-  const confirmCreateSessionGroup = useCallback(async () => {
-    const sessionId = createGroupDialog.sessionId
-    const name = createGroupDialog.name.trim()
-    if (!sessionId || !name) return
+  const confirmSessionGroupDialog = useCallback(async () => {
+    const name = sessionGroupDialog.name.trim()
+    if (!name) return
 
     try {
+      if (sessionGroupDialog.mode === 'edit') {
+        if (!sessionGroupDialog.groupId) return
+        const updated = await updateSessionGroup(sessionGroupDialog.groupId, {
+          name,
+          icon: sessionGroupDialog.icon,
+          color: sessionGroupDialog.color,
+        })
+        if (updated) closeSessionGroupDialog()
+        return
+      }
+
+      const sessionId = sessionGroupDialog.sessionId
+      if (!sessionId) return
       const group = await createSessionGroup({
         name,
-        icon: createGroupDialog.icon,
-        color: createGroupDialog.color,
+        icon: sessionGroupDialog.icon,
+        color: sessionGroupDialog.color,
       })
       if (group) {
         await window.electronAPI.sessionCommand(sessionId, { type: 'setCustomGroupId', customGroupId: group.id })
-        setCreateGroupDialog({ open: false, sessionId: null, name: '', icon: '', color: '#8b5cf6' })
+        closeSessionGroupDialog()
       }
     } catch (err) {
-      console.error('[AppShell] Failed to create session group:', err)
+      console.error('[AppShell] Failed to save session group:', err)
       toast.error(t('toast.failedToUpdateSessionGroup'))
     }
-  }, [createGroupDialog.color, createGroupDialog.icon, createGroupDialog.name, createGroupDialog.sessionId, createSessionGroup, t])
+  }, [closeSessionGroupDialog, createSessionGroup, sessionGroupDialog.color, sessionGroupDialog.groupId, sessionGroupDialog.icon, sessionGroupDialog.mode, sessionGroupDialog.name, sessionGroupDialog.sessionId, t, updateSessionGroup])
 
   // Whether local MCP servers are enabled (affects stdio source status)
   const [localMcpEnabled, setLocalMcpEnabled] = React.useState(true)
@@ -3682,6 +3738,7 @@ function AppShellContent({
                   sessionGroups={sessionGroups}
                   onSetCustomGroupId={handleSessionCustomGroupChange}
                   onCreateSessionGroup={handleCreateSessionGroup}
+                  onEditSessionGroup={handleEditSessionGroup}
                   groupingMode={chatGroupingMode}
                   workspaceId={activeWorkspaceId ?? undefined}
                   statusFilter={listFilter}
@@ -3956,51 +4013,51 @@ function AppShellContent({
         </DialogContent>
       </Dialog>
 
-      {/* Send to Workspace dialog (driven by sendToWorkspaceAtom) */}
-      <Dialog open={createGroupDialog.open} onOpenChange={(open) => setCreateGroupDialog(prev => ({ ...prev, open }))}>
+      {/* Custom chat group create/edit dialog */}
+      <Dialog open={sessionGroupDialog.open} onOpenChange={(open) => { if (!open) closeSessionGroupDialog() }}>
         <DialogContent className="sm:max-w-[420px]">
           <DialogHeader>
-            <DialogTitle>{t('sessionGroup.createTitle')}</DialogTitle>
-            <DialogDescription>{t('sessionGroup.createDescription')}</DialogDescription>
+            <DialogTitle>{t(sessionGroupDialog.mode === 'edit' ? 'sessionGroup.editTitle' : 'sessionGroup.createTitle')}</DialogTitle>
+            <DialogDescription>{t(sessionGroupDialog.mode === 'edit' ? 'sessionGroup.editDescription' : 'sessionGroup.createDescription')}</DialogDescription>
           </DialogHeader>
           <div className="space-y-3">
             <Input
               autoFocus
-              value={createGroupDialog.name}
+              value={sessionGroupDialog.name}
               placeholder={t('sessionGroup.namePlaceholder')}
-              onChange={(event) => setCreateGroupDialog(prev => ({ ...prev, name: event.target.value }))}
+              onChange={(event) => setSessionGroupDialog(prev => ({ ...prev, name: event.target.value }))}
               onKeyDown={(event) => {
                 if (event.key === 'Enter') {
                   event.preventDefault()
-                  void confirmCreateSessionGroup()
+                  void confirmSessionGroupDialog()
                 }
               }}
             />
             <div className="grid grid-cols-[88px_1fr] gap-3">
               <Input
-                value={createGroupDialog.icon}
+                value={sessionGroupDialog.icon}
                 placeholder={t('sessionGroup.iconPlaceholder')}
                 maxLength={4}
-                onChange={(event) => setCreateGroupDialog(prev => ({ ...prev, icon: event.target.value }))}
+                onChange={(event) => setSessionGroupDialog(prev => ({ ...prev, icon: event.target.value }))}
               />
               <div className="flex items-center gap-2 rounded-md border border-foreground/15 px-3 py-1">
                 <input
                   type="color"
-                  value={createGroupDialog.color}
+                  value={sessionGroupDialog.color}
                   aria-label={t('sessionGroup.colorLabel')}
                   className="h-7 w-8 cursor-pointer rounded border-0 bg-transparent p-0"
-                  onChange={(event) => setCreateGroupDialog(prev => ({ ...prev, color: event.target.value }))}
+                  onChange={(event) => setSessionGroupDialog(prev => ({ ...prev, color: event.target.value }))}
                 />
                 <span className="text-sm text-muted-foreground">{t('sessionGroup.colorLabel')}</span>
               </div>
             </div>
           </div>
           <DialogFooter>
-            <Button variant="ghost" onClick={() => setCreateGroupDialog({ open: false, sessionId: null, name: '', icon: '', color: '#8b5cf6' })}>
+            <Button variant="ghost" onClick={closeSessionGroupDialog}>
               {t('common.cancel')}
             </Button>
-            <Button onClick={() => void confirmCreateSessionGroup()} disabled={!createGroupDialog.name.trim()}>
-              {t('common.create')}
+            <Button onClick={() => void confirmSessionGroupDialog()} disabled={!sessionGroupDialog.name.trim()}>
+              {t(sessionGroupDialog.mode === 'edit' ? 'common.save' : 'common.create')}
             </Button>
           </DialogFooter>
         </DialogContent>

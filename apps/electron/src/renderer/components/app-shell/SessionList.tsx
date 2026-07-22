@@ -88,6 +88,8 @@ interface SessionListProps {
   onSetCustomGroupId?: (sessionId: string, customGroupId: string | null) => void
   /** Open group creation flow for a session and assign it after creation */
   onCreateSessionGroup?: (sessionId: string) => void
+  /** Open group edit flow for an existing custom group */
+  onEditSessionGroup?: (groupId: string) => void
   /** How to group sessions: 'date' (default) or 'status' */
   groupingMode?: ChatGroupingMode
   /** Workspace ID for content search (optional - if not provided, content search is disabled) */
@@ -153,6 +155,7 @@ export function SessionList({
   sessionGroups = [],
   onSetCustomGroupId,
   onCreateSessionGroup,
+  onEditSessionGroup,
   groupingMode = 'date',
   workspaceId,
   statusFilter,
@@ -879,6 +882,7 @@ export function SessionList({
     sessionGroups,
     onSetCustomGroupId,
     onCreateSessionGroup,
+    onEditSessionGroup,
     onSelectSessionById: handleSelectSessionById,
     onOpenInNewWindow: handleOpenInNewWindow,
     onSendToWorkspace: (ids: string[]) => setSendToWorkspace(ids),
@@ -900,7 +904,7 @@ export function SessionList({
     onArchive, handleArchiveWithToast, onUnarchive, handleUnarchiveWithToast,
     onPin, handlePinWithToast, onUnpin, handleUnpinWithToast,
     onMarkUnread, handleDeleteWithToast, onLabelsChange,
-    projects, onSetProjectId, sessionGroups, onSetCustomGroupId, onCreateSessionGroup,
+    projects, onSetProjectId, sessionGroups, onSetCustomGroupId, onCreateSessionGroup, onEditSessionGroup,
     handleSelectSessionById, handleOpenInNewWindow, setSendToWorkspace, handleFocusZone, handleKeyDown,
     sessionStatuses, flatLabels, labels, resolvedSearchQuery,
     focusedSessionId, selectionStore.state.selected, isMultiSelectActive,

@@ -6,6 +6,8 @@ This file accumulates release notes for the next unreleased version. PRs that ad
 
 ## Improvements
 
+- **Editable chat groups** — Custom chat groups can now be renamed and recolored from the session group menu without changing which chats belong to them.
+
 ## Bug Fixes
 
 ## Breaking Changes

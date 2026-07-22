@@ -75,6 +75,8 @@ export interface SessionMenuProps {
   onSetCustomGroupId?: (customGroupId: string | null) => void
   /** Open group creation flow and assign this session after creation. */
   onCreateSessionGroup?: () => void
+  /** Open group edit flow for an existing custom group. */
+  onEditSessionGroup?: (groupId: string) => void
   /** Callbacks */
   onRename: () => void
   onFlag: () => void
@@ -117,6 +119,7 @@ export function SessionMenu({
   sessionGroups = [],
   onSetCustomGroupId,
   onCreateSessionGroup,
+  onEditSessionGroup,
 }: SessionMenuProps) {
   const { t } = useTranslation()
 
@@ -275,6 +278,25 @@ export function SessionMenu({
                 </MenuItem>
               )
             })}
+            {sessionGroups.length > 0 && onEditSessionGroup && (
+              <>
+                <Separator />
+                <Sub>
+                  <SubTrigger className="pr-2">
+                    <Pencil className="h-3.5 w-3.5" />
+                    <span className="flex-1">{t("sessionMenu.editCustomGroup")}</span>
+                  </SubTrigger>
+                  <SubContent>
+                    {sessionGroups.map((group) => (
+                      <MenuItem key={group.id} onClick={() => onEditSessionGroup(group.id)}>
+                        {group.color && <span className="h-2 w-2 rounded-full ml-[5px] mr-[5px]" style={{ backgroundColor: group.color }} />}
+                        <span className={group.color ? 'flex-1' : 'flex-1 ml-[18px]'}>{group.icon ? `${group.icon} ` : ''}{group.name}</span>
+                      </MenuItem>
+                    ))}
+                  </SubContent>
+                </Sub>
+              </>
+            )}
             {onCreateSessionGroup && (
               <>
                 <Separator />
