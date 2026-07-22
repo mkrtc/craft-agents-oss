@@ -9,6 +9,8 @@ This file accumulates release notes for the next unreleased version. PRs that ad
 
 ## Improvements
 
+- Improved recovery for chats whose AI account was removed or disabled for the workspace: the model picker now offers a clear continue-with-enabled-account action.
+
 ## Bug Fixes
 
 ## Breaking Changes

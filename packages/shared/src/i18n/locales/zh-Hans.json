@@ -142,7 +142,7 @@
   "chat.clickToOpen": "点击打开 {{name}}",
   "chat.connectionDefault": "此连接的默认值",
   "chat.connectionUnavailable": "连接不可用",
-  "chat.connectionUnavailableDescription": "此会话使用的连接已被删除。请创建一个新会话以继续。",
+  "chat.connectionUnavailableDescription": "此会话使用的连接已被移除，或已在此工作区中禁用。请使用已启用的账号在新聊天中继续。",
   "chat.context": "上下文",
   "chat.contextBadge": "上下文标记",
   "chat.continueWith.action": "使用其他提供商继续…",

@@ -142,7 +142,7 @@
   "chat.clickToOpen": "Clic para abrir {{name}}",
   "chat.connectionDefault": "Predeterminado de esta conexión",
   "chat.connectionUnavailable": "Conexión no disponible",
-  "chat.connectionUnavailableDescription": "La conexión usada por esta sesión se ha eliminado. Crea una nueva sesión para continuar.",
+  "chat.connectionUnavailableDescription": "La conexión usada por esta sesión se eliminó o está deshabilitada para este espacio de trabajo. Continúa en un chat nuevo con una cuenta habilitada.",
   "chat.context": "Contexto",
   "chat.contextBadge": "Insignia de contexto",
   "chat.continueWith.action": "Continuar con otro proveedor…",

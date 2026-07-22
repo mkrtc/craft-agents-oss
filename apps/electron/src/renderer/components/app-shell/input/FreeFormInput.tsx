@@ -2040,6 +2040,19 @@ export function FreeFormInput({
                   <div className="text-xs text-muted-foreground">
                     {t('chat.connectionUnavailableDescription')}
                   </div>
+                  {!isEmptySession && hasContinuationTarget && onRequestContinue && (
+                    <button
+                      type="button"
+                      className="mt-4 inline-flex items-center gap-2 rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:bg-primary/90 transition-colors"
+                      onClick={() => {
+                        setModelDropdownOpen(false)
+                        onRequestContinue()
+                      }}
+                    >
+                      <ArrowRightLeft className="h-3.5 w-3.5" />
+                      {t('chat.continueWith.action')}
+                    </button>
+                  )}
                 </div>
               ) : pickerMode === 'locked-single' && connectionDefaultModel ? (
                 (() => {
@@ -2294,7 +2307,7 @@ export function FreeFormInput({
                 </>
               )}
 
-              {!isEmptySession && hasContinuationTarget && onRequestContinue && (
+              {pickerMode !== 'unavailable' && !isEmptySession && hasContinuationTarget && onRequestContinue && (
                 <>
                   <StyledDropdownMenuSeparator className="my-1" />
                   <StyledDropdownMenuItem

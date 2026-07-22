@@ -142,7 +142,7 @@
   "chat.clickToOpen": "Kattints a(z) {{name}} megnyitásához",
   "chat.connectionDefault": "A kapcsolat alapértelmezése",
   "chat.connectionUnavailable": "Kapcsolat nem érhető el",
-  "chat.connectionUnavailableDescription": "A munkamenet által használt kapcsolatot eltávolították. A folytatáshoz hozz létre egy új munkamenetet.",
+  "chat.connectionUnavailableDescription": "A munkamenet által használt kapcsolatot eltávolították, vagy letiltották ebben a munkaterületben. Folytasd egy új csevegésben egy engedélyezett fiókkal.",
   "chat.context": "Kontextus",
   "chat.contextBadge": "Kontextus jelvény",
   "chat.continueWith.action": "Folytatás másik szolgáltatóval…",
