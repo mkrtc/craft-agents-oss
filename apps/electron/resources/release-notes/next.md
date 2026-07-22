@@ -13,4 +13,6 @@ This file accumulates release notes for the next unreleased version. PRs that ad
 
 ## Bug Fixes
 
+- Fixed Continue With recovery when the source chat's AI account has been disabled for the workspace; the selected destination account is now the only account that must be enabled.
+
 ## Breaking Changes

@@ -10687,14 +10687,13 @@ export class SessionManager implements ISessionManager {
     this.assertLlmConnectionEnabledForWorkspace(managed.workspace.rootPath, connectionSlug)
 
     const workspaceConfig = loadWorkspaceConfig(managed.workspace.rootPath)
-    const sourceConnectionSlug = this.resolveWorkspaceLlmConnectionSlug(
-      managed.workspace.rootPath,
-      managed.llmConnection,
-      workspaceConfig?.defaults?.defaultLlmConnection,
-    )
+    // The source chat may be locked to a connection that is now disabled for this
+    // workspace. That is exactly the recovery case Continue With is meant to solve:
+    // only the destination connection must be workspace-enabled. Resolve the source
+    // historically so we can preserve metadata/fallbacks without blocking handoff.
     const sourceContext = resolveBackendContext({
-      sessionConnectionSlug: sourceConnectionSlug,
-      workspaceDefaultConnectionSlug: undefined,
+      sessionConnectionSlug: managed.llmConnection,
+      workspaceDefaultConnectionSlug: workspaceConfig?.defaults?.defaultLlmConnection,
       managedModel: managed.model ?? workspaceConfig?.defaults?.model,
     })
     const sourceProcessingGeneration = managed.processingGeneration
