@@ -87,6 +87,9 @@ export function SessionItem({
     : undefined
   const projectColor = boundProject?.color
   const projectName = boundProject?.name
+  const customGroup = item.customGroupId
+    ? ctx.sessionGroups?.find(group => group.id === item.customGroupId)
+    : undefined
 
   const handleClick = (e: React.MouseEvent) => {
     ctx.onFocusZone()
@@ -220,8 +223,21 @@ export function SessionItem({
       titleClassName={cn("text-[13px]", item.isAsyncOperationOngoing && "animate-shimmer-text")}
       subtitle={previewText}
       titleSuffix={
-        (projectName || hasMessagingBinding) ? (
+        (customGroup || projectName || hasMessagingBinding) ? (
           <div className="flex items-center gap-1">
+            {customGroup && (
+              <EntityListBadge
+                variant="text"
+                className="max-w-[112px] truncate"
+                style={customGroup.color ? {
+                  backgroundColor: `color-mix(in srgb, ${customGroup.color} 11%, transparent)`,
+                  color: `color-mix(in srgb, ${customGroup.color} 74%, var(--foreground))`,
+                } : undefined}
+                colorClass={customGroup.color ? undefined : "bg-foreground/5 text-foreground/50"}
+              >
+                {customGroup.icon ? `${customGroup.icon} ` : ''}{customGroup.name}
+              </EntityListBadge>
+            )}
             {projectName && (
               <span
                 className="text-[11px] text-foreground/40 whitespace-nowrap truncate max-w-[120px] opacity-0 group-hover:opacity-100 transition-opacity duration-150"

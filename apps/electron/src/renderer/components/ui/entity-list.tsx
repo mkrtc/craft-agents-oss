@@ -81,13 +81,33 @@ export interface EntityListProps<T> {
 // ============================================================================
 
 function SectionHeader({ label, accentColor }: { label: string; accentColor?: string }) {
+  if (accentColor) {
+    return (
+      <div className="px-2.5 py-1.5">
+        <div
+          className="relative rounded-[8px] border px-2.5 py-1.5 shadow-tinted"
+          style={{
+            backgroundColor: `color-mix(in srgb, ${accentColor} 9%, transparent)`,
+            borderColor: `color-mix(in srgb, ${accentColor} 22%, transparent)`,
+            '--shadow-color': accentColor,
+          } as React.CSSProperties}
+        >
+          <span className="absolute left-0 top-1.5 bottom-1.5 w-0.5 rounded-full" style={{ backgroundColor: accentColor }} />
+          <span
+            className="text-[11px] font-semibold uppercase tracking-wider inline-flex items-center gap-1.5"
+            style={{ color: `color-mix(in srgb, ${accentColor} 78%, var(--foreground))` }}
+          >
+            <span className="h-1.5 w-1.5 rounded-full" style={{ backgroundColor: accentColor }} />
+            {label}
+          </span>
+        </div>
+      </div>
+    )
+  }
+
   return (
     <div className="px-4 py-2">
-      <span
-        className="text-[11px] font-medium text-muted-foreground uppercase tracking-wider inline-flex items-center gap-1.5"
-        style={accentColor ? { color: `color-mix(in srgb, ${accentColor} 72%, var(--muted-foreground))` } : undefined}
-      >
-        {accentColor && <span className="h-1.5 w-1.5 rounded-full" style={{ backgroundColor: accentColor }} />}
+      <span className="text-[11px] font-medium text-muted-foreground uppercase tracking-wider inline-flex items-center gap-1.5">
         {label}
       </span>
     </div>
@@ -117,18 +137,35 @@ function CollapsibleGroupHeader({
       <ContextMenuTrigger asChild>
         <button
           onClick={onToggle}
-          className="w-full py-2 px-4 flex items-center gap-1.5 cursor-pointer group/header relative"
+          className={cn(
+            "w-full flex items-center gap-1.5 cursor-pointer group/header relative",
+            accentColor ? "py-1.5 px-2.5" : "py-2 px-4"
+          )}
         >
-          <div className="absolute inset-y-0.5 left-2 right-2 rounded-[6px] group-hover/header:bg-foreground/2 transition-colors pointer-events-none" />
+          <div
+            className={cn(
+              "absolute transition-colors pointer-events-none",
+              accentColor ? "inset-y-1 left-2 right-2 rounded-[8px] border" : "inset-y-0.5 left-2 right-2 rounded-[6px] group-hover/header:bg-foreground/2"
+            )}
+            style={accentColor ? {
+              backgroundColor: `color-mix(in srgb, ${accentColor} 8%, transparent)`,
+              borderColor: `color-mix(in srgb, ${accentColor} 20%, transparent)`,
+            } : undefined}
+          />
+          {accentColor && <span className="absolute left-2 top-2 bottom-2 w-0.5 rounded-full" style={{ backgroundColor: accentColor }} />}
           <ChevronRight
             className={cn(
               "h-3 w-3 text-muted-foreground/60 transition-transform relative",
+              accentColor && "ml-1.5",
               !isCollapsed && "rotate-90"
             )}
           />
           <span
-            className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground relative inline-flex items-center gap-1.5"
-            style={accentColor ? { color: `color-mix(in srgb, ${accentColor} 72%, var(--muted-foreground))` } : undefined}
+            className={cn(
+              "text-[11px] uppercase tracking-wider relative inline-flex items-center gap-1.5",
+              accentColor ? "font-semibold" : "font-medium text-muted-foreground"
+            )}
+            style={accentColor ? { color: `color-mix(in srgb, ${accentColor} 78%, var(--foreground))` } : undefined}
           >
             {accentColor && <span className="h-1.5 w-1.5 rounded-full" style={{ backgroundColor: accentColor }} />}
             <span>{label}{isCollapsed && <> · <span className="text-muted-foreground/50">{itemCount}</span></>}</span>
