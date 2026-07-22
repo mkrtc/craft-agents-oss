@@ -8,6 +8,4 @@ This file accumulates release notes for the next unreleased version. PRs that ad
 
 ## Bug Fixes
 
-- Fixed ChatGPT/Codex OAuth connections being reported as unauthenticated after login, and improved OAuth/setup error formatting so structured failures no longer appear as `[object Object]`.
-
 ## Breaking Changes
