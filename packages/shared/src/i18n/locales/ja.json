@@ -909,6 +909,8 @@
   "session.pinnedGroup": "Pinned ({{count}})",
   "session.readGroup": "既読 ({{count}})",
   "session.renameSession": "セッションの名前を変更",
+  "session.reorderGroup": "グループを並べ替え",
+  "session.reorderSession": "セッションを並べ替え",
   "session.results": "{{count}}件の結果",
   "session.searchUnavailable": "検索は利用できません",
   "session.selectConversation": "会話を選択して開始",

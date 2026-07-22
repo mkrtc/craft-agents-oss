@@ -941,6 +941,8 @@ interface ManagedSession {
   projectId?: string
   // Workspace-scoped custom chat group binding (undefined = ungrouped)
   customGroupId?: string
+  // Manual order within the workspace-scoped custom chat group (undefined = recency fallback)
+  customGroupOrder?: number
   // Parent session id — when set, this session is a subtask of the parent (undefined = top-level task)
   parentSessionId?: string
   // Kanban board column id ('todo' | 'in-progress' | 'done'); independent of sessionStatus
@@ -2099,10 +2101,14 @@ export class SessionManager implements ISessionManager {
       changed = true
     }
 
-    // Custom chat group binding
-    if (managed.customGroupId !== header.customGroupId) {
+    // Custom chat group binding and manual order
+    if (managed.customGroupId !== header.customGroupId || managed.customGroupOrder !== header.customGroupOrder) {
       managed.customGroupId = header.customGroupId
-      this.sendEvent({ type: 'session_metadata_changed', sessionId, changes: { customGroupId: managed.customGroupId } }, managed.workspace.id)
+      managed.customGroupOrder = header.customGroupOrder
+      this.sendEvent(
+        { type: 'session_metadata_changed', sessionId, changes: { customGroupId: managed.customGroupId, customGroupOrder: managed.customGroupOrder } },
+        managed.workspace.id,
+      )
       changed = true
     }
 
@@ -3969,6 +3975,11 @@ export class SessionManager implements ISessionManager {
       pinnedAt: options?.pinnedAt,
       projectId: resolvedProjectId,
       customGroupId: options?.customGroupId,
+      customGroupOrder: options?.customGroupId
+        ? (typeof options.customGroupOrder === 'number' && Number.isFinite(options.customGroupOrder)
+            ? options.customGroupOrder
+            : this.resolveNextCustomGroupOrder(workspaceRootPath, options.customGroupId))
+        : undefined,
       parentSessionId: options?.parentSessionId,
       taskSlug: options?.taskSlug,
       taskRunId: options?.taskRunId,
@@ -9127,19 +9138,86 @@ export class SessionManager implements ISessionManager {
     }
   }
 
-  /** Bind or unbind a session to/from a workspace custom chat group. */
-  async setSessionCustomGroupId(sessionId: string, customGroupId: string | null): Promise<void> {
-    const managed = this.sessions.get(sessionId)
-    if (managed) {
-      managed.customGroupId = customGroupId ?? undefined
-      this.setMetadataWriteGuard(managed)
-
-      this.persistSession(managed)
-      await this.flushSession(managed.id)
-      this.sendEvent({ type: 'session_metadata_changed', sessionId, changes: { customGroupId: managed.customGroupId } }, managed.workspace.id)
-      const watcher = this.configWatchers.get(managed.workspace.rootPath)
-      watcher?.notifyFileChange(`sessions/${sessionId}/session.jsonl`)
+  private resolveNextCustomGroupOrder(workspaceRootPath: string, customGroupId: string, excludeSessionId?: string): number {
+    let maxOrder = -1
+    for (const session of this.sessions.values()) {
+      if (session.id === excludeSessionId) continue
+      if (session.workspace.rootPath !== workspaceRootPath) continue
+      if (session.customGroupId !== customGroupId) continue
+      if (typeof session.customGroupOrder === 'number' && Number.isFinite(session.customGroupOrder)) {
+        maxOrder = Math.max(maxOrder, session.customGroupOrder)
+      }
     }
+    return maxOrder + 1
+  }
+
+  /** Bind or unbind a session to/from a workspace custom chat group. */
+  async setSessionCustomGroupId(sessionId: string, customGroupId: string | null, customGroupOrder?: number | null): Promise<void> {
+    const managed = this.sessions.get(sessionId)
+    if (!managed) return
+
+    const nextGroupId = customGroupId ?? undefined
+    let nextOrder: number | undefined
+    if (nextGroupId) {
+      if (typeof customGroupOrder === 'number' && Number.isFinite(customGroupOrder)) {
+        nextOrder = customGroupOrder
+      } else if (managed.customGroupId === nextGroupId && typeof managed.customGroupOrder === 'number') {
+        nextOrder = managed.customGroupOrder
+      } else {
+        nextOrder = this.resolveNextCustomGroupOrder(managed.workspace.rootPath, nextGroupId, sessionId)
+      }
+    }
+
+    if (managed.customGroupId === nextGroupId && managed.customGroupOrder === nextOrder) return
+
+    managed.customGroupId = nextGroupId
+    managed.customGroupOrder = nextOrder
+    this.setMetadataWriteGuard(managed)
+
+    this.persistSession(managed)
+    await this.flushSession(managed.id)
+    this.sendEvent({ type: 'session_metadata_changed', sessionId, changes: { customGroupId: managed.customGroupId, customGroupOrder: managed.customGroupOrder } }, managed.workspace.id)
+    const watcher = this.configWatchers.get(managed.workspace.rootPath)
+    watcher?.notifyFileChange(`sessions/${sessionId}/session.jsonl`)
+  }
+
+  /** Reorder sessions within a single custom chat group. */
+  async reorderCustomGroupSessions(anchorSessionId: string, customGroupId: string, sessionIds: string[]): Promise<void> {
+    if (sessionIds.length === 0) return
+
+    const anchor = this.sessions.get(anchorSessionId)
+    if (!anchor) throw new Error(`Session ${anchorSessionId} not found`)
+    const workspaceRootPath = anchor.workspace.rootPath
+    const seen = new Set<string>()
+    const targets: ManagedSession[] = []
+
+    for (const id of sessionIds) {
+      if (seen.has(id)) throw new Error(`Duplicate session id in reorder request: ${id}`)
+      seen.add(id)
+      const managed = this.sessions.get(id)
+      if (!managed) throw new Error(`Session ${id} not found`)
+      if (managed.workspace.rootPath !== workspaceRootPath) {
+        throw new Error(`Cannot reorder sessions across workspaces: ${id}`)
+      }
+      if (managed.customGroupId !== customGroupId) {
+        throw new Error(`Session ${id} does not belong to custom group ${customGroupId}`)
+      }
+      targets.push(managed)
+    }
+
+    if (targets.length <= 1) return
+
+    const watcher = this.configWatchers.get(workspaceRootPath)
+    for (const [index, managed] of targets.entries()) {
+      if (managed.customGroupOrder === index) continue
+      managed.customGroupOrder = index
+      this.setMetadataWriteGuard(managed)
+      this.persistSession(managed)
+      this.sendEvent({ type: 'session_metadata_changed', sessionId: managed.id, changes: { customGroupId: managed.customGroupId, customGroupOrder: managed.customGroupOrder } }, managed.workspace.id)
+      watcher?.notifyFileChange(`sessions/${managed.id}/session.jsonl`)
+    }
+
+    await Promise.all(targets.map(managed => this.flushSession(managed.id)))
   }
 
   /**

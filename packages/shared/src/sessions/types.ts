@@ -61,6 +61,7 @@ export const SESSION_PERSISTENT_FIELDS = [
   'projectId',
   // User-defined chat group binding (workspace-scoped)
   'customGroupId',
+  'customGroupOrder',
   // Kanban: task/subtask hierarchy + board column
   'parentSessionId',
   'kanbanColumn',
@@ -228,6 +229,8 @@ export interface SessionConfig {
   projectId?: string;
   /** Workspace-scoped custom chat group id (undefined = ungrouped). */
   customGroupId?: string;
+  /** Manual order within the workspace-scoped custom chat group (undefined = recency fallback). */
+  customGroupOrder?: number;
   /** Parent session id — when set, this session is a subtask of the parent (undefined = top-level task). */
   parentSessionId?: string;
   /** Kanban board column id ('todo' | 'in-progress' | 'done'). Drag-to-move target; independent of sessionStatus. */
@@ -352,6 +355,8 @@ export interface SessionHeader {
   projectId?: string;
   /** Workspace-scoped custom chat group id (undefined = ungrouped). */
   customGroupId?: string;
+  /** Manual order within the workspace-scoped custom chat group (undefined = recency fallback). */
+  customGroupOrder?: number;
   /** Parent session id — when set, this session is a subtask of the parent (undefined = top-level task). */
   parentSessionId?: string;
   /** Kanban board column id ('todo' | 'in-progress' | 'done'). Drag-to-move target; independent of sessionStatus. */
@@ -460,6 +465,8 @@ export interface SessionMetadata {
   projectId?: string;
   /** Workspace-scoped custom chat group id (undefined = ungrouped). */
   customGroupId?: string;
+  /** Manual order within the workspace-scoped custom chat group (undefined = recency fallback). */
+  customGroupOrder?: number;
   /** Parent session id — when set, this session is a subtask of the parent (undefined = top-level task). */
   parentSessionId?: string;
   /** Kanban board column id ('todo' | 'in-progress' | 'done'). Drag-to-move target; independent of sessionStatus. */

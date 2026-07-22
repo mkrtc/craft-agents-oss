@@ -90,6 +90,10 @@ interface SessionListProps {
   onCreateSessionGroup?: (sessionId: string) => void
   /** Open group edit flow for an existing custom group */
   onEditSessionGroup?: (groupId: string) => void
+  /** Persist a new manual order for custom chat groups. */
+  onReorderSessionGroups?: (groups: SessionGroupConfig[]) => void
+  /** Persist a new manual order for sessions within one custom chat group. */
+  onReorderSessionsInCustomGroup?: (customGroupId: string, sessionIds: string[]) => void
   /** How to group sessions: 'date' (default) or 'status' */
   groupingMode?: ChatGroupingMode
   /** Workspace ID for content search (optional - if not provided, content search is disabled) */
@@ -156,6 +160,8 @@ export function SessionList({
   onSetCustomGroupId,
   onCreateSessionGroup,
   onEditSessionGroup,
+  onReorderSessionGroups,
+  onReorderSessionsInCustomGroup,
   groupingMode = 'date',
   workspaceId,
   statusFilter,
@@ -283,6 +289,19 @@ export function SessionList({
     scrollViewportRef,
   })
 
+
+  const sortRowsByCustomGroupOrder = useCallback((groupRows: SessionListRow[]) => {
+    groupRows.sort((a, b) => {
+      const aOrder = a.item.customGroupOrder
+      const bOrder = b.item.customGroupOrder
+      const aHasOrder = typeof aOrder === 'number' && Number.isFinite(aOrder)
+      const bHasOrder = typeof bOrder === 'number' && Number.isFinite(bOrder)
+      if (aHasOrder && bHasOrder && aOrder !== bOrder) return aOrder - bOrder
+      if (aHasOrder !== bHasOrder) return aHasOrder ? -1 : 1
+      return (b.item.lastMessageAt || 0) - (a.item.lastMessageAt || 0)
+    })
+  }, [])
+
   const rowData = useMemo(() => {
     if (isSearchMode) {
       const matchingRows: SessionListRow[] = matchingFilterItems.map(item => ({ item }))
@@ -331,16 +350,7 @@ export function SessionList({
 
 
     const groupById = new Map(sessionGroups.map(group => [group.id, group]))
-    const customGroupOrder = new Map(sessionGroups.map((group, index) => [group.id, index]))
-    const customGroupSortTime = new Map<string, number>()
-    for (const item of items) {
-      if (item.isPinned === true || !item.customGroupId || !groupById.has(item.customGroupId)) continue
-      customGroupSortTime.set(
-        item.customGroupId,
-        Math.max(customGroupSortTime.get(item.customGroupId) ?? 0, item.lastMessageAt ?? 0),
-      )
-    }
-
+    const customGroupOrder = new Map(sessionGroups.map(group => [group.id, group.order]))
     const splitCustomRows = (sourceRows: SessionListRow[]) => {
       const customRowsByKey = new Map<string, { rows: SessionListRow[]; group: SessionGroupConfig }>()
       const regularRows: SessionListRow[] = []
@@ -360,7 +370,7 @@ export function SessionList({
     }
 
     const buildCustomSectionGroups = (customRowsByKey: Map<string, { rows: SessionListRow[]; group: SessionGroupConfig }>) => {
-      const groups: Array<EntityListGroup<SessionListRow> & { sortTime: number; sortOrder: number }> = []
+      const groups: Array<EntityListGroup<SessionListRow> & { sortOrder: number }> = []
       for (const meta of collapsedGroupsMeta) {
         if (!meta.key.startsWith('custom-') || customRowsByKey.has(meta.key)) continue
         const groupId = meta.key.replace('custom-', '')
@@ -369,7 +379,7 @@ export function SessionList({
       }
 
       for (const [key, entry] of customRowsByKey) {
-        entry.rows.sort((a, b) => (b.item.lastMessageAt || 0) - (a.item.lastMessageAt || 0))
+        sortRowsByCustomGroupOrder(entry.rows)
         const collapsedMeta = collapsedGroupsMeta.find(m => m.key === key)
         const count = collapsedMeta?.count ?? entry.rows.length
         groups.push({
@@ -381,13 +391,13 @@ export function SessionList({
           // Keep custom group order stable across collapse/expand. Collapsed
           // groups have no visible rows in flatItems, so derive recency from the
           // full current item set instead of using a placeholder timestamp.
-          sortTime: customGroupSortTime.get(entry.group.id) ?? entry.rows[0]?.item.lastMessageAt ?? 0,
           sortOrder: customGroupOrder.get(entry.group.id) ?? 999,
+          sortable: sessionGroups.length > 1,
           ...(collapsedMeta ? { collapsedCount: collapsedMeta.count } : {}),
         })
       }
 
-      groups.sort((a, b) => b.sortTime - a.sortTime || a.sortOrder - b.sortOrder || a.label.localeCompare(b.label))
+      groups.sort((a, b) => a.sortOrder - b.sortOrder || a.label.localeCompare(b.label))
       return groups
     }
 
@@ -514,13 +524,14 @@ export function SessionList({
         const key = `custom-${group.id}`
         const entry = groupsByKey.get(key)
         if (!entry) continue
-        entry.rows.sort((a, b) => (b.item.lastMessageAt || 0) - (a.item.lastMessageAt || 0))
+        sortRowsByCustomGroupOrder(entry.rows)
         const collapsedMeta = collapsedGroupsMeta.find(m => m.key === key)
         orderedGroups.push({
           key,
           label: `${group.icon ? `${group.icon} ` : ''}${group.name} (${collapsedMeta?.count ?? entry.rows.length})`,
           accentColor: group.color,
           items: entry.rows,
+          sortable: sessionGroups.length > 1,
           collapsible: entry.rows.length > 0 || !!collapsedMeta,
           ...(collapsedMeta ? { collapsedCount: collapsedMeta.count } : {}),
         })
@@ -652,8 +663,7 @@ export function SessionList({
     }))
 
     const orderedGroups = [...customGroups, ...dateGroups]
-      .sort((a, b) => (b.sortTime ?? 0) - (a.sortTime ?? 0))
-      .map(({ sortTime: _sortTime, ...group }) => {
+      .map((group) => {
         const { sortOrder: _sortOrder, ...cleanGroup } = group as EntityListGroup<SessionListRow> & { sortOrder?: number }
         return cleanGroup
       })
@@ -664,9 +674,63 @@ export function SessionList({
     }
 
     return withPinnedGroup(orderedGroups)
-  }, [isSearchMode, matchingFilterItems, otherResultItems, pinnedItems, flatItems, items, groupingMode, sessionStatuses, projects, sessionGroups, collapsedGroupsMeta, t, i18n.resolvedLanguage])
+  }, [isSearchMode, matchingFilterItems, otherResultItems, pinnedItems, flatItems, items, groupingMode, sessionStatuses, projects, sessionGroups, collapsedGroupsMeta, t, i18n.resolvedLanguage, sortRowsByCustomGroupOrder])
 
   const flatRows = rowData.rows
+
+  const customGroupRowIds = useMemo(() => {
+    const map = new Map<string, string[]>()
+    for (const group of rowData.groups) {
+      if (!group.key.startsWith('custom-') || group.key === 'custom-__none__') continue
+      const ids = group.items.map(row => row.item.id)
+      if (ids.length <= 1) continue
+      for (const id of ids) map.set(id, ids)
+    }
+    return map
+  }, [rowData.groups])
+
+  const getGroupDragHandleProps = useCallback((group: EntityListGroup<SessionListRow>): React.HTMLAttributes<HTMLSpanElement> => {
+    const groupId = group.key.startsWith('custom-') ? group.key.replace('custom-', '') : ''
+    return {
+      draggable: true,
+      'aria-label': t('session.reorderGroup'),
+      title: t('session.reorderGroup'),
+      onDragStart: (e) => {
+        if (!groupId || groupId === '__none__') return
+        e.stopPropagation()
+        e.dataTransfer.effectAllowed = 'move'
+        e.dataTransfer.setData('application/x-craft-session-group', groupId)
+        e.dataTransfer.setData('text/plain', groupId)
+      },
+    }
+  }, [t])
+
+  const getGroupDropProps = useCallback((group: EntityListGroup<SessionListRow>): React.HTMLAttributes<HTMLDivElement> => ({
+    onDragOver: (e) => {
+      if (!group.sortable || !e.dataTransfer.types.includes('application/x-craft-session-group')) return
+      e.preventDefault()
+      e.dataTransfer.dropEffect = 'move'
+    },
+    onDrop: (e) => {
+      if (!group.sortable || !onReorderSessionGroups) return
+      const sourceGroupId = e.dataTransfer.getData('application/x-craft-session-group')
+      const targetGroupId = group.key.startsWith('custom-') ? group.key.replace('custom-', '') : ''
+      if (!sourceGroupId || !targetGroupId || sourceGroupId === targetGroupId || targetGroupId === '__none__') return
+      e.preventDefault()
+      e.stopPropagation()
+      const next = [...sessionGroups].sort((a, b) => a.order - b.order || a.name.localeCompare(b.name))
+      const sourceIndex = next.findIndex(item => item.id === sourceGroupId)
+      const targetIndex = next.findIndex(item => item.id === targetGroupId)
+      if (sourceIndex < 0 || targetIndex < 0) return
+      const [moved] = next.splice(sourceIndex, 1)
+      const adjustedTargetIndex = next.findIndex(item => item.id === targetGroupId)
+      if (adjustedTargetIndex < 0) return
+      const rect = e.currentTarget.getBoundingClientRect()
+      const insertAfterTarget = e.clientY > rect.top + rect.height / 2
+      next.splice(adjustedTargetIndex + (insertAfterTarget ? 1 : 0), 0, moved)
+      onReorderSessionGroups(next)
+    },
+  }), [onReorderSessionGroups, sessionGroups])
 
   const collapseAllGroups = useCallback(() => {
     const ordinaryItems = items.filter(item => item.isPinned !== true)
@@ -881,6 +945,7 @@ export function SessionList({
     onSetProjectId,
     sessionGroups,
     onSetCustomGroupId,
+    onReorderSessionsInCustomGroup,
     onCreateSessionGroup,
     onEditSessionGroup,
     onSelectSessionById: handleSelectSessionById,
@@ -904,7 +969,7 @@ export function SessionList({
     onArchive, handleArchiveWithToast, onUnarchive, handleUnarchiveWithToast,
     onPin, handlePinWithToast, onUnpin, handleUnpinWithToast,
     onMarkUnread, handleDeleteWithToast, onLabelsChange,
-    projects, onSetProjectId, sessionGroups, onSetCustomGroupId, onCreateSessionGroup, onEditSessionGroup,
+    projects, onSetProjectId, sessionGroups, onSetCustomGroupId, onReorderSessionsInCustomGroup, onCreateSessionGroup, onEditSessionGroup,
     handleSelectSessionById, handleOpenInNewWindow, setSendToWorkspace, handleFocusZone, handleKeyDown,
     sessionStatuses, flatLabels, labels, resolvedSearchQuery,
     focusedSessionId, selectionStore.state.selected, isMultiSelectActive,
@@ -968,6 +1033,7 @@ export function SessionList({
               onSelect={() => handleSelectSession(row, flatIndex)}
               onToggleSelect={() => handleToggleSelect(row, flatIndex)}
               onRangeSelect={() => handleRangeSelect(flatIndex)}
+              customGroupReorderIds={customGroupRowIds.get(row.item.id)}
             />
           )
         }}
@@ -1031,6 +1097,8 @@ export function SessionList({
         onToggleCollapse={toggleGroupCollapse}
         onCollapseAll={collapseAllGroups}
         onExpandAll={expandAllGroups}
+        getGroupDragHandleProps={getGroupDragHandleProps}
+        getGroupDropProps={getGroupDropProps}
       />
       </SessionListProvider>
 

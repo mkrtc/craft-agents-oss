@@ -1,6 +1,7 @@
 import { formatDistanceToNowStrict } from "date-fns"
+import { useTranslation } from "react-i18next"
 import type { Locale } from "date-fns"
-import { Flag, Pin, ShieldAlert } from "lucide-react"
+import { Flag, GripVertical, Pin, ShieldAlert } from "lucide-react"
 import { useActionLabel } from "@/actions"
 import { cn } from "@/lib/utils"
 import { rendererPerf } from "@/lib/perf"
@@ -44,6 +45,8 @@ export interface SessionItemProps {
   onSelect: () => void
   onToggleSelect?: () => void
   onRangeSelect?: () => void
+  /** Ordered visible ids for this session's custom group, when row reordering is enabled. */
+  customGroupReorderIds?: string[]
 }
 
 export function SessionItem({
@@ -55,7 +58,9 @@ export function SessionItem({
   onSelect,
   onToggleSelect,
   onRangeSelect,
+  customGroupReorderIds,
 }: SessionItemProps) {
+  const { t } = useTranslation()
   const ctx = useSessionListContext()
   const { workspaces, isCompactMode } = useAppShellContext()
   const hasRemoteWorkspaces = workspaces?.some(w => w.remoteServer) ?? false
@@ -87,6 +92,62 @@ export function SessionItem({
     : undefined
   const projectColor = boundProject?.color
   const projectName = boundProject?.name
+
+  const reorderEnabled = !!item.customGroupId && !!customGroupReorderIds && customGroupReorderIds.length > 1 && !!ctx.onReorderSessionsInCustomGroup
+
+  const handleDragStart = (e: React.DragEvent<HTMLSpanElement>) => {
+    if (!reorderEnabled || !item.customGroupId) return
+    e.stopPropagation()
+    e.dataTransfer.effectAllowed = 'move'
+    e.dataTransfer.setData('application/x-craft-session-row', JSON.stringify({ sessionId: item.id, customGroupId: item.customGroupId }))
+    e.dataTransfer.setData('text/plain', item.id)
+  }
+
+  const handleDragOver = (e: React.DragEvent<HTMLDivElement>) => {
+    if (!reorderEnabled) return
+    const raw = e.dataTransfer.types.includes('application/x-craft-session-row')
+    if (!raw) return
+    e.preventDefault()
+    e.dataTransfer.dropEffect = 'move'
+  }
+
+  const handleDrop = (e: React.DragEvent<HTMLDivElement>) => {
+    if (!reorderEnabled || !item.customGroupId || !customGroupReorderIds) return
+    const raw = e.dataTransfer.getData('application/x-craft-session-row')
+    if (!raw) return
+    e.preventDefault()
+    e.stopPropagation()
+    try {
+      const payload = JSON.parse(raw) as { sessionId?: string; customGroupId?: string }
+      if (!payload.sessionId || payload.customGroupId !== item.customGroupId || payload.sessionId === item.id) return
+      const next = customGroupReorderIds.filter(id => id !== payload.sessionId)
+      const targetIndex = next.indexOf(item.id)
+      if (targetIndex === -1) return
+      const rect = e.currentTarget.getBoundingClientRect()
+      const insertAfterTarget = e.clientY > rect.top + rect.height / 2
+      next.splice(targetIndex + (insertAfterTarget ? 1 : 0), 0, payload.sessionId)
+      ctx.onReorderSessionsInCustomGroup?.(item.customGroupId, next)
+    } catch {
+      // Ignore malformed drag payloads from outside the session list.
+    }
+  }
+
+  const dragHandle = reorderEnabled ? (
+    <span
+      draggable
+      aria-label={t('session.reorderSession')}
+      title={t('session.reorderSession')}
+      className="shrink-0 -ml-1 p-0.5 rounded-[5px] cursor-grab active:cursor-grabbing text-muted-foreground/35 hover:text-foreground/70 hover:bg-foreground/7 opacity-0 group-hover:opacity-100 focus:opacity-100"
+      onDragStart={handleDragStart}
+      onClick={(e) => {
+        e.preventDefault()
+        e.stopPropagation()
+      }}
+      onMouseDown={(e) => e.stopPropagation()}
+    >
+      <GripVertical className="h-3 w-3" />
+    </span>
+  ) : undefined
 
   const handleClick = (e: React.MouseEvent) => {
     ctx.onFocusZone()
@@ -120,6 +181,8 @@ export function SessionItem({
     <EntityRow
       className="session-item"
       dataAttributes={{ 'data-session-id': item.id }}
+      rootProps={reorderEnabled ? { onDragOver: handleDragOver, onDrop: handleDrop } : undefined}
+      dragHandle={dragHandle}
       showSeparator={!isFirstInGroup}
       separatorClassName="pl-[38px] pr-4"
       isSelected={isSelected}

@@ -125,6 +125,8 @@ export interface Session {
   projectId?: string
   /** Workspace-scoped custom chat group id (undefined = ungrouped) */
   customGroupId?: string
+  /** Manual order within the workspace-scoped custom chat group (undefined = recency fallback) */
+  customGroupOrder?: number
   /** Parent session id — when set, this session is a subtask of the parent (undefined = top-level task) */
   parentSessionId?: string
   /** Kanban board column id ('todo' | 'in-progress' | 'done'); independent of sessionStatus */
@@ -191,6 +193,8 @@ export interface CreateSessionOptions {
   projectId?: string
   /** Bind the new session to a custom chat group. */
   customGroupId?: string
+  /** Manual order within the custom chat group. */
+  customGroupOrder?: number
   /** Mark the new session as a subtask of this parent session (undefined = top-level task). */
   parentSessionId?: string
   /** Tasks Conductor: slug of the task spec this session belongs to (orchestrator + child nodes). */
@@ -455,7 +459,7 @@ export type SessionEvent =
   | { type: 'name_changed'; sessionId: string; name?: string }
   | { type: 'session_model_changed'; sessionId: string; model: string | null }
   | { type: 'session_status_changed'; sessionId: string; sessionStatus: SessionStatus }
-  | { type: 'session_metadata_changed'; sessionId: string; changes: Partial<Pick<Session, 'taskNodeCount' | 'kanbanColumn' | 'taskDraft' | 'taskSlug' | 'projectId' | 'customGroupId' | 'isPinned' | 'pinnedAt' | 'enabledMemorySpaceRefs' | 'memoryWriteTargetRef' | 'memorySelectionMode'>> }
+  | { type: 'session_metadata_changed'; sessionId: string; changes: Partial<Pick<Session, 'taskNodeCount' | 'kanbanColumn' | 'taskDraft' | 'taskSlug' | 'projectId' | 'customGroupId' | 'customGroupOrder' | 'isPinned' | 'pinnedAt' | 'enabledMemorySpaceRefs' | 'memoryWriteTargetRef' | 'memorySelectionMode'>> }
   | { type: 'session_deleted'; sessionId: string }
   | { type: 'session_created'; sessionId: string }
   | { type: 'session_shared'; sessionId: string; sharedUrl: string }
@@ -524,7 +528,8 @@ export type SessionCommand =
   | { type: 'setSources'; sourceSlugs: string[] }
   | { type: 'setLabels'; labels: string[] }
   | { type: 'setProjectId'; projectId: string | null }
-  | { type: 'setCustomGroupId'; customGroupId: string | null }
+  | { type: 'setCustomGroupId'; customGroupId: string | null; customGroupOrder?: number | null }
+  | { type: 'reorderCustomGroupSessions'; customGroupId: string; sessionIds: string[] }
   | { type: 'setMemorySelection'; enabledMemorySpaceRefs?: MemorySpaceRef[]; memoryWriteTargetRef?: MemorySpaceRef; memorySelectionMode?: MemorySelectionMode }
   | { type: 'setKanbanColumn'; column: string | null }
   | { type: 'showInFinder' }

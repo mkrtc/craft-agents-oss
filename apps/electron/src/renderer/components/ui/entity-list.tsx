@@ -12,7 +12,7 @@
  */
 
 import * as React from 'react'
-import { ChevronRight } from 'lucide-react'
+import { ChevronRight, GripVertical } from 'lucide-react'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import {
   ContextMenu,
@@ -40,6 +40,8 @@ export interface EntityListGroup<T> {
   collapsedCount?: number
   /** Optional accent color used by rich group headers (e.g. custom chat groups). */
   accentColor?: string
+  /** Whether the group should render a dedicated reorder drag handle. */
+  sortable?: boolean
 }
 
 export interface EntityListProps<T> {
@@ -74,15 +76,46 @@ export interface EntityListProps<T> {
   onCollapseAll?: () => void
   /** Expand all collapsible groups */
   onExpandAll?: () => void
+  /** Reorder drag handle props for a sortable group header. */
+  getGroupDragHandleProps?: (group: EntityListGroup<T>) => React.HTMLAttributes<HTMLSpanElement>
+  /** Drag/drop target props for a sortable group container. */
+  getGroupDropProps?: (group: EntityListGroup<T>) => React.HTMLAttributes<HTMLDivElement>
 }
 
 // ============================================================================
 // Section Header
 // ============================================================================
 
-function SectionHeader({ label, accentColor }: { label: string; accentColor?: string }) {
+function GroupDragHandle<T>({ group, getGroupDragHandleProps }: { group: EntityListGroup<T>; getGroupDragHandleProps?: (group: EntityListGroup<T>) => React.HTMLAttributes<HTMLSpanElement> }) {
+  if (!group.sortable || !getGroupDragHandleProps) return null
+  const props = getGroupDragHandleProps(group)
   return (
-    <div className={cn(accentColor ? "px-3 py-2" : "px-4 py-2")}>
+    <span
+      {...props}
+      className={cn(
+        "relative p-0.5 rounded-[5px] cursor-grab active:cursor-grabbing text-muted-foreground/45 hover:text-foreground/70 hover:bg-foreground/7",
+        props.className,
+      )}
+      onClick={(e) => {
+        e.preventDefault()
+        e.stopPropagation()
+        props.onClick?.(e)
+      }}
+      onMouseDown={(e) => {
+        e.stopPropagation()
+        props.onMouseDown?.(e)
+      }}
+    >
+      <GripVertical className="h-3 w-3" />
+    </span>
+  )
+}
+
+function SectionHeader<T>({ group, getGroupDragHandleProps }: { group: EntityListGroup<T>; getGroupDragHandleProps?: (group: EntityListGroup<T>) => React.HTMLAttributes<HTMLDivElement> }) {
+  const { label, accentColor } = group
+  return (
+    <div className={cn("flex items-center gap-1.5", accentColor ? "px-3 py-2" : "px-4 py-2")}>
+      <GroupDragHandle group={group} getGroupDragHandleProps={getGroupDragHandleProps} />
       <span
         className={cn(
           "text-[11px] uppercase tracking-wider inline-flex items-center gap-1.5",
@@ -106,6 +139,7 @@ function CollapsibleGroupHeader({
   onCollapseAll,
   onExpandAll,
   accentColor,
+  dragHandle,
 }: {
   label: string
   isCollapsed: boolean
@@ -114,6 +148,7 @@ function CollapsibleGroupHeader({
   onCollapseAll?: () => void
   onExpandAll?: () => void
   accentColor?: string
+  dragHandle?: React.ReactNode
 }) {
   return (
     <ContextMenu modal>
@@ -126,6 +161,7 @@ function CollapsibleGroupHeader({
           )}
         >
           <div className="absolute inset-y-0.5 left-2 right-2 rounded-[6px] group-hover/header:bg-foreground/2 transition-colors pointer-events-none" />
+          {dragHandle}
           <ChevronRight
             className={cn(
               "h-3 w-3 text-muted-foreground/60 transition-transform relative",
@@ -181,6 +217,8 @@ export function EntityList<T>({
   onToggleCollapse,
   onCollapseAll,
   onExpandAll,
+  getGroupDragHandleProps,
+  getGroupDropProps,
 }: EntityListProps<T>) {
   // Determine if we have content
   const hasGroups = groups && groups.length > 0
@@ -224,6 +262,7 @@ export function EntityList<T>({
                         backgroundColor: `color-mix(in srgb, ${group.accentColor} 7%, transparent)`,
                         borderColor: `color-mix(in srgb, ${group.accentColor} 16%, transparent)`,
                       } : undefined}
+                      {...getGroupDropProps?.(group)}
                     >
                       {hasAccent && (
                         <span
@@ -237,12 +276,13 @@ export function EntityList<T>({
                           isCollapsed={!!isCollapsed}
                           itemCount={isCollapsed ? (group.collapsedCount ?? 0) : group.items.length}
                           accentColor={group.accentColor}
+                          dragHandle={<GroupDragHandle group={group} getGroupDragHandleProps={getGroupDragHandleProps} />}
                           onToggle={() => onToggleCollapse(group.key)}
                           onCollapseAll={onCollapseAll}
                           onExpandAll={onExpandAll}
                         />
                       ) : (
-                        <SectionHeader label={group.label} accentColor={group.accentColor} />
+                        <SectionHeader group={group} getGroupDragHandleProps={getGroupDragHandleProps} />
                       )}
                       {group.items.map((item, indexInGroup) =>
                         <React.Fragment key={getKey(item)}>

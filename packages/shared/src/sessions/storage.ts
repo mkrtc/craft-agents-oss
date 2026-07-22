@@ -60,7 +60,7 @@ function attachLoadedBaseline(session: StoredSession, header: SessionHeader): vo
 
 const RECONCILED_METADATA_FIELDS = [
   'name', 'labels', 'isFlagged', 'isPinned', 'pinnedAt', 'sessionStatus',
-  'permissionMode', 'hasUnread', 'lastReadMessageId', 'projectId', 'customGroupId', 'kanbanColumn',
+  'permissionMode', 'hasUnread', 'lastReadMessageId', 'projectId', 'customGroupId', 'customGroupOrder', 'kanbanColumn',
   'enabledMemorySpaceRefs', 'memoryWriteTargetRef', 'memorySelectionMode',
 ] as const;
 
@@ -223,6 +223,7 @@ export async function createSession(
     pinnedAt?: number;
     projectId?: string;
     customGroupId?: string;
+    customGroupOrder?: number;
     parentSessionId?: string;
     taskSlug?: string;
     taskRunId?: string;
@@ -265,6 +266,7 @@ export async function createSession(
     pinnedAt: options?.pinnedAt,
     projectId: options?.projectId,
     customGroupId: options?.customGroupId,
+    customGroupOrder: options?.customGroupOrder,
     parentSessionId: options?.parentSessionId,
     taskSlug: options?.taskSlug,
     taskRunId: options?.taskRunId,

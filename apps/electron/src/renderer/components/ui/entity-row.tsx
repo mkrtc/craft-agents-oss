@@ -44,6 +44,8 @@ import { cn } from '@/lib/utils'
 const SUPPRESS_ACTIVATION_MS = 300
 
 export interface EntityRowProps {
+  /** Dedicated drag/reorder handle rendered before the row icon. */
+  dragHandle?: React.ReactNode
   /** Left icon area — rendered in-flow as a flex child before the content column.
    *  Consumers can pass multiple icons (e.g. via a fragment) for a horizontal icon group. */
   icon?: React.ReactNode
@@ -113,6 +115,8 @@ export interface EntityRowProps {
   buttonProps?: Record<string, unknown>
   /** Data attributes on the outer wrapper div */
   dataAttributes?: Record<string, string | undefined>
+  /** Additional props for the outer wrapper div (e.g. drag/drop handlers). */
+  rootProps?: React.HTMLAttributes<HTMLDivElement>
   /** Outer wrapper className */
   className?: string
   /** Separator padding class (default: 'pl-12 pr-4') */
@@ -120,6 +124,7 @@ export interface EntityRowProps {
 }
 
 export function EntityRow({
+  dragHandle,
   icon,
   title,
   titleClassName,
@@ -143,6 +148,7 @@ export function EntityRow({
   compactMenu,
   buttonProps,
   dataAttributes,
+  rootProps,
   className,
   separatorClassName = 'pl-12 pr-4',
 }: EntityRowProps) {
@@ -298,6 +304,7 @@ export function EntityRow({
           {/* Title */}
           {titleTrailing ? (
             <div className="flex items-center gap-[10px] w-full min-w-0">
+              {dragHandle}
               {icon && (
                 <div className="shrink-0 flex items-center gap-[10px] [&>*]:w-3 [&>*]:h-3">
                   {icon}
@@ -358,6 +365,7 @@ export function EntityRow({
             </div>
           ) : (
             <div className="flex items-center gap-[10px] w-full pr-6 min-w-0">
+              {dragHandle}
               {icon && (
                 <div className="shrink-0 flex items-center gap-[10px] [&>*]:w-3 [&>*]:h-3">
                   {icon}
@@ -475,7 +483,8 @@ export function EntityRow({
 
   return (
     <div
-      className={className}
+      {...rootProps}
+      className={cn(className, rootProps?.className)}
       data-selected={isSelected || undefined}
       {...dataAttributes}
     >

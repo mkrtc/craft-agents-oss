@@ -909,6 +909,8 @@
   "session.pinnedGroup": "Pinned ({{count}})",
   "session.readGroup": "Olvasott ({{count}})",
   "session.renameSession": "Munkamenet átnevezése",
+  "session.reorderGroup": "Csoport átrendezése",
+  "session.reorderSession": "Munkamenet átrendezése",
   "session.results": "{{count}} találat",
   "session.searchUnavailable": "A keresés nem érhető el",
   "session.selectConversation": "Válassz egy beszélgetést a kezdéshez",

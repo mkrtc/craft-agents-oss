@@ -316,7 +316,9 @@ export function registerSessionsHandlers(server: RpcServer, deps: HandlerDeps): 
       case 'setProjectId':
         return sessionManager.setSessionProjectId(sessionId, command.projectId)
       case 'setCustomGroupId':
-        return sessionManager.setSessionCustomGroupId(sessionId, command.customGroupId)
+        return sessionManager.setSessionCustomGroupId(sessionId, command.customGroupId, command.customGroupOrder)
+      case 'reorderCustomGroupSessions':
+        return sessionManager.reorderCustomGroupSessions(sessionId, command.customGroupId, command.sessionIds)
       case 'setMemorySelection':
         return sessionManager.setSessionMemorySelection(sessionId, {
           enabledMemorySpaceRefs: command.enabledMemorySpaceRefs,

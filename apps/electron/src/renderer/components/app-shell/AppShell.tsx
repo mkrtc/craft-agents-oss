@@ -1060,6 +1060,17 @@ function AppShellContent({
     }
   }, [t])
 
+  const handleReorderSessionsInCustomGroup = useCallback(async (customGroupId: string, sessionIds: string[]) => {
+    const anchorSessionId = sessionIds[0]
+    if (!anchorSessionId || sessionIds.length <= 1) return
+    try {
+      await window.electronAPI.sessionCommand(anchorSessionId, { type: 'reorderCustomGroupSessions', customGroupId, sessionIds })
+    } catch (err) {
+      console.error('[AppShell] Failed to reorder sessions in custom group:', err)
+      toast.error(t('toast.failedToUpdateSessionGroup'))
+    }
+  }, [t])
+
   const confirmSessionGroupDialog = useCallback(async () => {
     const name = sessionGroupDialog.name.trim()
     if (!name) return
@@ -3737,6 +3748,8 @@ function AppShellContent({
                   onSetProjectId={handleSessionProjectChange}
                   sessionGroups={sessionGroups}
                   onSetCustomGroupId={handleSessionCustomGroupChange}
+                  onReorderSessionGroups={saveSessionGroups}
+                  onReorderSessionsInCustomGroup={handleReorderSessionsInCustomGroup}
                   onCreateSessionGroup={handleCreateSessionGroup}
                   onEditSessionGroup={handleEditSessionGroup}
                   groupingMode={chatGroupingMode}

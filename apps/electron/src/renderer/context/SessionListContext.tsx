@@ -27,6 +27,8 @@ export interface SessionListContextValue {
   sessionGroups?: SessionGroupConfig[]
   /** Set or clear the custom chat group binding for a session (null = ungrouped) */
   onSetCustomGroupId?: (sessionId: string, customGroupId: string | null) => void
+  /** Reorder sessions within one custom chat group. */
+  onReorderSessionsInCustomGroup?: (customGroupId: string, sessionIds: string[]) => void
   /** Open group creation flow for a session and assign it after creation. */
   onCreateSessionGroup?: (sessionId: string) => void
   /** Open group edit flow for an existing custom group. */

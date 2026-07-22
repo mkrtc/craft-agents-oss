@@ -83,6 +83,8 @@ export interface SessionMeta {
   projectId?: string
   /** Workspace-scoped custom chat group id (undefined = ungrouped) */
   customGroupId?: string
+  /** Manual order within the workspace-scoped custom chat group (undefined = recency fallback) */
+  customGroupOrder?: number
   /** Parent session id — when set, this session is a subtask of the parent (undefined = top-level task) */
   parentSessionId?: string
   /** Kanban board column id ('todo' | 'in-progress' | 'done'); independent of sessionStatus */

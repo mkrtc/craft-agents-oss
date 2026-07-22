@@ -909,6 +909,8 @@
   "session.pinnedGroup": "Pinned ({{count}})",
   "session.readGroup": "已读 ({{count}})",
   "session.renameSession": "重命名会话",
+  "session.reorderGroup": "重新排序分组",
+  "session.reorderSession": "重新排序会话",
   "session.results": "{{count}} 个结果",
   "session.searchUnavailable": "搜索不可用",
   "session.selectConversation": "选择一个对话开始",

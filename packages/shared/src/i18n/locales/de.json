@@ -909,6 +909,8 @@
   "session.pinnedGroup": "Pinned ({{count}})",
   "session.readGroup": "Gelesen ({{count}})",
   "session.renameSession": "Sitzung umbenennen",
+  "session.reorderGroup": "Gruppe neu anordnen",
+  "session.reorderSession": "Session neu anordnen",
   "session.results": "{{count}} Ergebnisse",
   "session.searchUnavailable": "Suche nicht verfügbar",
   "session.selectConversation": "Wähle eine Unterhaltung aus, um loszulegen",
