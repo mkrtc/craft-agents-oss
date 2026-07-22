@@ -38,6 +38,25 @@ import type { RpcClient } from '@craft-agent/server-core/transport'
 import type { RemoteServerConfig } from '@craft-agent/core/types'
 import type { ElectronAPI } from '../shared/types'
 
+function formatUnknownError(error: unknown, fallback = 'Unknown error'): string {
+  if (error instanceof Error) return error.message || fallback
+  if (typeof error === 'string') return error || fallback
+  if (error && typeof error === 'object') {
+    const record = error as Record<string, unknown>
+    for (const key of ['message', 'error', 'description', 'detail']) {
+      const value = record[key]
+      if (typeof value === 'string' && value.trim()) return value
+    }
+    try {
+      const json = JSON.stringify(error)
+      if (json && json !== '{}') return json
+    } catch {
+      // Ignore JSON failures and use fallback.
+    }
+  }
+  return fallback
+}
+
 // ---------------------------------------------------------------------------
 // Client interface — common surface for both RoutedClient and WsRpcClient
 // ---------------------------------------------------------------------------
@@ -321,7 +340,7 @@ client.onConnectionStateChanged((state) => {
     }
     return {
       success: false,
-      error: err instanceof Error ? err.message : 'OAuth flow failed',
+      error: formatUnknownError(err, 'OAuth flow failed'),
     }
   } finally {
     callbackServer?.close()
@@ -346,7 +365,7 @@ client.onConnectionStateChanged((state) => {
   } catch (err) {
     return {
       success: false,
-      error: err instanceof Error ? err.message : 'Claude OAuth failed',
+      error: formatUnknownError(err, 'Claude OAuth failed'),
     }
   }
 }
@@ -396,14 +415,14 @@ client.onConnectionStateChanged((state) => {
 
     // 6. Send code to server for token exchange + credential storage
     const result = await client.invoke('chatgpt:completeOAuth', { flowId, code, state })
-    return { success: result.success, error: result.error }
+    return { success: result.success, error: result.error ? formatUnknownError(result.error, 'ChatGPT OAuth failed') : undefined }
   } catch (err) {
     if (state) {
       client.invoke('chatgpt:cancelOAuth', { state }).catch(() => {})
     }
     return {
       success: false,
-      error: err instanceof Error ? err.message : 'ChatGPT OAuth flow failed',
+      error: formatUnknownError(err, 'ChatGPT OAuth flow failed'),
     }
   } finally {
     callbackServer?.close()

@@ -647,16 +647,16 @@ export class PiAgent extends BaseAgent {
    * Returns a provider-aware credential object for the subprocess,
    * or null if no piAuthProvider is configured (falls back to legacy getApiKey).
    *
-   * OAuth tokens from Craft (Claude Max, ChatGPT Plus, Copilot) are passed as
-   * api_key type because they function as bearer tokens that the Pi SDK's provider
-   * modules use directly. The OAuth exchange happens on the Craft side; by the time
-   * it reaches Pi, it's just an access token.
+   * OAuth tokens from Craft are converted to the credential shape expected by the
+   * Pi SDK provider. Some OAuth-backed providers (notably openai-codex and
+   * github-copilot) must stay as OAuth credentials so ModelRegistry treats them as
+   * authenticated and can refresh/use provider-specific auth helpers.
    */
   private async getPiAuth(): Promise<{
     provider: string;
     credential:
       | { type: 'api_key'; key: string }
-      | { type: 'oauth'; access: string; refresh: string; expires: number }
+      | { type: 'oauth'; access: string; refresh: string; expires: number; idToken?: string }
       | { type: 'iam'; accessKeyId: string; secretAccessKey: string; region?: string; sessionToken?: string }
   } | null> {
     const piAuthProvider = getBackendRuntime(this.config).piAuthProvider;
@@ -685,6 +685,27 @@ export class PiAgent extends BaseAgent {
               },
             };
           }
+          // OpenAI Codex is registered in the Pi SDK as an OAuth-only provider.
+          // Passing the ChatGPT access token as an api_key makes ModelRegistry
+          // report "no configured auth" even though Craft has stored tokens.
+          if (piAuthProvider === 'openai-codex') {
+            if (!oauth.refreshToken || !oauth.expiresAt) {
+              this.debug('OpenAI Codex OAuth credential is missing refresh token or expiry');
+              return null;
+            }
+            this.debug(`Retrieved OpenAI Codex OAuth credential for Pi provider: ${piAuthProvider}`);
+            return {
+              provider: piAuthProvider,
+              credential: {
+                type: 'oauth',
+                access: oauth.accessToken,
+                refresh: oauth.refreshToken,
+                expires: oauth.expiresAt,
+                ...(oauth.idToken ? { idToken: oauth.idToken } : {}),
+              },
+            };
+          }
+
           // Other OAuth providers: pass as api_key (bearer token)
           this.debug(`Retrieved OAuth access token for Pi provider: ${piAuthProvider}`);
           return {

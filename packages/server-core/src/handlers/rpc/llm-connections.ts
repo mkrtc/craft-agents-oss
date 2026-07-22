@@ -18,6 +18,25 @@ import { CLIENT_OPEN_EXTERNAL } from '@craft-agent/server-core/transport'
 // Local OAuth state
 let copilotOAuthAbort: AbortController | null = null
 
+function formatUnknownError(error: unknown, fallback = 'Unknown error'): string {
+  if (error instanceof Error) return error.message || fallback
+  if (typeof error === 'string') return error || fallback
+  if (error && typeof error === 'object') {
+    const record = error as Record<string, unknown>
+    for (const key of ['message', 'error', 'description', 'detail']) {
+      const value = record[key]
+      if (typeof value === 'string' && value.trim()) return value
+    }
+    try {
+      const json = JSON.stringify(error)
+      if (json && json !== '{}') return json
+    } catch {
+      // Fall through to fallback.
+    }
+  }
+  return fallback
+}
+
 export const HANDLED_CHANNELS = [
   RPC_CHANNELS.llmConnections.LIST,
   RPC_CHANNELS.llmConnections.LIST_WITH_STATUS,
@@ -291,7 +310,7 @@ export function registerLlmConnectionsHandlers(server: RpcServer, deps: HandlerD
         try {
           await getModelRefreshService().refreshNow(setup.slug)
         } catch (err) {
-          deps.platform.logger?.warn(`Model refresh after setup failed for ${setup.slug}: ${err instanceof Error ? err.message : err}`)
+          deps.platform.logger?.warn(`Model refresh after setup failed for ${setup.slug}: ${formatUnknownError(err)}`)
         }
       }
 
@@ -305,7 +324,7 @@ export function registerLlmConnectionsHandlers(server: RpcServer, deps: HandlerD
 
       return { success: true }
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Unknown error'
+      const message = formatUnknownError(error)
       deps.platform.logger?.error('Failed to setup LLM connection:', message)
       return { success: false, error: message }
     }
@@ -355,7 +374,7 @@ export function registerLlmConnectionsHandlers(server: RpcServer, deps: HandlerD
       return { success: true }
     } catch (error) {
       const elapsed = Date.now() - startedAt
-      const msg = error instanceof Error ? error.message : String(error)
+      const msg = formatUnknownError(error)
       deps.platform.logger?.info(`[testLlmConnectionSetup] Elapsed: ${elapsed}ms, threw: ${msg.slice(0, 1000)}`)
       return { success: false, error: parseTestConnectionError(msg) }
     }
@@ -468,7 +487,7 @@ export function registerLlmConnectionsHandlers(server: RpcServer, deps: HandlerD
       // the correctness backstop if the detached push fails.
       sessionManager.refreshConnectionRuntime(connection.slug).catch(error => {
         deps.platform.logger?.warn(
-          `Detached runtime push failed for ${connection.slug}: ${error instanceof Error ? error.message : error}`,
+          `Detached runtime push failed for ${connection.slug}: ${formatUnknownError(error)}`,
         )
       })
       // Reinitialize auth if the saved connection is the current default
@@ -480,7 +499,7 @@ export function registerLlmConnectionsHandlers(server: RpcServer, deps: HandlerD
       return { success: true }
     } catch (error) {
       deps.platform.logger?.error('Failed to save LLM connection:', error)
-      return { success: false, error: error instanceof Error ? error.message : 'Unknown error' }
+      return { success: false, error: formatUnknownError(error) }
     }
   })
 
@@ -504,7 +523,7 @@ export function registerLlmConnectionsHandlers(server: RpcServer, deps: HandlerD
       return { success }
     } catch (error) {
       deps.platform.logger?.error('Failed to delete LLM connection:', error)
-      return { success: false, error: error instanceof Error ? error.message : 'Unknown error' }
+      return { success: false, error: formatUnknownError(error) }
     }
   })
 
@@ -524,14 +543,14 @@ export function registerLlmConnectionsHandlers(server: RpcServer, deps: HandlerD
 
       if (result.shouldRefreshModels) {
         getModelRefreshService().refreshNow(slug).catch(err => {
-          deps.platform.logger?.warn(`Model refresh failed during validation: ${err instanceof Error ? err.message : err}`)
+          deps.platform.logger?.warn(`Model refresh failed during validation: ${formatUnknownError(err)}`)
         })
       }
 
       deps.platform.logger?.info(`LLM connection validated: ${slug}`)
       return { success: true }
     } catch (error) {
-      const msg = error instanceof Error ? error.message : String(error)
+      const msg = formatUnknownError(error)
       deps.platform.logger?.info(`[LLM_CONNECTION_TEST] Error for ${slug}: ${msg.slice(0, 500)}`)
       const { parseValidationError } = await import('@craft-agent/shared/config')
       return { success: false, error: parseValidationError(msg) }
@@ -550,7 +569,7 @@ export function registerLlmConnectionsHandlers(server: RpcServer, deps: HandlerD
       return { success, error: success ? undefined : 'Connection not found' }
     } catch (error) {
       deps.platform.logger?.error('Failed to set default LLM connection:', error)
-      return { success: false, error: error instanceof Error ? error.message : 'Unknown error' }
+      return { success: false, error: formatUnknownError(error) }
     }
   })
 
@@ -590,7 +609,7 @@ export function registerLlmConnectionsHandlers(server: RpcServer, deps: HandlerD
       return { success: true }
     } catch (error) {
       deps.platform.logger?.error('Failed to set workspace default LLM connection:', error)
-      return { success: false, error: error instanceof Error ? error.message : 'Unknown error' }
+      return { success: false, error: formatUnknownError(error) }
     }
   })
 
@@ -605,7 +624,7 @@ export function registerLlmConnectionsHandlers(server: RpcServer, deps: HandlerD
       await getModelRefreshService().refreshNow(slug)
       return { success: true }
     } catch (error) {
-      const msg = error instanceof Error ? error.message : 'Unknown error'
+      const msg = formatUnknownError(error)
       deps.platform.logger?.error(`Failed to refresh models for ${slug}: ${msg}`)
       return { success: false, error: msg }
     }
@@ -696,10 +715,11 @@ export function registerLlmConnectionsHandlers(server: RpcServer, deps: HandlerD
       return { success: true }
     } catch (error) {
       pendingChatGptFlows.delete(state)
+      const message = formatUnknownError(error, 'Token exchange failed')
       deps.platform.logger?.error('[ChatGPT OAuth] Token exchange failed:', error)
       return {
         success: false,
-        error: error instanceof Error ? error.message : 'Token exchange failed',
+        error: message,
       }
     }
   })
@@ -820,7 +840,7 @@ export function registerLlmConnectionsHandlers(server: RpcServer, deps: HandlerD
       deps.platform.logger?.error('GitHub Copilot OAuth failed:', error)
       return {
         success: false,
-        error: error instanceof Error ? error.message : 'OAuth authentication failed',
+        error: formatUnknownError(error, 'OAuth authentication failed'),
       }
     }
   })

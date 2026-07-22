@@ -91,6 +91,25 @@ interface UseOnboardingReturn {
 }
 
 // Base slug for each setup method (used as template key in ipc.ts)
+function formatUnknownError(error: unknown, fallback: string): string {
+  if (error instanceof Error) return error.message || fallback
+  if (typeof error === 'string') return error || fallback
+  if (error && typeof error === 'object') {
+    const record = error as Record<string, unknown>
+    for (const key of ['message', 'error', 'description', 'detail']) {
+      const value = record[key]
+      if (typeof value === 'string' && value.trim()) return value
+    }
+    try {
+      const json = JSON.stringify(error)
+      if (json && json !== '{}') return json
+    } catch {
+      // Ignore JSON failures and use fallback.
+    }
+  }
+  return fallback
+}
+
 export const BASE_SLUG_FOR_METHOD: Record<ApiSetupMethod, string> = {
   anthropic_api_key: 'anthropic-api',
   claude_oauth: 'claude-max',
@@ -297,7 +316,7 @@ export function useOnboarding({
         setState(s => ({
           ...s,
           completionStatus: 'saving',
-          errorMessage: result.error || 'Failed to save configuration',
+          errorMessage: result.error ? formatUnknownError(result.error, 'Failed to save configuration') : 'Failed to save configuration',
         }))
         return false
       }
@@ -305,7 +324,7 @@ export function useOnboarding({
       console.error('[Onboarding] handleSaveConfig error:', error)
       setState(s => ({
         ...s,
-        errorMessage: error instanceof Error ? error.message : 'Failed to save configuration',
+        errorMessage: formatUnknownError(error, 'Failed to save configuration'),
       }))
       return false
     }
@@ -465,7 +484,7 @@ export function useOnboarding({
         setState(s => ({
           ...s,
           credentialStatus: 'error',
-          errorMessage: testResult.error || 'Connection test failed',
+          errorMessage: testResult.error ? formatUnknownError(testResult.error, 'Connection test failed') : 'Connection test failed',
         }))
         return
       }
@@ -493,7 +512,7 @@ export function useOnboarding({
       setState(s => ({
         ...s,
         credentialStatus: 'error',
-        errorMessage: error instanceof Error ? error.message : 'Validation failed',
+        errorMessage: formatUnknownError(error, 'Validation failed'),
       }))
     }
   }, [handleSaveConfig, state.apiSetupMethod])
@@ -564,7 +583,7 @@ export function useOnboarding({
           setState(s => ({
             ...s,
             credentialStatus: 'error',
-            errorMessage: result.error || 'ChatGPT authentication failed',
+            errorMessage: result.error ? formatUnknownError(result.error, 'ChatGPT authentication failed') : 'ChatGPT authentication failed',
           }))
         }
         return
@@ -590,7 +609,7 @@ export function useOnboarding({
             setState(s => ({
               ...s,
               credentialStatus: 'error',
-              errorMessage: result.error || 'GitHub authentication failed',
+              errorMessage: result.error ? formatUnknownError(result.error, 'GitHub authentication failed') : 'GitHub authentication failed',
             }))
           }
         } finally {
@@ -621,14 +640,14 @@ export function useOnboarding({
         setState(s => ({
           ...s,
           credentialStatus: 'error',
-          errorMessage: result.error || 'Failed to start OAuth',
+          errorMessage: result.error ? formatUnknownError(result.error, 'Failed to start OAuth') : 'Failed to start OAuth',
         }))
       }
     } catch (error) {
       setState(s => ({
         ...s,
         credentialStatus: 'error',
-        errorMessage: error instanceof Error ? error.message : 'OAuth failed',
+        errorMessage: formatUnknownError(error, 'OAuth failed'),
       }))
     }
   }, [state.apiSetupMethod, saveAndValidateConnection, editingSlug, existingSlugs])
@@ -688,14 +707,14 @@ export function useOnboarding({
         setState(s => ({
           ...s,
           credentialStatus: 'error',
-          errorMessage: result.error || 'Failed to exchange code',
+          errorMessage: result.error ? formatUnknownError(result.error, 'Failed to exchange code') : 'Failed to exchange code',
         }))
       }
     } catch (error) {
       setState(s => ({
         ...s,
         credentialStatus: 'error',
-        errorMessage: error instanceof Error ? error.message : 'Failed to exchange code',
+        errorMessage: formatUnknownError(error, 'Failed to exchange code'),
       }))
     }
   }, [saveAndValidateConnection, editingSlug, existingSlugs])
@@ -722,7 +741,7 @@ export function useOnboarding({
       setState(s => ({
         ...s,
         credentialStatus: 'error',
-        errorMessage: error instanceof Error ? error.message : 'Failed to save configuration',
+        errorMessage: formatUnknownError(error, 'Failed to save configuration'),
       }))
     }
   }, [handleSaveConfig])
@@ -752,7 +771,7 @@ export function useOnboarding({
     } else {
       setState(s => ({
         ...s,
-        errorMessage: result.error || 'Invalid path',
+        errorMessage: result.error ? formatUnknownError(result.error, 'Invalid path') : 'Invalid path',
       }))
     }
   }, [])

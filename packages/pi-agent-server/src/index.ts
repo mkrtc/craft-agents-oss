@@ -86,7 +86,7 @@ import { applySystemPromptOverride } from './system-prompt-override.ts';
 /** Credential union used in init and token_update messages */
 type PiCredential =
   | { type: 'api_key'; key: string }
-  | { type: 'oauth'; access: string; refresh: string; expires: number }
+  | { type: 'oauth'; access: string; refresh: string; expires: number; idToken?: string }
   | { type: 'iam'; accessKeyId: string; secretAccessKey: string; region?: string; sessionToken?: string };
 
 /** Custom endpoint protocol — determines which streaming adapter Pi SDK uses */
