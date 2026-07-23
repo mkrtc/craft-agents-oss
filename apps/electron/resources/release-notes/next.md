@@ -6,9 +6,6 @@ This file accumulates release notes for the next unreleased version. PRs that ad
 
 ## Improvements
 
-- **Reorderable chat groups** — Custom chat groups, and chats inside those groups, can now be manually reordered with dedicated drag handles while preserving global pinned chats separately.
-- **Editable chat groups** — Custom chat groups can now be renamed and recolored from the session group menu without changing which chats belong to them.
-
 ## Bug Fixes
 
 ## Breaking Changes
